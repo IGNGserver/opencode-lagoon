@@ -85,6 +85,29 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     preferences.edit().putString("taskRead:$id:$session", taskStates(id)[session]?.since?.toString() ?: "1").apply()
   }
 
+  fun sessionNotices(server: String, now: Long = System.currentTimeMillis()): List<SessionNotice> = synchronized(taskLock) {
+    runCatching { JSONArray(preferences.getString("sessionNotices:$server", "[]")).objects().map {
+      SessionNotice(it.str("id"), it.str("session"), it.optLong("time"), it.optBoolean("error"), it.optBoolean("viewed"))
+    }.pruned(now) }.getOrDefault(emptyList())
+  }
+  private fun writeNotices(server: String, notices: List<SessionNotice>) {
+    preferences.edit().putString("sessionNotices:$server", JSONArray().apply { notices.forEach {
+      put(JSONObject().put("id", it.id).put("session", it.sessionId).put("time", it.time).put("error", it.error).put("viewed", it.viewed))
+    } }.toString()).apply()
+  }
+  fun rememberNotice(server: String, notice: SessionNotice, now: Long = System.currentTimeMillis()): List<SessionNotice> = synchronized(taskLock) {
+    val current = sessionNotices(server, now)
+    val next = if (current.any { it.id == notice.id }) current else (current + notice).pruned(now)
+    writeNotices(server, next); next
+  }
+  fun viewNotices(server: String, session: String, ids: Set<String>): List<SessionNotice> = synchronized(taskLock) {
+    sessionNotices(server).viewObserved(session, ids).also { writeNotices(server, it) }
+  }
+  fun collapsedProjects(server: String): Set<String> = preferences.getStringSet("collapsedProjects:$server", emptySet()).orEmpty().toSet()
+  fun rememberCollapsedProjects(server: String, keys: Set<String>) {
+    preferences.edit().putStringSet("collapsedProjects:$server", keys.toSet()).apply()
+  }
+
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(id: String? = selectedId()): String? = id?.let { preferences.getString("location:$it:project", null)
     ?: preferences.getString("selectedProject", null).takeIf { selectedId() == id } }
@@ -134,6 +157,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     else secrets.edit().putString(key, encryptValue(text.take(100_000))).apply()
   }
   fun forgetSession(server: String, session: String) {
+    synchronized(taskLock) { writeNotices(server, sessionNotices(server).filterNot { it.sessionId == session }) }
     val editor = preferences.edit()
     listOf("preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").forEach { editor.remove("$it:$server:$session") }
     editor.apply()
@@ -211,7 +235,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
-    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id")
+    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedProjects:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
     editor.apply()

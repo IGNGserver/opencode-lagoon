@@ -271,7 +271,7 @@ class OpenCodeApi(
   private fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
   /** Percent-encodes each `/`-separated segment so the result can be passed to [url] unchanged. */
   private fun encodedPath(value: String): String = value.trim('/').split('/').joinToString("/") { segment(it) }
-  private fun locationQuery(directory: String): Map<String, String> = mapOf("location[directory]" to directory)
+  private fun locationQuery(directory: String): Map<String, String> = if (directory.isBlank()) emptyMap() else mapOf("location[directory]" to directory)
   fun detectedProtocol(): ServerProtocol = protocol
 
   private suspend fun ensureProtocol(): ServerProtocol {
@@ -362,6 +362,31 @@ class OpenCodeApi(
       }
       else -> ApiPage(emptyList())
     }
+  }
+  /** Home catalog: V2 is global (directory filters are exact); V1 queries each project/worktree. */
+  suspend fun rootSessionsPage(directory: String? = null, cursor: String? = null, size: Int = 100): ApiPage<Session> = withContext(Dispatchers.IO) {
+    when (ensureProtocol()) {
+      ServerProtocol.V1 -> {
+        val limit = (cursor?.toIntOrNull() ?: size).coerceAtMost(MAX_PAGE_ITEMS)
+        val items = arr("session", directory, mapOf("limit" to limit.toString(), "roots" to "true")).objects().map { it.toSession() }.sortedWith(sessionActivityOrder)
+        ApiPage(items.take(limit), (limit + size).toString().takeIf { items.size >= limit && limit < MAX_PAGE_ITEMS })
+      }
+      ServerProtocol.V2 -> {
+        val query = mutableMapOf("limit" to size.toString(), "parentID" to "null")
+        if (directory != null) query["directory"] = directory
+        if (cursor == null) query["order"] = "desc" else query["cursor"] = cursor
+        val page = obj("api/session", query = query)
+        ApiPage(dataArray(page).objects().map { it.toSession() }, page.obj("cursor").str("next").takeIf(String::isNotBlank))
+      }
+      else -> ApiPage(emptyList())
+    }
+  }
+  /** Bind the acknowledgement to the exact completed execution, never to wall-clock time. */
+  suspend fun viewSession(session: Session, idle: Long) {
+    if (idle <= 0) return
+    val endpoint = capabilities().sessionView ?: return
+    val path = endpoint.path.replace(Regex("\\{[^}]+\\}"), segment(session.id))
+    request(endpoint.method, path, body = JSONObject().put("idle", idle))
   }
   suspend fun messagesPage(id: String, directory: String, cursor: String? = null, size: Int = 100): ApiPage<Message> = withContext(Dispatchers.IO) {
     when (ensureProtocol()) {
@@ -726,6 +751,7 @@ internal fun String.toServerEvent(sseId: String): ServerEvent {
     "question.v2.rejected" -> "question.rejected"
     else -> type
   }
+  if (!properties.has("timestamp") && json.optLong("created") > 0) properties.put("timestamp", json.optLong("created"))
   val directory = json.obj("location").str("directory").ifBlank { json.str("directory") }
   return ServerEvent(json.str("id").ifBlank { sseId }, directory, normalizedType, properties)
 }

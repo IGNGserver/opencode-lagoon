@@ -116,10 +116,11 @@ class OfflineCache internal constructor(
   }
   fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>, complete: Boolean = true) {
     write("catalog:$serverId") {
-      JSONObject().put("complete", complete && sessions.size <= 300).put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
+      JSONObject().put("complete", complete && sessions.size <= 300).put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name).put("sandboxes", JSONArray(it.sandboxes))) } })
         .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
           .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)
           .put("projectId", it.projectId).put("created", it.created).put("archived", it.archived).put("agent", it.agent)
+          .put("viewed", it.viewed).put("idle", it.idle).put("outcome", it.outcome)
           .put("model", it.model?.let { model -> JSONObject().put("providerID", model.providerId).put("modelID", model.modelId).put("name", model.label) })) } })
         .toString()
     }
@@ -128,9 +129,9 @@ class OfflineCache internal constructor(
     val raw = read("catalog:$serverId") ?: return null
     return try {
     val data = JSONObject(raw)
-    data.arr("projects").objects().map { Project(it.str("id"), it.str("directory"), it.str("name")) } to
+    data.arr("projects").objects().map { it.toProject() } to
       data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }, it.str("projectId").ifBlank { null }, it.optLong("created"), it.optBoolean("archived"),
-        it.str("agent").ifBlank { null }, it.obj("model").toModelChoice()) }
+        it.str("agent").ifBlank { null }, it.obj("model").toModelChoice(), it.optLong("viewed"), it.optLong("idle"), it.str("outcome").ifBlank { null }) }
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "catalog 解析失败", error)
     null

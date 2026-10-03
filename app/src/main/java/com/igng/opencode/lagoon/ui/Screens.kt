@@ -52,7 +52,7 @@ import java.util.UUID
 
 /* ------------------------------------------------------------------ *
  * 信息架构主线：Server → Project/Directory → Session → Conversation
- * 「会话」是默认首页：需要处理 / 正在运行置顶，其余按 Project/Directory 组织。
+ * 「会话」是默认首页：按项目折叠分组，组内严格按服务端修改时间排序。
  * 状态附着在 Session 上，不再保留工作台 Dashboard、焦点看板与指标大数字。
  * ------------------------------------------------------------------ */
 
@@ -75,7 +75,7 @@ private class DateFormatterCache {
 private val sessionDateFormatters = DateFormatterCache()
 
 /** 相对时间：会话列表需要“刚刚 / 12 分钟前”这类高信息密度时间。 */
-private fun formatRelative(timestamp: Long, now: Long = System.currentTimeMillis()): String {
+internal fun formatRelative(timestamp: Long, now: Long = System.currentTimeMillis()): String {
   if (timestamp <= 0) return ""
   val diff = now - timestamp
   val minute = 60_000L
@@ -103,57 +103,6 @@ private fun formatElapsed(since: Long, now: Long = System.currentTimeMillis()): 
   }
 }
 
-@Composable
-fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen: (String) -> Unit, onServers: () -> Unit, onNewSession: () -> Unit, scrollBehavior: ScrollBehavior? = null) {
-  var query by rememberSaveable(state.serverId, state.projectId) { mutableStateOf("") }
-  var filter by rememberSaveable(state.serverId, state.projectId) { mutableStateOf(0) }
-  val list = rememberLazyListState()
-  val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
-  val roots = state.sessions.filter { it.parentId == null && (state.projectId == null || resolveSessionProject(it, state.projects)?.id == state.projectId) }
-  val shown = roots.filter { session ->
-    val content = state.previews[session.id]?.content ?: SessionContent.UNKNOWN
-    val draft = session.id in state.draftSessions
-    val category = when (filter) {
-      1 -> content == SessionContent.CONTENT && !session.archived
-      2 -> draft && !session.archived
-      3 -> content == SessionContent.EMPTY && !draft && !session.archived
-      4 -> session.archived
-      else -> !session.archived && (content != SessionContent.EMPTY || draft || state.rootTasks[session.id]?.active == true)
-    }
-    category && (query.isBlank() || state.title(session).contains(query, true) || session.directory.contains(query, true))
-  }.sortedWith(compareByDescending<Session> { state.rootTasks[it.id]?.phase in TaskState.WAITING_PHASES }
-    .thenByDescending { state.rootTasks[it.id]?.active == true }.thenByDescending { it.updated })
-  LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    if (!state.streamConnected || state.degraded || state.cached) item {
-      Text(when { state.cached && state.connected -> "会话缓存 · 部分数据待同步"
-        state.cached -> "离线缓存${if (state.catalogComplete) "" else " · 仅保留最近会话"}"
-        state.degraded -> "部分数据未同步，保留上次结果"; state.connected -> "可连接服务器 · 实时同步恢复中"; else -> "正在连接服务器" },
-        color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1)
-    }
-    item { TextField(query, { query = it }, label = "搜索当前项目会话", useLabelAsPlaceholder = true, modifier = Modifier.fillMaxWidth()) }
-    item {
-      Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        listOf("常规", "有内容", "草稿", "空会话", "已归档").forEachIndexed { index, name -> SelectChip(name, filter == index) { filter = index } }
-      }
-    }
-    items(shown, key = { it.id }) { session ->
-      val task = state.rootTasks[session.id]
-      val preview = state.previews[session.id]
-      MiuixSessionRow(session.copy(title = state.title(session)), task,
-        listOfNotNull(preview?.text?.takeIf(String::isNotBlank), "草稿未发送".takeIf { session.id in state.draftSessions },
-          "内容待确认".takeIf { preview?.content in setOf(null, SessionContent.UNKNOWN) },
-          "${state.parents.count { it.value == session.id }} 个子任务".takeIf { state.parents.values.any { it == session.id } }).joinToString(" · "),
-        { onOpen(session.id) }, task?.phase in TaskState.WAITING_PHASES,
-        if (task?.active == true) formatElapsed(task.since, now) else formatRelative(session.updated, now))
-    }
-    if (shown.isEmpty()) item {
-      if (state.loading) MiuixEmptyStateCard("正在读取会话", "加载完成后会显示当前项目的主会话。")
-      else MiuixEmptyActionCard(if (state.connected) "暂无符合条件的会话" else "连接 OpenCode", "切换筛选或项目，也可以创建第一项任务。",
-        if (state.connected) "新建会话" else "添加服务器", if (state.connected) onNewSession else onServers)
-    }
-    if (state.sessionCursors.isNotEmpty()) item { TextButton(text = if (state.pending("sessions-more")) "正在加载…" else "加载更多会话", enabled = !state.pending("sessions-more"), onClick = { controller.loadMoreSessions() }, modifier = Modifier.fillMaxWidth()) }
-  }
-}
 
 /** The state itself is the pill (“运行中 / 等待授权 …”); the meta line only locates the session. */
 private fun buildMeta(state: LagoonState, session: Session, includeServer: Boolean = false): String =

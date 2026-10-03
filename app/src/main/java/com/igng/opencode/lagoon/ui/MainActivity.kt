@@ -152,7 +152,6 @@ class MainActivity : ComponentActivity() {
         } finally { gestureActive = false }
       }
       OpenCodeMiuixTheme(dark) {
-        val homeScroll = MiuixScrollBehavior(rememberTopAppBarState())
         Scaffold(
           modifier = Modifier.imePadding(),
           contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -180,18 +179,13 @@ class MainActivity : ComponentActivity() {
                 .background(MiuixTheme.colorScheme.background)) {
                 if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
                   ChatScreen(displayed, controller, onBack = { backDirection = true; goBack() }, onOpenChild = { backDirection = false; openSession(it, true) }, onModal = { if (active) chatModal = it }, interactive = active)
-                } else holder.SaveableStateProvider("root:${state.serverId}:${state.projectId}:${target.tab}") {
-                  Column(Modifier.fillMaxSize()) {
+                } else holder.SaveableStateProvider("root:${state.serverId}:${target.tab}") {
+                  Column(Modifier.fillMaxSize().then(if (target.tab == RootTab.SESSIONS)
+                    Modifier.windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)) else Modifier)) {
                     when (target.tab) {
-                      RootTab.SESSIONS -> SmallTopAppBar(title = "会话", navigationIcon = {
-                        Text(state.server?.name ?: "选择服务器", modifier = Modifier.heightIn(min = 48.dp).clickable { showingServersSheet = true }.padding(12.dp), maxLines = 1)
-                      }, actions = { IconButton(onClick = controller::reload) { Icon(MiuixIcons.Refresh, "刷新") }; IconButton(onClick = { showingNewSession = true }) { Icon(MiuixIcons.Add, "新建会话") } })
+                      RootTab.SESSIONS -> Unit
                       RootTab.ACTIVITY -> SmallTopAppBar(title = "活动", actions = { IconButton(onClick = controller::reload) { Icon(MiuixIcons.Refresh, "刷新") } })
                       RootTab.SETTINGS -> SmallTopAppBar(title = "设置")
-                    }
-                    if (target.tab == RootTab.SESSIONS) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { showingProjects = true }.padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                      Icon(MiuixIcons.Folder, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp))
-                      Text(state.project?.name ?: "选择项目 / 目录", modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Text("切换", color = MiuixTheme.colorScheme.primary)
                     }
                     Row(Modifier.weight(1f).fillMaxWidth()) {
                       if (wide) NavigationRail {
@@ -200,7 +194,7 @@ class MainActivity : ComponentActivity() {
                       }
                       Box(Modifier.weight(1f).fillMaxHeight()) {
                       when (target.tab) {
-                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { backDirection = false; openSession(it) }, { showingServersSheet = true }, { showingNewSession = true }, homeScroll)
+                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { backDirection = false; openSession(it) }, { showingServersSheet = true }, { showingNewSession = true }, { showingProjects = true })
                         RootTab.ACTIVITY -> ActivityScreen(state, controller) { backDirection = false; openSession(it) }
                         RootTab.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
                           if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)

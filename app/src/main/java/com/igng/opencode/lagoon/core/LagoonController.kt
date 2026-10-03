@@ -59,6 +59,7 @@ data class LagoonState(
   val catalogComplete: Boolean = true, val loadedOlderMessages: Boolean = false,
   /** 已被用户查看过、不再计入“未读已完成/失败”的会话 id（本会话内有效）。 */
   val acknowledged: Set<String> = emptySet(),
+  val notices: List<SessionNotice> = emptyList(), val collapsedProjects: Set<String> = emptySet(),
   /** 全服务器范围的任务计数，由 [tasks] 与 [acknowledged] 派生，供灵动岛与系统通知复用。 */
   val summary: TaskSummary = TaskSummary.EMPTY,
   /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
@@ -70,9 +71,12 @@ data class LagoonState(
   val executionDirectory: String? get() = session?.directory ?: project?.directory
   fun pending(action: String): Boolean = pendingOperations.contains(operationKey(serverId, sessionId, projectId, action))
   fun resource(name: String): ResourceStatus = resources[name] ?: ResourceStatus()
-  fun title(session: Session): String = session.displayTitle(previews[session.id]?.text.orEmpty())
+  fun title(session: Session): String = session.displayTitle()
   val parents: Map<String, String> get() = knownParents + sessions.mapNotNull { it.parentId?.let { parent -> it.id to parent } }.toMap()
   val rootTasks: Map<String, TaskState> get() = TaskSummary.aggregate(tasks, parents)
+  val activeRootTasks: Map<String, TaskState> get() = TaskSummary.aggregate(tasks.filterValues { it.active }, parents)
+  fun sessionStatus(session: Session, active: Map<String, TaskState> = activeRootTasks): SessionStatus =
+    session.status(active[session.id], tasks[session.id], notices.any { it.sessionId == session.id && !it.viewed })
 }
 
 class LagoonController private constructor(private val appContext: Context) {
@@ -80,7 +84,8 @@ class LagoonController private constructor(private val appContext: Context) {
     private val CATALOG_REFRESH_EVENTS = setOf(
       "session.created", "session.updated", "session.deleted", "session.idle", "session.error",
       "permission.asked", "question.asked", "permission.replied", "permission.rejected",
-      "question.replied", "question.rejected"
+      "question.replied", "question.rejected", "session.renamed", "session.archived",
+      "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.viewed", "project.updated", "form.created", "form.replied", "form.cancelled"
     )
     private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED)
     @Volatile private var instance: LagoonController? = null
@@ -124,7 +129,6 @@ class LagoonController private constructor(private val appContext: Context) {
   private var lastEventId = ""
   private val sendMutex = Mutex()
   private val referenceMutex = Mutex()
-  private var previewHydration: Job? = null
   private var searchSequence = 0L
   private var fileSequence = 0L
   private var selectionRevision = 0L
@@ -136,6 +140,8 @@ class LagoonController private constructor(private val appContext: Context) {
   private val seenEvents = linkedSetOf<String>()
   private val eventTimestamps = mutableMapOf<String, Long>()
   private val observedTerminal = mutableMapOf<String, Long>()
+  private val observedNotices = mutableMapOf<String, Set<String>>()
+  private val observedIdle = mutableMapOf<String, Long>()
   private val draftWrites = mutableMapOf<String, Job>()
 
   init {
@@ -206,13 +212,13 @@ class LagoonController private constructor(private val appContext: Context) {
     api = OpenCodeApi(profile, store.credentials(id))
     val rememberedProject = store.selectedProject(id)
     val rememberedSession = store.selectedSession(id)
-    seenEvents.clear(); eventTimestamps.clear(); observedTerminal.clear(); visibleConversation = null
+    seenEvents.clear(); eventTimestamps.clear(); observedTerminal.clear(); observedNotices.clear(); observedIdle.clear(); visibleConversation = null
     val configuration = rememberedSession?.let { store.configuration(id, it) } ?: SessionConfiguration()
     store.select(id, rememberedProject, rememberedSession)
     mutable.update { LagoonState(profiles = store.profiles(), serverId = id, loading = true, projectId = rememberedProject, sessionId = rememberedSession,
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
-      tasks = store.taskStates(id), knownParents = store.taskParents(id), acknowledged = store.acknowledgedTasks(id),
+      tasks = store.taskStates(id), knownParents = store.taskParents(id), acknowledged = store.acknowledgedTasks(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     scope.launch {
       try {
@@ -275,41 +281,36 @@ class LagoonController private constructor(private val appContext: Context) {
     val serverId = state.value.serverId ?: return
     val discovered = if (controlOnly && state.value.projects.isNotEmpty()) state.value.projects else client.projects()
     val known = store.knownDirectories(serverId).map { directory ->
-      state.value.projects.firstOrNull { normalizedDirectory(it.directory) == normalizedDirectory(directory) }
-        ?: Project("directory:$directory", directory, directory.substringAfterLast('/').ifBlank { directory })
+      discovered.firstOrNull { project -> project.directories.any { normalizedDirectory(it) == normalizedDirectory(directory) } }
+        ?: Project("directory:$directory", directory, directory.replace('\\', '/').substringAfterLast('/').ifBlank { directory })
     }
-    val projects = (discovered + known).distinctBy { normalizedDirectory(it.directory) }
-    // Sessions, statuses, permissions and questions are independent per project; fetch them in
-    // parallel so a multi-project server resolves in roughly one round trip instead of 4*N.
-    //
-    // Failures are tracked per resource rather than converted to an empty result: a failed status,
-    // permission or question read must not be mistaken for an authoritative "nothing to see", which
-    // used to turn a running task into COMPLETED and silently clear pending approvals (A05).
+    val projects = (discovered + known).distinctBy { it.id }
+    val directories = projects.flatMap { it.directories }.distinctBy(::normalizedDirectory)
+    // Native V2's directory parameter is exact, not a subtree/project query. Its home list and
+    // control endpoints must be global; legacy V1 reads each known execution directory.
+    val scopes = if (client.detectedProtocol() == ServerProtocol.V2) listOf("") else directories.ifEmpty { listOf("") }
+    fun stale(directory: String, failures: Set<String>) = "" in failures || failures.any { normalizedDirectory(it) == normalizedDirectory(directory) }
     val sessionResults = coroutineScope {
-      projects.map { project -> async { project to attempt {
-        if (controlOnly) state.value.sessions.filter { resolveSessionProject(it, projects)?.id == project.id }
-        else client.sessionsPage(project.directory).let { page ->
-          if (token == generation) mutable.update { it.copy(sessionCursors = if (page.next == null) it.sessionCursors - project.directory else it.sessionCursors + (project.directory to page.next)) }
-          page.items
-        }
+      scopes.map { directory -> async { directory to attempt {
+        if (controlOnly) ApiPage(state.value.sessions.filter { directory.isBlank() || normalizedDirectory(it.directory) == normalizedDirectory(directory) }, state.value.sessionCursors[directory])
+        else client.rootSessionsPage(directory.takeIf(String::isNotBlank))
       } } }.awaitAll()
     }
-    if (sessionResults.isNotEmpty() && sessionResults.all { it.second.isFailure }) throw sessionResults.first().second.exceptionOrNull()!!
-    val failedSessionDirs = sessionResults.filter { it.second.isFailure }.map { it.first.directory }.toSet()
-    val sessions = sessionResults.flatMap { it.second.getOrDefault(emptyList()) }.distinctBy { it.id }.sortedByDescending { it.updated }
-    val statusResults = coroutineScope {
-      projects.map { project -> async { project.directory to attempt { client.status(project.directory) } } }.awaitAll()
+    if (sessionResults.all { it.second.isFailure }) throw sessionResults.first().second.exceptionOrNull()!!
+    val failedSessionDirs = sessionResults.filter { it.second.isFailure }.map { it.first }.toSet()
+    val nextCursors = sessionResults.fold(if (controlOnly) state.value.sessionCursors else emptyMap()) { cursors, (directory, result) ->
+      result.getOrNull()?.let { page -> if (page.next == null) cursors - directory else cursors + (directory to page.next) }
+        ?: (cursors + state.value.sessionCursors.filterKeys { it == directory })
     }
+    val sessions = sessionResults.flatMap { it.second.getOrNull()?.items.orEmpty() }.distinctBy { it.id }.sortedWith(sessionActivityOrder)
+    // Failures stay distinct from successful empty responses: preserve last-known approvals/tasks.
+    val statusResults = coroutineScope { scopes.map { directory -> async { directory to attempt { client.status(directory) } } }.awaitAll() }
     val failedStatusDirs = statusResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val statuses = statusResults.mapNotNull { it.second.getOrNull() }.flatMap { it.entries }.associate { it.key to it.value }
-    val permissionResults = coroutineScope {
-      projects.map { project -> async { project.directory to attempt { client.permissions(project.directory) } } }.awaitAll()
-    }
+    val permissionResults = coroutineScope { scopes.map { directory -> async { directory to attempt { client.permissions(directory) } } }.awaitAll() }
     val failedPermissionDirs = permissionResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val permissions = permissionResults.mapNotNull { it.second.getOrNull() }.flatten().distinctBy { it.id }
-    val questionResults = coroutineScope {
-      projects.map { project -> async { project.directory to attempt { client.questions(project.directory) } } }.awaitAll()
-    }
+    val questionResults = coroutineScope { scopes.map { directory -> async { directory to attempt { client.questions(directory) } } }.awaitAll() }
     val failedQuestionDirs = questionResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val questions = questionResults.mapNotNull { it.second.getOrNull() }.flatten().distinctBy { it.id }
     if (token != generation || requestSequence != catalogSequence) return
@@ -319,9 +320,22 @@ class LagoonController private constructor(private val appContext: Context) {
     missingIds.take(100).chunked(4).forEach { batch ->
       extraSessions += coroutineScope { batch.map { id -> async {
         val directory = permissions.firstOrNull { it.sessionId == id }?.directory ?: questions.firstOrNull { it.sessionId == id }?.directory
-        attempt { findSession(client, id, listOfNotNull(directory) + projects.map { it.directory }) }.getOrNull()
+        attempt { findSession(client, id, listOfNotNull(directory) + directories) }.getOrNull()
       } }.awaitAll().filterNotNull() }
       if (token != generation || requestSequence != catalogSequence) return
+    }
+    // An active child may refer to a root outside the catalog page. Fetch the ancestry so both
+    // pending requests and running indicators roll up to that root instead of leaking child rows.
+    val identities = (state.value.sessions + sessions + extraSessions).associateBy { it.id }.toMutableMap()
+    val attempted = mutableSetOf<String>()
+    repeat(32) {
+      val parents = identities.values.mapNotNull { it.parentId }.filter { it !in identities && attempted.add(it) }.distinct().take(100)
+      if (parents.isEmpty()) return@repeat
+      parents.chunked(4).forEach { batch ->
+        val fetched = coroutineScope { batch.map { id -> async { attempt { findSession(client, id, directories) }.getOrNull() } }.awaitAll().filterNotNull() }
+        fetched.forEach { identities[it.id] = it }; extraSessions += fetched
+        if (token != generation || requestSequence != catalogSequence) return
+      }
     }
     store.rememberParents(serverId, sessions + extraSessions)
     val degraded = failedSessionDirs + failedStatusDirs + failedPermissionDirs + failedQuestionDirs
@@ -331,28 +345,35 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { previous ->
       // A session whose project failed to report status keeps its previous phase; only an actual
       // authoritative status (or its absence from a successful response) may reduce it.
-      val nextSessions = (sessions + extraSessions + previous.sessions.filter { it.directory in failedSessionDirs || it.id in statuses || it.id == previous.sessionId }).distinctBy { it.id }.sortedByDescending { it.updated }
+      val nextSessions = (sessions + extraSessions + previous.sessions.filter {
+        stale(it.directory, failedSessionDirs) || it.id in statuses || it.id == previous.sessionId ||
+          sessionResults.any { (directory, result) -> result.getOrNull()?.next != null && (directory.isBlank() || normalizedDirectory(it.directory) == normalizedDirectory(directory)) }
+      }).distinctBy { it.id }.sortedWith(sessionActivityOrder)
       val degradedDirs = failedStatusDirs + failedSessionDirs
       val previousTasks = previous.tasks + storedTasks.filter { (id, task) -> previous.tasks[id]?.let { old -> task.since > old.since || (task.finishedAt ?: 0) > (old.finishedAt ?: 0) } ?: true }
       val states = previousTasks.filterValues { it.phase in TERMINAL_PHASES || it.phase == TaskPhase.ABORTED }.toMutableMap()
       nextSessions.forEach { session ->
-        val authoritative = session.directory !in degradedDirs
+        val authoritative = !stale(session.directory, degradedDirs)
         val next = if (!authoritative) previousTasks[session.id]
-        else TaskReducer.status(session.id, statuses[session.id] ?: "idle", previousTasks[session.id])
+        else {
+          val reduced = TaskReducer.status(session.id, statuses[session.id] ?: "idle", previousTasks[session.id])
+          val phase = when (session.outcome) { "failed" -> TaskPhase.FAILED; "interrupted" -> TaskPhase.ABORTED; "succeeded" -> TaskPhase.COMPLETED; else -> null }
+          if (phase != null && !reduced.active && previousTasks[session.id]?.active == true) reduced.copy(phase = phase, finishedAt = session.idle.takeIf { it > 0 } ?: reduced.finishedAt) else reduced
+        }
         if (next != null) states[session.id] = next
       }
       // A fully successful read is authoritative; otherwise merge fetched entries with the previous
       // ones for the failed directories so a pending approval is never silently dropped.
-      val keptPermissions = previous.permissions.filter { it.directory in failedPermissionDirs }
+      val keptPermissions = previous.permissions.filter { stale(it.directory, failedPermissionDirs) }
       val nextPermissions = (permissions + keptPermissions).distinctBy { it.id }
-      val keptQuestions = previous.questions.filter { it.directory in failedQuestionDirs }
+      val keptQuestions = previous.questions.filter { stale(it.directory, failedQuestionDirs) }
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
       nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       withSummary(previous.copy(version = version, protocol = client.detectedProtocol(), capabilities = capabilities, supportsSavedPermissions = capabilities.savedPermissions,
         draftSessions = store.draftSessionIds(serverId), previews = nextSessions.associate { session -> session.id to (previous.previews[session.id] ?: store.sessionPreview(serverId, session.id)) }, connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
         error = null, degraded = degraded.isNotEmpty(), staleDirectories = degraded,
-        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, acknowledged = store.acknowledgedTasks(serverId), catalogComplete = previous.sessionCursors.isEmpty(),
+        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, acknowledged = store.acknowledgedTasks(serverId), notices = store.sessionNotices(serverId), collapsedProjects = store.collapsedProjects(serverId), sessionCursors = nextCursors, catalogComplete = nextCursors.isEmpty(),
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject(serverId))?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
         sessionId = (previous.sessionId ?: store.selectedSession(serverId))?.takeIf { id -> nextSessions.any { it.id == id } }))
@@ -365,33 +386,16 @@ class LagoonController private constructor(private val appContext: Context) {
     }
     current.project?.let { project -> loadChoices(project.directory, token) }
     current.session?.let { loadSession(it, token = token) }
-    hydratePreviews(serverId, current.sessions, client, token)
-  }
-  private fun hydratePreviews(server: String, sessions: List<Session>, client: OpenCodeApi, token: Int) {
-    previewHydration?.cancel()
-    previewHydration = scope.launch {
-      sessions.filter { it.parentId == null && state.value.previews[it.id]?.content != SessionContent.CONTENT && state.value.previews[it.id]?.content != SessionContent.EMPTY }.chunked(4).forEach { batch ->
-        if (token != generation || state.value.serverId != server) return@launch
-        coroutineScope { batch.map { session -> async {
-          val page = attempt { client.messagesPage(session.id, session.directory, size = 20) }.getOrNull() ?: return@async
-          val preview = page.items.sessionPreview().let { if (page.next != null && it.content == SessionContent.EMPTY) SessionPreview() else it }
-          if (token == generation && state.value.serverId == server) {
-            kotlinx.coroutines.withContext(Dispatchers.IO) { store.rememberPreview(server, session.id, preview) }
-            mutable.update { it.copy(previews = it.previews + (session.id to preview)) }
-          }
-        } }.awaitAll() }
-      }
-    }
   }
   fun loadMoreSessions() = act("sessions-more") { op ->
     op.snapshot.sessionCursors.forEach { (directory, cursor) ->
-      val page = op.client.sessionsPage(directory, cursor)
+      val page = op.client.rootSessionsPage(directory.takeIf(String::isNotBlank), cursor)
       check(page.next != cursor) { "服务器返回了重复分页游标" }
       store.rememberParents(op.serverId, page.items)
-      op.commitConnection { it.copy(knownParents = store.taskParents(op.serverId), sessions = (it.sessions + page.items).distinctBy { s -> s.id }.sortedByDescending { s -> s.updated },
+      op.commitConnection { it.copy(knownParents = store.taskParents(op.serverId), sessions = (page.items + it.sessions).distinctBy { s -> s.id }.sortedWith(sessionActivityOrder),
         sessionCursors = if (page.next == null) it.sessionCursors - directory else it.sessionCursors + (directory to page.next),
         catalogComplete = page.next == null && it.sessionCursors.size <= 1) }
-      hydratePreviews(op.serverId, page.items, op.client, op.token)
+      if (op.connectionCurrent(this)) cache.saveCatalog(op.serverId, state.value.projects, state.value.sessions, complete = state.value.catalogComplete)
     }
   }
   fun loadOlderMessages() = withSession("messages-more") { op, client, session ->
@@ -463,7 +467,7 @@ class LagoonController private constructor(private val appContext: Context) {
   }
   private fun handleEvent(event: ServerEvent) {
     val props = event.properties
-    val sessionId = props.str("sessionID").ifBlank { props.obj("part").str("sessionID") }.ifBlank { props.obj("info").str("sessionID") }.ifBlank { props.obj("info").str("id").takeIf { event.type.startsWith("session.") }.orEmpty() }
+    val sessionId = props.str("sessionID").ifBlank { props.obj("form").str("sessionID") }.ifBlank { props.obj("part").str("sessionID") }.ifBlank { props.obj("info").str("sessionID") }.ifBlank { props.obj("info").str("id").ifBlank { props.str("id") }.takeIf { event.type.startsWith("session.") }.orEmpty() }
     val directory = event.directory.ifBlank { mutable.value.sessions.firstOrNull { it.id == sessionId }?.directory.orEmpty() }
     if (sessionId.isNotBlank()) {
       val before = mutable.value.tasks[sessionId]
@@ -480,7 +484,7 @@ class LagoonController private constructor(private val appContext: Context) {
       if (after != null) {
         val resolved = props.str("requestID").ifBlank { props.str("id") }
         val pendingPermission = mutable.value.permissions.any { it.sessionId == sessionId && !(event.type in setOf("permission.replied", "permission.rejected") && it.id == resolved) }
-        val pendingQuestion = mutable.value.questions.any { it.sessionId == sessionId && !(event.type in setOf("question.replied", "question.rejected") && it.id == resolved) }
+        val pendingQuestion = mutable.value.questions.any { it.sessionId == sessionId && !(event.type in setOf("question.replied", "question.rejected", "form.replied", "form.cancelled") && it.id == resolved) }
         val pending = pendingPermission || pendingQuestion
         if (pending && after.phase !in setOf(TaskPhase.FAILED, TaskPhase.ABORTED)) after = TaskState(sessionId,
           if (pendingPermission) TaskPhase.WAITING_PERMISSION else TaskPhase.WAITING_QUESTION,
@@ -511,8 +515,8 @@ class LagoonController private constructor(private val appContext: Context) {
         mutable.update { it.copy(permissions = (it.permissions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
-      "question.asked" -> {
-        val request = props.toQuestion(directory)
+      "question.asked", "form.created" -> {
+        val request = if (event.type == "form.created") props.obj("form").toForm(directory) else props.toQuestion(directory)
         mutable.update { it.copy(questions = (it.questions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
@@ -520,21 +524,34 @@ class LagoonController private constructor(private val appContext: Context) {
         val requestId = props.str("requestID").ifBlank { props.str("id") }
         mutable.update { it.copy(permissions = it.permissions.filterNot { old -> old.id == requestId }) }
       }
-      "question.replied", "question.rejected" -> {
+      "question.replied", "question.rejected", "form.replied", "form.cancelled" -> {
         val requestId = props.str("requestID").ifBlank { props.str("id") }
         mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
       }
     }
-    if (event.type == "session.created" || event.type == "session.updated") {
-      val info = props.obj("info")
+    if (event.type in setOf("session.created", "session.updated", "session.renamed", "session.archived")) {
+      val info = JSONObject((props.optJSONObject("info") ?: props).toString())
+      if (info.str("id").isBlank() && info.str("sessionID").isNotBlank()) info.put("id", info.str("sessionID"))
+      if (event.properties.optLong("timestamp") > 0) {
+        val time = info.obj("time")
+        if (!time.has("updated")) time.put("updated", event.properties.optLong("timestamp"))
+        if (event.type == "session.created" && !time.has("created")) time.put("created", event.properties.optLong("timestamp"))
+        info.put("time", time)
+      }
       if (info.str("id").isNotBlank()) {
         val previous = state.value.sessions.firstOrNull { it.id == info.str("id") }
         val parsed = info.toSession()
         val session = parsed.copy(directory = parsed.directory.ifBlank { previous?.directory.orEmpty() },
           title = if (info.has("title")) parsed.title else previous?.title.orEmpty(),
           parentId = if (info.has("parentID")) parsed.parentId else previous?.parentId,
-          projectId = parsed.projectId ?: previous?.projectId, updated = parsed.updated.takeIf { it > 0 } ?: previous?.updated ?: 0)
-        mutable.update { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { item -> item.id }.sortedByDescending { item -> item.updated }) }
+          projectId = parsed.projectId ?: previous?.projectId, updated = parsed.updated.takeIf { it > 0 } ?: previous?.updated ?: 0,
+          created = if (info.obj("time").has("created")) parsed.created else previous?.created ?: 0,
+          archived = if (event.type == "session.archived") true else if (info.obj("time").has("archived")) parsed.archived else previous?.archived ?: parsed.archived,
+          viewed = if (info.obj("time").has("viewed")) parsed.viewed else previous?.viewed ?: 0,
+          idle = if (info.obj("time").has("idle")) parsed.idle else previous?.idle ?: 0,
+          outcome = parsed.outcome ?: previous?.outcome,
+          agent = parsed.agent ?: previous?.agent, model = parsed.model ?: previous?.model)
+        mutable.update { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { item -> item.id }.sortedWith(sessionActivityOrder)) }
       }
     }
     if (event.type in setOf("session.next.agent.switched", "session.next.model.switched")) {
@@ -543,6 +560,12 @@ class LagoonController private constructor(private val appContext: Context) {
           agent = if (event.type.endsWith("agent.switched") && !current.agentChanged) props.str("agent").ifBlank { current.agent } else current.agent,
           model = if (event.type.endsWith("model.switched") && !current.modelChanged) props.obj("model").toModelChoice() ?: current.model else current.model)
       }
+    }
+    if (event.type in setOf("session.idle", "session.error", "session.execution.succeeded", "session.execution.failed")) recordResultNotice(event, sessionId)
+    if (event.type == "session.deleted") {
+      val deleted = sessionId
+      state.value.serverId?.let { store.forgetSession(it, deleted) }
+      mutable.update { it.copy(sessions = it.sessions.filterNot { session -> session.id == deleted }, notices = it.notices.filterNot { notice -> notice.sessionId == deleted }) }
     }
     if (event.type in CATALOG_REFRESH_EVENTS) {
       eventRefresh?.cancel()
@@ -556,6 +579,40 @@ class LagoonController private constructor(private val appContext: Context) {
         messageRefresh = scope.launch { delay(350); if (event.type.startsWith("message.") || event.type.startsWith("session.next.")) loadSession(session, ancillary = false, token = token) else loadAll(token, controlOnly = true) }
       }
     }
+  }
+
+  private fun recordResultNotice(event: ServerEvent, sessionId: String) {
+    if (sessionId.isBlank()) return
+    val current = state.value
+    val server = current.serverId ?: return
+    val token = generation
+    val known = current.sessions.firstOrNull { it.id == sessionId }
+    fun record(session: Session) {
+      if (generation != token || state.value.serverId != server) return
+      val notice = event.resultNotice(session) ?: return
+      val notices = store.rememberNotice(server, notice)
+      mutable.update { it.copy(notices = notices) }
+      // Fetch again after inserting the notice: a READY transcript from an earlier run cannot read it.
+      if (state.value.sessionId == session.id) scope.launch { loadSession(state.value.session ?: session, ancillary = false, token = token) }
+    }
+    if (known != null) record(known)
+    else scope.launch {
+      val client = api ?: return@launch
+      attempt { findSession(client, sessionId, current.projects.flatMap { it.directories }) }.getOrNull()?.let(::record)
+    }
+  }
+
+  fun toggleProjectGroup(key: String) {
+    val current = state.value; val server = current.serverId ?: return
+    val collapsed = if (key in current.collapsedProjects) current.collapsedProjects - key else current.collapsedProjects + key
+    store.rememberCollapsedProjects(server, collapsed)
+    mutable.update { it.copy(collapsedProjects = collapsed) }
+  }
+  fun collapseProjectGroups(collapse: Boolean) {
+    val current = state.value; val server = current.serverId ?: return
+    val collapsed = if (collapse) current.collapsedProjects + groupSessions(current.sessions, current.projects).map { it.key } else emptySet()
+    store.rememberCollapsedProjects(server, collapsed)
+    mutable.update { it.copy(collapsedProjects = collapsed) }
   }
 
   private fun notifyAttention(sessionId: String) {
@@ -610,7 +667,7 @@ class LagoonController private constructor(private val appContext: Context) {
     }
     if (!op.isCurrent(this)) return@act
     store.rememberParents(op.serverId, known.values.toList())
-    op.commit { withSummary(it.copy(sessions = known.values.sortedByDescending { session -> session.updated }, knownParents = store.taskParents(op.serverId))) }
+    op.commit { withSummary(it.copy(sessions = known.values.sortedWith(sessionActivityOrder), knownParents = store.taskParents(op.serverId))) }
     onResolved(lineage.asReversed())
   }
   private suspend fun findSession(client: OpenCodeApi, id: String, directories: List<String>): Session? {
@@ -663,6 +720,8 @@ class LagoonController private constructor(private val appContext: Context) {
     val requestSequence = ++messageSequence
     fun current() = token == generation && revision == selectionRevision && state.value.sessionId == session.id && state.value.executionDirectory == session.directory && requestSequence == messageSequence
     if (current() && state.value.messages.isEmpty()) mutable.update { it.copy(resources = it.resources + ("messages" to ResourceStatus(ResourceState.LOADING))) }
+    val noticesAtRequest = state.value.notices.filter { it.sessionId == session.id && !it.viewed }.map { it.id }.toSet()
+    val idleAtRequest = state.value.session?.idle ?: 0
     val terminalAtRequest = state.value.tasks[session.id]?.takeIf { it.phase in TERMINAL_PHASES }?.since
     var nextCursor: String? = null
     val result = attempt { client.messagesPage(session.id, session.directory).let { nextCursor = it.next; it.items } }
@@ -700,6 +759,8 @@ class LagoonController private constructor(private val appContext: Context) {
       }
       val terminal = state.value.tasks[session.id]?.takeIf { it.phase in TERMINAL_PHASES }
       if (terminal != null && (terminalAtRequest == terminal.since || terminalAtRequest == null && task?.phase in setOf(null, TaskPhase.IDLE))) observedTerminal[session.id] = terminal.since
+      observedNotices[session.id] = noticesAtRequest
+      observedIdle[session.id] = idleAtRequest
       acknowledgeVisible()
     }
     if (ancillary) {
@@ -713,7 +774,7 @@ class LagoonController private constructor(private val appContext: Context) {
       }
       if (current()) mutable.update { it.copy(todos = todos.getOrDefault(it.todos), children = children.getOrDefault(it.children), changes = changes.getOrDefault(it.changes),
         resources = it.resources + mapOf("todos" to todos.resourceStatus(), "children" to children.resourceStatus(), "changes" to changes.resourceStatus()),
-        sessions = (it.sessions + children.getOrDefault(emptyList())).distinctBy { item -> item.id }.sortedByDescending { item -> item.updated }) }
+        sessions = (it.sessions + children.getOrDefault(emptyList())).distinctBy { item -> item.id }.sortedWith(sessionActivityOrder)) }
     }
   }
   fun chooseAgent(name: String?) {
@@ -769,6 +830,21 @@ class LagoonController private constructor(private val appContext: Context) {
     val server = current.serverId ?: return
     val session = current.sessionId ?: return
     if (visibleConversation != (server to session) || current.resource("messages").state !in setOf(ResourceState.READY, ResourceState.EMPTY)) return
+    val ids = observedNotices[session].orEmpty()
+    if (current.notices.any { it.sessionId == session && !it.viewed && it.id in ids }) {
+      val notices = store.viewNotices(server, session, ids)
+      mutable.update { it.copy(notices = notices) }
+    }
+    val idle = observedIdle[session] ?: 0
+    if (idle > 0 && current.session?.idle == idle && current.session!!.viewed < idle && current.capabilities.sessionView != null) {
+      observedIdle.remove(session)
+      val client = api; val target = current.session!!; val token = generation
+      operationScope.launch {
+        attempt { client?.viewSession(target, idle) }.onSuccess {
+          if (token == generation && state.value.serverId == server) mutable.update { it.copy(sessions = it.sessions.map { item -> if (item.id == session && item.idle == idle) item.copy(viewed = maxOf(item.viewed, idle)) else item }) }
+        }.onFailure { Diagnostics.warn("SessionView", "服务端已读同步失败，保留本地已读记录") }
+      }
+    }
     if (current.tasks[session]?.phase !in TERMINAL_PHASES || observedTerminal[session] != current.tasks[session]?.since || session in current.acknowledged) return
     store.acknowledgeTask(server, session)
     mutable.update { withSummary(it.copy(acknowledged = it.acknowledged + session)) }

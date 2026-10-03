@@ -10,7 +10,8 @@ class SessionExperienceTest {
     val project = Project("p", "/project", "Project")
     assertEquals(project, resolveSessionProject(session, listOf(project, Project("other", "/trees", "Wrong"))))
     assertEquals("/trees/task", session.directory)
-    assertEquals("编译 Android 客户端", session.displayTitle("编译 Android 客户端\n保留历史"))
+    // 官方口径：标题只看 session.title，空标题回退“新会话”，不再用首条用户消息兜底。
+    assertEquals("新会话", session.displayTitle())
   }
   @Test fun directoryFallbackUsesSegmentBoundariesAndMostSpecificAncestor() {
     val projects = listOf(Project("a", "/work/app", "A"), Project("b", "/work/app/lib", "B"))

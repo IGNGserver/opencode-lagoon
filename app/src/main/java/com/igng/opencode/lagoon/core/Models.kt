@@ -17,10 +17,21 @@ data class ServerProfile(
   val islandOppoFluidCloud: Boolean = false
 )
 
-data class Project(val id: String, val directory: String, val name: String)
+data class Project(val id: String, val directory: String, val name: String, val sandboxes: List<String> = emptyList()) {
+  val directories: List<String> get() = (listOf(directory) + sandboxes).filter(String::isNotBlank).distinctBy(::normalizedDirectory)
+}
 data class Session(val id: String, val directory: String, val title: String, val updated: Long, val parentId: String? = null,
   val projectId: String? = null, val created: Long = 0, val archived: Boolean = false,
-  val agent: String? = null, val model: ModelChoice? = null)
+  val agent: String? = null, val model: ModelChoice? = null,
+  /** 服务端记录的最近一次“用户看过此会话”的时间点（`time.viewed`，由 `POST /api/session/{id}/view` 写入）。 */
+  val viewed: Long = 0,
+  /** 最近一轮执行进入空闲（即出结果）的时间点（`time.idle`）。 */
+  val idle: Long = 0,
+  /** 最近一轮执行的结局（`outcome`）：`succeeded` / `failed` / `interrupted`。 */
+  val outcome: String? = null) {
+  /** 排序口径与官方一致：优先 `time.updated`，缺失时退回 `time.created`。 */
+  val activityAt: Long get() = updated.takeIf { it > 0 } ?: created
+}
 data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null,
   val agent: String? = null, val model: ModelChoice? = null, val completedAt: Long? = null, val finish: String? = null)
 data class Attachment(val url: String, val mime: String = "", val name: String = "")
@@ -118,16 +129,24 @@ internal fun JSONObject.valueText(key: String): String {
 }
 
 internal fun JSONObject.toProject(): Project {
-  val directory = str("worktree").ifBlank { str("directory") }
-  return Project(str("id"), directory, str("name").ifBlank { directory.substringAfterLast('/') })
+  val directory = str("canonical").ifBlank { str("worktree").ifBlank { str("directory") } }
+  val sandboxes = arr("sandboxes").let { paths -> (0 until paths.length()).mapNotNull { paths.optString(it).takeIf(String::isNotBlank) } }
+  return Project(str("id"), directory, str("name").ifBlank { directory.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { directory } }, sandboxes)
 }
-internal fun JSONObject.toSession(): Session = Session(
-  str("id"), str("directory").ifBlank { obj("location").str("directory").let { root -> str("subpath").takeIf { it.isNotBlank() }?.let { "$root/${it.trim('/')}" } ?: root } },
-  str("title"), longPath("time", "updated"), str("parentID").ifBlank { null },
-  str("projectID").ifBlank { obj("location").obj("project").str("id") }.ifBlank { null },
-  longPath("time", "created"), longPath("time", "archived") > 0,
-  str("agent").ifBlank { null }, obj("model").toModelChoice()
-)
+internal fun JSONObject.toSession(): Session {
+  // Both session APIs return flat metadata; also accept an explicit info envelope.
+  val source = obj("info").takeIf { it.length() > 0 } ?: this
+  val root = source.str("directory").ifBlank { source.obj("location").str("directory").let { path -> source.str("subpath").takeIf { it.isNotBlank() }?.let { "$path/${it.trim('/')}" } ?: path } }
+  return Session(
+    source.str("id"), root,
+    source.str("title"), source.longPath("time", "updated"), source.str("parentID").ifBlank { null },
+    source.str("projectID").ifBlank { source.obj("location").obj("project").str("id") }.ifBlank { null },
+    source.longPath("time", "created"), source.obj("time").opt("archived") is Number,
+    source.str("agent").ifBlank { null }, source.obj("model").toModelChoice(),
+    source.longPath("time", "viewed"), source.longPath("time", "idle"),
+    source.str("outcome").ifBlank { null }
+  )
+}
 internal fun JSONObject.toModelChoice(): ModelChoice? {
   val provider = str("providerID")
   val model = str("modelID").ifBlank { str("id") }
@@ -260,11 +279,15 @@ object TaskReducer {
     return when (type) {
       "session.status" -> status(sessionId, properties.obj("status").str("type"), previous)
       "session.idle" -> status(sessionId, "idle", previous)
+      "session.execution.started", "session.execution.retried" -> status(sessionId, "running", previous)
+      "session.execution.succeeded" -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
+      "session.execution.failed" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { "执行失败" }, since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
+      "session.execution.interrupted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
       "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since, System.currentTimeMillis())
       "session.aborted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, System.currentTimeMillis())
       "permission.asked" -> TaskState(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", since)
-      "question.asked" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
-      "permission.replied", "permission.rejected", "question.replied", "question.rejected" ->
+      "question.asked", "form.created" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
+      "permission.replied", "permission.rejected", "question.replied", "question.rejected", "form.replied", "form.cancelled" ->
         TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
       "message.part.updated" -> {
         val part = properties.obj("part")
