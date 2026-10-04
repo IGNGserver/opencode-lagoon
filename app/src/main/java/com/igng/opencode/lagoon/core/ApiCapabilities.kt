@@ -11,7 +11,8 @@ data class ApiCapabilities(
   val titleOnCreate: Boolean = false, val todos: Boolean = false, val diff: Boolean = false,
   val savedPermissions: Boolean = false, val projectPath: String? = null,
   val promptEnvelope: Boolean = false, val fileReferences: Boolean = false,
-  val fileUriField: String = "uri", val documented: Boolean = false
+  val fileUriField: String = "uri", val documented: Boolean = false,
+  val sessionView: ActionEndpoint? = null
 ) {
   fun supports(action: SessionAction) = action in actions
   companion object {
@@ -30,7 +31,7 @@ data class ApiCapabilities(
         SessionAction.COMPACT to ActionEndpoint("POST", "api/session/{id}/compact"),
         SessionAction.REVERT to ActionEndpoint("POST", "api/session/{id}/revert/stage"),
         SessionAction.UNREVERT to ActionEndpoint(if (currentV2) "DELETE" else "POST", if (currentV2) "api/session/{id}/revert" else "api/session/{id}/revert/clear")
-      ), savedPermissions = currentV2, promptEnvelope = !currentV2)
+      ), savedPermissions = currentV2, projectPath = if (currentV2) "api/project" else null, promptEnvelope = !currentV2)
       ServerProtocol.UNKNOWN -> ApiCapabilities()
     }
 
@@ -84,7 +85,7 @@ data class ApiCapabilities(
         paths.obj("/api/permission/saved").has("get"),
         "api/project".takeIf { paths.obj("/api/project").has("get") },
         if (prompt.length() > 0) envelope else base.promptEnvelope,
-        item.obj("properties").has(uriField), uriField, true)
+        item.obj("properties").has(uriField), uriField, true, endpoint("/view", "POST", setOf("idle")))
     }
   }
 }

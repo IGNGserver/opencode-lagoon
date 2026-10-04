@@ -53,17 +53,159 @@ class ControllerRegressionTest {
     put(c,"mutable", mutable); put(c,"state",mutable); put(c,"generation",1); put(c,"api",api)
     put(c,"operationScope",CoroutineScope(SupervisorJob()+Dispatchers.Unconfined))
     put(c,"scope",CoroutineScope(Job().apply { cancel() }+Dispatchers.Default))
-    put(c,"store",ServerStore(preferences(),preferences(),{it},{it}));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex()); put(c,"referenceMutex",kotlinx.coroutines.sync.Mutex()); put(c,"observedTerminal",mutableMapOf<String,Long>()); put(c,"draftWrites",mutableMapOf<String,Job>())
+    put(c,"store",ServerStore(preferences(),preferences(),{it},{it}));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex()); put(c,"referenceMutex",kotlinx.coroutines.sync.Mutex()); put(c,"monitorRequested",mutableSetOf<String>()); put(c,"draftWrites",mutableMapOf<String,Job>())
     return c to mutable
   }
   private fun api(s:MockWebServer) = OpenCodeApi(ServerProfile("server","Server",s.url("/").toString(),allowCleartext=true), "fixture")
   private suspend fun refresh(c:LagoonController, controlOnly:Boolean = true) = suspendCoroutine<Unit> { cont ->
     try {
-      val m = LagoonController::class.java.getDeclaredMethod("loadAll", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Continuation::class.java).apply{isAccessible=true}
-      val result=m.invoke(c,1,controlOnly,cont)
+      val m = LagoonController::class.java.getDeclaredMethod("loadAll", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Continuation::class.java).apply{isAccessible=true}
+      val result=m.invoke(c,1,controlOnly,true,cont)
       if(result !== COROUTINE_SUSPENDED) cont.resume(Unit)
     }catch(e:Throwable){cont.resumeWithException(e.cause?:e)}
   }
+  private suspend fun readTranscript(c: LagoonController, client: OpenCodeApi, session: Session) = suspendCoroutine<Unit> { continuation ->
+    try {
+      val method = LagoonController::class.java.getDeclaredMethod("loadSession", Session::class.java, Boolean::class.javaPrimitiveType,
+        Int::class.javaPrimitiveType, OpenCodeApi::class.java, Continuation::class.java).apply { isAccessible = true }
+      val result = method.invoke(c, session, false, 1, client, continuation)
+      if (result !== COROUTINE_SUSPENDED) continuation.resume(Unit)
+    } catch (error: Throwable) { continuation.resumeWithException(error.cause ?: error) }
+  }
+
+  private fun viewing(c: LagoonController, server: String, session: String, foreground: Boolean = true) {
+    put(c, "foreground", foreground); c.conversationVisible(server, session, true)
+  }
+
+  @Test fun openingASessionClearsEveryUnreadResultImmediately() {
+    val session = Session("s", "/repo", "Title", 1)
+    val now = System.currentTimeMillis()
+    val store = ServerStore(memoryPreferences(), memoryPreferences(), { it }, { it })
+    val notices = listOf(SessionNotice("first", "s", now, false), SessionNotice("second", "s", now + 1, true), SessionNotice("other", "o", now, false))
+      .fold(emptyList<SessionNotice>()) { _, notice -> store.rememberNotice("server", notice) }
+    val (controller, state) = controller(api(MockWebServer()), LagoonState(serverId = "server", connected = true, sessions = listOf(session), sessionId = "s", notices = notices))
+    put(controller, "store", store)
+    // Official MarkSessionNotificationsViewed: no transcript round trip is required.
+    viewing(controller, "server", "s")
+    assertTrue(state.value.notices.filter { it.sessionId == "s" }.all { it.viewed })
+    assertFalse(state.value.notices.single { it.sessionId == "o" }.viewed)
+    assertTrue(store.sessionNotices("server").filter { it.sessionId == "s" }.all { it.viewed })
+    assertEquals(SessionStatus.NONE, state.value.sessionStatus(session))
+    // Only the other session's unread result is still counted on the island.
+    assertEquals(1, state.value.summary.completed)
+    assertEquals(0, state.value.summary.failed)
+  }
+
+  @Test fun aConversationLeftOpenInTheBackgroundDoesNotReadNewResults() {
+    val session = Session("s", "/repo", "Title", 1)
+    val notice = SessionNotice("result", "s", System.currentTimeMillis(), false)
+    val (controller, state) = controller(api(MockWebServer()), LagoonState(serverId = "server", connected = true, sessions = listOf(session), sessionId = "s", notices = listOf(notice)))
+    viewing(controller, "server", "s", foreground = false)
+    assertFalse(state.value.notices.single().viewed)
+    assertEquals(SessionStatus.COMPLETED, state.value.sessionStatus(session))
+  }
+
+  private fun v2Server(paths: MutableList<String>, sessionsBody: () -> String, active: () -> String): Dispatcher = object : Dispatcher() {
+    override fun dispatch(request: RecordedRequest): MockResponse {
+      paths += request.path.orEmpty()
+      val body = when (request.requestUrl!!.encodedPath) {
+        "/global/health", "/api/health", "/doc" -> return MockResponse().setResponseCode(404)
+        "/api/info" -> "{}"
+        // The published V2 contract returns Project[] as a bare array.
+        "/api/project" -> """[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project","time":{"created":1,"updated":1,"active":1}}]"""
+        "/api/session" -> sessionsBody()
+        "/api/session/active" -> active()
+        else -> """{"data":[]}"""
+      }
+      return MockResponse().setBody(body)
+    }
+  }
+
+  @Test fun aRunThisDeviceSawEndWhileEventsWereMissedBecomesOneUnreadResult() = runBlocking {
+    MockWebServer().use { server ->
+      val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+      // The finished worktree session has dropped out of the first page and out of the active list.
+      server.dispatcher = v2Server(paths, { """{"data":[{"id":"old","projectID":"p","location":{"directory":"/repo"},"time":{"created":1,"updated":1}}],"cursor":{}}""" }, { """{"data":{}}""" })
+      val root = Session("root", "/trees/task", "Worktree task", 50, projectId = "p")
+      val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true, sessions = listOf(root),
+        tasks = mapOf("root" to TaskState("root", TaskPhase.TOOL, since = 100))))
+      refresh(controller, controlOnly = false)
+      assertTrue("a session seen running must not vanish when it finishes", state.value.sessions.any { it.id == "root" })
+      assertEquals(SessionStatus.COMPLETED, state.value.sessionStatus(root))
+      assertEquals(1, state.value.summary.completed)
+      assertEquals(1, state.value.notices.size)
+      refresh(controller, controlOnly = false)
+      refresh(controller, controlOnly = true)
+      assertEquals("reconciliation must not duplicate the result", 1, state.value.notices.size)
+      assertNull("a finished run is not kept as a permanent phase", state.value.tasks["root"])
+      assertTrue("an unread result keeps its session listed", state.value.sessions.any { it.id == "root" })
+    }
+  }
+
+  @Test fun historicalAndInterruptedSessionsNeverGetACompletedMark() = runBlocking {
+    MockWebServer().use { server ->
+      val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+      server.dispatcher = v2Server(paths, { """{"data":[
+        {"id":"done","projectID":"p","outcome":"succeeded","location":{"directory":"/repo"},"time":{"created":1,"updated":9,"idle":9}},
+        {"id":"stopped","projectID":"p","outcome":"interrupted","location":{"directory":"/repo"},"time":{"created":1,"updated":8,"idle":8}}],"cursor":{}}""" }, { """{"data":{}}""" })
+      val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true,
+        tasks = mapOf("stopped" to TaskState("stopped", TaskPhase.THINKING, since = 5))))
+      refresh(controller, controlOnly = false)
+      assertTrue(state.value.notices.isEmpty())
+      assertTrue(state.value.sessions.all { state.value.sessionStatus(it) == SessionStatus.NONE })
+      assertTrue(state.value.summary.isEmpty)
+    }
+  }
+
+  @Test fun aChildRunRollsUpToOneRootResultAndNeverMarksTheChild() = runBlocking {
+    MockWebServer().use { server ->
+      val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+      var running = true
+      server.dispatcher = v2Server(paths, { """{"data":[{"id":"root","projectID":"p","location":{"directory":"/repo"},"time":{"created":1,"updated":20}}],"cursor":{}}""" },
+        { if (running) """{"data":{"child":{"type":"running"}}}""" else """{"data":{}}""" })
+      val root = Session("root", "/repo", "Root", 20, projectId = "p")
+      val child = Session("child", "/repo", "Child", 20, parentId = "root", projectId = "p")
+      val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true, sessions = listOf(root, child)))
+      refresh(controller, controlOnly = true)
+      assertEquals(SessionStatus.RUNNING, state.value.sessionStatus(root))
+      assertEquals(1, state.value.summary.running)
+      running = false
+      refresh(controller, controlOnly = true)
+      assertEquals(listOf("root"), state.value.notices.map { it.sessionId })
+      assertEquals(SessionStatus.COMPLETED, state.value.sessionStatus(root))
+    }
+  }
+
+  @Test fun nativeCatalogIncludesWorktreesWithoutNarrowingToTheSelectedProject() = runBlocking {
+    MockWebServer().use { server ->
+      val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+      server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
+        paths += request.path.orEmpty()
+        val body = when (request.requestUrl!!.encodedPath) {
+          "/global/health", "/api/health", "/doc" -> return MockResponse().setResponseCode(404)
+          "/api/info" -> "{}"
+          "/api/project" -> """{"data":[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project"},{"id":"q","canonical":"/other","name":"Other"}]}"""
+          "/api/session" -> {
+            assertNull(request.requestUrl!!.queryParameter("directory"))
+            assertEquals("null", request.requestUrl!!.queryParameter("parentID"))
+            """{"data":[{"id":"tree","projectID":"p","title":"Server title","location":{"directory":"/trees/task"},"time":{"updated":20}},{"id":"other","projectID":"q","title":"Other session","location":{"directory":"/other"},"time":{"updated":10}}],"cursor":{}}"""
+          }
+          "/api/session/active" -> """{"data":{}}"""
+          else -> """{"data":[]}"""
+        }
+        return MockResponse().setBody(body)
+      } }
+      val (controller, state) = controller(api(server), LagoonState(serverId = "server", projectId = "q"))
+      refresh(controller, controlOnly = false)
+      val groups = groupSessions(state.value.sessions, state.value.projects)
+      assertEquals(listOf("p", "q"), groups.map { it.key })
+      assertEquals("Server title", state.value.title(state.value.sessions.first()))
+      assertEquals("q", state.value.projectId)
+      assertEquals(1, paths.count { it.startsWith("/api/session/active") })
+      assertFalse(paths.any { it.contains("/message") })
+    }
+  }
+
   @Test fun offlineReadCannotOverwriteAChangedConnectionGeneration() = runBlocking {
     MockWebServer().use { server ->
       val (c,state)=controller(api(server),LagoonState(serverId="server",connected=true))

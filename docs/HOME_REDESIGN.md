@@ -1,0 +1,40 @@
+# 首页分组与会话展示规则
+
+本次修复将首页改为当前服务器的项目列表：项目可折叠，内部主会话按最后修改时间倒序。搜索和状态筛选放在菜单中；新建按钮位于列表右下方；保留现有 Dock。首页只应用一次状态栏顶部 inset。
+
+## 原因与修复
+
+| 原因 | 修复规则 |
+| --- | --- |
+| 用首条用户消息代替服务端标题，导致与官方显示不同 | 只使用 `session.title`；精确匹配官方时间占位标题后显示“新会话 / 子会话” |
+| 首页被当前选中项目限制，并通过正文/草稿判断会话是否显示 | 当前服务器所有项目分组；只过滤 `parentID` 非空与数字类型 `time.archived`，保留无正文、草稿和脚本创建的主会话 |
+| 解析器忽略 V2 `canonical`，列表只查询项目根目录 | 兼容 `canonical` / `worktree` / `directory`，保留 `sandboxes`；V2 全局查询并传 `parentID=null`，V1 查询根目录及已知 worktree |
+| 子会话终态被当作主会话结果、历史结果被普遍标为未读 | 等待授权/回答和运行状态沿父链汇总；结果状态归属主会话；“已完成 / 失败”只来自未读结果账本，从不由 `outcome`、历史正文或打开会话推断 |
+| 打开会话后“已完成”不消失，甚至打开旧会话会新增标记 | 与官方 `MarkSessionNotificationsViewed` 一致：会话在前台可见即清除它的全部未读结果，不等正文加载；结束时正停在该会话则直接记为已读 |
+| 事件流在后台被冻结或断线时漏掉结束事件 | 本机曾观测到运行中、之后任一次权威刷新看到已空闲，即补记一条未读结果（同一轮只记一次）；V2 `outcome=interrupted` 不记 |
+
+组内使用 `time.updated`，缺失时回退 `time.created`，同时间按会话 ID 排序。等待或运行状态不改变列表次序。同名项目以项目 ID 区分；已登记的 worktree 仍属于原项目。打开会话、切换新建会话的项目，不会改变首页查询范围。
+
+## 官方依据与兼容边界
+
+对照了 2026-10-03 本机正在提供的官方 V2 客户端资源，其项目模型、根会话查询及通知账本已与旧版源码不同：
+
+- `oc-index.js` SHA-256：`677e2fa5821961c0daff63d661a278117e7d26d7beaa5cd110f069b8c9bb408f`。
+- `runtime-DaHoVrip.js` SHA-256：`036e2dfd60fecebefe3e365b0d59dc84db7511f6fec151a35299019bbdd0b0be`。
+- 标题与通知模式也参考官方源码：[session-title.ts](https://github.com/anomalyco/opencode/blob/907b3bc518fa48e90e8ec24dd327d13eee71c36c/packages/app/src/utils/session-title.ts)、[notification.tsx](https://github.com/anomalyco/opencode/blob/907b3bc518fa48e90e8ec24dd327d13eee71c36c/packages/app/src/context/notification.tsx)。
+
+通知账本按服务器保存，最多 500 条、保留 30 天，事件 ID 防重复，时间使用本机时钟（同官方 `Date.now()`）。来源有两个：实时 idle/error（及 V2 执行结果）事件，以及上述“观测到的运行结束”补记。历史 `outcome` 或缺失的 `time.viewed` 本身不会产生未读。首页、活动页与灵动岛 / 实时通知计数都读同一账本；升级时一次性清除旧版本持久化的“永久已完成”状态与已读标记。通知账本属于各客户端本地数据，本应用不会导入官方桌面客户端的既有未读历史。
+
+当实例支持 `POST /api/session/{id}/view` 时，打开会话后同步 body 为该会话当前的 `{idle: time.idle}`；不会用当前时钟替代执行轮次。服务端同步失败保留本地已读状态。目录或控制接口失败时保留上次可信数据，并提示部分数据待同步。
+
+## 刷新机制
+
+- 打开 / 回到前台：距上次全量刷新超过 15 秒即静默刷新，并恢复实时事件流。
+- 前台：实时事件流 + 每 45 秒对账；V2 对账同时读取会话目录第一页，补上漏掉的新会话。`session.updated` 等元数据事件增量更新，不再触发全量刷新。
+- 后台：存在运行中的主会话（不论哪台设备发起）且开启通知时，前台期间启动任务监控服务，后台继续实时同步；离开前台 30 秒后若无监控则关闭事件流。WorkManager 每 15 分钟（系统最短周期，需联网）做一次权威读取，补记已结束的运行并发出完成通知。
+
+## 验证
+
+仓库验证命令为 `ANDROID_HOME=/home/lvziw/Android/Sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug`，本机额外指定共享 `GRADLE_USER_HOME` 与本地 project cache。测试覆盖标题、主/子会话和归档过滤、项目/worktree 身份、稳定排序、原生分页游标、全项目查询、现代执行事件、未读持久化及读取并发、离线缓存和精确 idle 请求。
+
+Android 模拟器使用独立 AVD 与模拟 V2 服务数据检查实际界面；它不能替代真实手机、OEM 状态栏或用户实际服务器的验收。未发布或安装到用户设备。

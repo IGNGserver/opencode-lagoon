@@ -59,7 +59,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
     SmallTopAppBar(title = state.title(session), navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } }, actions = { IconButton(onClick = { menu = true }) { Icon(MiuixIcons.More, "会话操作") } })
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
       Text(listOfNotNull(resolveSessionProject(session, state.projects)?.name, state.server?.name).joinToString(" · "), modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2)
-      state.tasks[session.id]?.takeIf { it.phase != TaskPhase.IDLE }?.let { MiuixStatePill(it.phase) }
+      state.tasks[session.id]?.takeIf { it.active }?.let { MiuixStatePill(it.phase) }
     }
     Text(session.directory, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary), modifier = Modifier.padding(horizontal = 20.dp))
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
@@ -87,7 +87,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
           ChatSheet.FILES -> FilesPanel(state, controller) { path -> controller.addReference(path); sheet = null }
           ChatSheet.CHILDREN -> LazyColumn { items(state.children.distinctBy { it.id }, key = { it.id }) { child ->
             Card(Modifier.fillMaxWidth().padding(bottom = 8.dp), insideMargin = PaddingValues(14.dp), onClick = { sheet = null; onOpenChild(child.id) }) {
-              Text(state.title(child)); state.tasks[child.id]?.let { MiuixStatePill(it.phase) }
+              Text(state.title(child)); state.tasks[child.id]?.takeIf { it.active }?.let { MiuixStatePill(it.phase) }
             }
           } }
         }

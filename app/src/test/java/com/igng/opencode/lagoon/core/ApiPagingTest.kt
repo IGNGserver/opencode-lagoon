@@ -38,4 +38,39 @@ class ApiPagingTest {
       assertNull(requests[5].requestUrl!!.queryParameter("order"));assertEquals("message-next",requests[5].requestUrl!!.queryParameter("cursor"))
     }
   }
+  @Test fun rootCatalogIsGlobalAndRetainsCursorEvenWhenPageContainsOnlyHiddenSessions() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"hidden","parentID":"parent","location":{"directory":"/tree"},"time":{}}],"cursor":{"next":"next"}}"""))
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"root","location":{"directory":"/other"},"time":{}}],"cursor":{}}"""))
+      val client = api(server); client.health()
+      val first = client.rootSessionsPage()
+      assertTrue(groupSessions(first.items, emptyList()).isEmpty())
+      assertEquals("next", first.next)
+      assertEquals("root", client.rootSessionsPage(cursor = first.next).items.single().id)
+      val requests = List(4) { server.takeRequest() }
+      for (request in requests.drop(2)) {
+        assertNull(request.requestUrl!!.queryParameter("directory"))
+        assertEquals("null", request.requestUrl!!.queryParameter("parentID"))
+      }
+      assertEquals("desc", requests[2].requestUrl!!.queryParameter("order"))
+      assertNull(requests[3].requestUrl!!.queryParameter("order"))
+    }
+  }
+
+  @Test fun documentedViewSendsExactIdleCycleAndDoesNotUseTheCurrentTime() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setBody("{}"))
+      server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}/view":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"idle":{"type":"number"}},"required":["idle"]}}}}}}}}"""))
+      server.enqueue(MockResponse().setBody("""{"data":true}"""))
+      val client = api(server); client.health(); val capabilities = client.discoverCapabilities()
+      assertNotNull(capabilities.sessionView)
+      client.viewSession(Session("s", "/repo", "Title", 1, idle = 123), 123)
+      val request = List(5) { server.takeRequest() }.last()
+      assertEquals("POST", request.method)
+      assertEquals("/api/session/s/view", request.requestUrl!!.encodedPath)
+      assertEquals(123L, JSONObject(request.body.readUtf8()).getLong("idle"))
+    }
+  }
+
 }

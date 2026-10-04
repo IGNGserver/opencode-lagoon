@@ -61,17 +61,22 @@ data class TaskSummary(
     val EMPTY = TaskSummary()
 
     /**
-     * @param acknowledged 已被用户查看过、不再计入“未读已完成/失败”的会话 id。
+     * Running/waiting come from live task state rolled up to each root; completed/failed count the
+     * roots that have an unread result in [notices]. A root that is running again counts only as running.
      * @param titles 会话标题映射表，用于生成 items。
      */
     fun of(
       tasks: Map<String, TaskState>,
-      acknowledged: Set<String> = emptySet(),
+      notices: List<SessionNotice> = emptyList(),
       parents: Map<String, String> = emptyMap(),
       titles: Map<String, String> = emptyMap()
     ): TaskSummary {
-      val unreadOrActive = tasks.filterValues { it.phase !in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED) || it.sessionId !in acknowledged }
-      val rootTasks = if (parents.isEmpty()) unreadOrActive else aggregate(unreadOrActive, parents)
+      val active = aggregate(tasks.filterValues { it.active }, parents)
+      val results = notices.filterNot { it.viewed || it.sessionId in active }.groupBy { it.sessionId }.map { (session, unseen) ->
+        val latest = unseen.maxBy { it.time }
+        TaskState(session, if (unseen.any { it.error }) TaskPhase.FAILED else TaskPhase.COMPLETED, since = latest.time, finishedAt = latest.time)
+      }
+      val rootTasks = active + results.associateBy { it.sessionId }
       var running = 0
       var completed = 0
       var waiting = 0

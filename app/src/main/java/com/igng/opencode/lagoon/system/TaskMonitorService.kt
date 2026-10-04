@@ -8,7 +8,6 @@ import android.os.Build
 import android.os.IBinder
 import com.igng.opencode.lagoon.core.LagoonController
 import com.igng.opencode.lagoon.core.ServerStore
-import com.igng.opencode.lagoon.core.TaskPhase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,7 +18,6 @@ import kotlinx.coroutines.launch
 class TaskMonitorService : Service() {
   companion object {
     private const val FOREGROUND_ID = 1001
-    private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)
     fun start(context: Context, serverId: String, sessionId: String) {
       val intent = Intent(context, TaskMonitorService::class.java).putExtra("serverId", serverId).putExtra("sessionId", sessionId)
       androidx.core.content.ContextCompat.startForegroundService(context, intent)
@@ -47,6 +45,7 @@ class TaskMonitorService : Service() {
       return START_NOT_STICKY
     }
     if (monitor == null) {
+      controller.setMonitoring(true)
       monitor = scope.launch {
         // Plain collect (not collectLatest): emissions are frequent during streaming, and cancelling
         // the previous handler on every emission needlessly restarted notification work.
@@ -60,8 +59,10 @@ class TaskMonitorService : Service() {
               tracked.remove(key)
               return@forEach
             }
-            val task = state.tasks[trackedSessionId] ?: return@forEach
-            if (task.phase in TERMINAL_PHASES) tracked.remove(key)
+            // Finished runs leave live state (their result moves to the unread ledger), so “no longer
+            // active” — not a terminal phase — ends tracking. Keep waiting while offline: state is stale.
+            val task = state.tasks[trackedSessionId]
+            if (state.connected && task?.active != true) tracked.remove(key)
             // The controller owns task notifications. This service only keeps the SSE monitoring
             // process alive; it must never republish a result.
           }
@@ -77,5 +78,9 @@ class TaskMonitorService : Service() {
     return START_REDELIVER_INTENT
   }
   override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }
-  override fun onDestroy() { tracked.clear(); monitor?.cancel(); super.onDestroy() }
+  override fun onDestroy() {
+    tracked.clear(); monitor?.cancel()
+    if (monitor != null) LagoonController.get(this).setMonitoring(false)
+    super.onDestroy()
+  }
 }

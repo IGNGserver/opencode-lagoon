@@ -78,11 +78,44 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     }.keys.map { it.removePrefix("taskRead:$id:") }.toSet()
   }
 
-  fun unacknowledgeTask(id: String, session: String) {
-    preferences.edit().remove("taskRead:$id:$session").apply()
+  /**
+   * One-time move to the unread ledger: earlier versions persisted finished phases as permanent
+   * “已完成/失败” states plus per-session read markers. Drop both; keep only runs this device saw still
+   * running (they turn into unread results when found finished), unless they are older than the ledger TTL.
+   */
+  fun migrateTaskLedger(id: String, now: Long = System.currentTimeMillis()) = synchronized(taskLock) {
+    if (preferences.getInt("taskLedgerVersion:$id", 0) >= 2) return@synchronized
+    val ttl = 30L * 24 * 60 * 60 * 1000
+    val states = taskStates(id)
+    val editor = preferences.edit()
+    preferences.all.keys.filter { it.startsWith("taskRead:$id:") }.forEach(editor::remove)
+    states.values.filter { !it.active || preferences.getLong("taskTime:$id:${it.sessionId}", it.since) < now - ttl }.forEach { task ->
+      editor.remove("taskState:$id:${task.sessionId}").remove("taskTime:$id:${task.sessionId}")
+    }
+    editor.putInt("taskLedgerVersion:$id", 2).commit()
   }
-  fun acknowledgeTask(id: String, session: String) {
-    preferences.edit().putString("taskRead:$id:$session", taskStates(id)[session]?.since?.toString() ?: "1").apply()
+
+  fun sessionNotices(server: String, now: Long = System.currentTimeMillis()): List<SessionNotice> = synchronized(taskLock) {
+    runCatching { JSONArray(preferences.getString("sessionNotices:$server", "[]")).objects().map {
+      SessionNotice(it.str("id"), it.str("session"), it.optLong("time"), it.optBoolean("error"), it.optBoolean("viewed"))
+    }.pruned(now) }.getOrDefault(emptyList())
+  }
+  private fun writeNotices(server: String, notices: List<SessionNotice>) {
+    preferences.edit().putString("sessionNotices:$server", JSONArray().apply { notices.forEach {
+      put(JSONObject().put("id", it.id).put("session", it.sessionId).put("time", it.time).put("error", it.error).put("viewed", it.viewed))
+    } }.toString()).apply()
+  }
+  fun rememberNotice(server: String, notice: SessionNotice, now: Long = System.currentTimeMillis()): List<SessionNotice> = synchronized(taskLock) {
+    val current = sessionNotices(server, now)
+    val next = if (current.any { it.id == notice.id }) current else (current + notice).pruned(now)
+    writeNotices(server, next); next
+  }
+  fun viewNotices(server: String, session: String, ids: Set<String>): List<SessionNotice> = synchronized(taskLock) {
+    sessionNotices(server).viewObserved(session, ids).also { writeNotices(server, it) }
+  }
+  fun collapsedProjects(server: String): Set<String> = preferences.getStringSet("collapsedProjects:$server", emptySet()).orEmpty().toSet()
+  fun rememberCollapsedProjects(server: String, keys: Set<String>) {
+    preferences.edit().putStringSet("collapsedProjects:$server", keys.toSet()).apply()
   }
 
   fun selectedId(): String? = preferences.getString("selected", null)
@@ -134,6 +167,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     else secrets.edit().putString(key, encryptValue(text.take(100_000))).apply()
   }
   fun forgetSession(server: String, session: String) {
+    synchronized(taskLock) { writeNotices(server, sessionNotices(server).filterNot { it.sessionId == session }) }
     val editor = preferences.edit()
     listOf("preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").forEach { editor.remove("$it:$server:$session") }
     editor.apply()
@@ -211,7 +245,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
-    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id")
+    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedProjects:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
     editor.apply()

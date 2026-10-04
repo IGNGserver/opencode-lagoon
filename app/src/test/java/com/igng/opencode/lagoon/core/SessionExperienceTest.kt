@@ -10,7 +10,8 @@ class SessionExperienceTest {
     val project = Project("p", "/project", "Project")
     assertEquals(project, resolveSessionProject(session, listOf(project, Project("other", "/trees", "Wrong"))))
     assertEquals("/trees/task", session.directory)
-    assertEquals("编译 Android 客户端", session.displayTitle("编译 Android 客户端\n保留历史"))
+    // 官方口径：标题只看 session.title，空标题回退“新会话”，不再用首条用户消息兜底。
+    assertEquals("新会话", session.displayTitle())
   }
   @Test fun directoryFallbackUsesSegmentBoundariesAndMostSpecificAncestor() {
     val projects = listOf(Project("a", "/work/app", "A"), Project("b", "/work/app/lib", "B"))
@@ -52,11 +53,13 @@ class SessionExperienceTest {
     assertEquals(1, summary.waiting); assertEquals(0, summary.running)
   }
 
-  @Test fun readParentCannotHideANewUnreadChildResult() {
-    val tasks=mapOf("parent" to TaskState("parent",TaskPhase.COMPLETED),"child" to TaskState("child",TaskPhase.FAILED))
-    assertEquals(1,TaskSummary.of(tasks,setOf("parent"),mapOf("child" to "parent")).failed)
-    assertEquals(TaskSummary.EMPTY,TaskSummary.of(tasks,setOf("parent","child"),mapOf("child" to "parent")))
-    assertEquals(TaskSummary.EMPTY,TaskSummary.of(mapOf("parent" to TaskState("parent",TaskPhase.IDLE),"child" to TaskState("child",TaskPhase.COMPLETED)),setOf("child"),mapOf("child" to "parent")))
+  @Test fun childResultsNeverCountAndOnlyUnreadRootResultsDo() {
+    val parents = mapOf("child" to "parent")
+    val finishedChild = mapOf("parent" to TaskState("parent", TaskPhase.IDLE), "child" to TaskState("child", TaskPhase.COMPLETED))
+    assertEquals(TaskSummary.EMPTY, TaskSummary.of(finishedChild, emptyList(), parents))
+    val unread = listOf(SessionNotice("r", "parent", 1, true))
+    assertEquals(1, TaskSummary.of(finishedChild, unread, parents).failed)
+    assertEquals(TaskSummary.EMPTY, TaskSummary.of(finishedChild, unread.map { it.copy(viewed = true) }, parents))
   }
 
 
