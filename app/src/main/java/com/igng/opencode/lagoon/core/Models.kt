@@ -81,6 +81,8 @@ data class TaskState(val sessionId: String, val phase: TaskPhase, val detail: St
   }
 
   companion object {
+    /** The single user-facing label for every running phase (thinking/tool/subagent/testing alike). */
+    const val RUNNING_DETAIL = "运行中"
     /** Phases where the agent is actively working, without an outstanding user prompt. */
     val RUNNING_PHASES: Set<TaskPhase> = setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
     /** Phases waiting on a user decision. */
@@ -170,7 +172,10 @@ private fun JSONObject.toV2Message(): Message {
     else -> "system"
   }
   val parts = when (type) {
-    "assistant" -> arr("content").objects().map { part -> part.toV2MessagePart() }
+    // V2 text/reasoning content has no id (only tool calls do); give each part a stable, unique one.
+    "assistant" -> arr("content").objects().mapIndexed { index, part ->
+      part.toV2MessagePart().let { if (it.id.isBlank()) it.copy(id = "${str("id")}#$index") else it }
+    }
     "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
     else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) }) +
       arr("files").toAttachments().mapIndexed { index, attachment ->
@@ -239,10 +244,9 @@ object TaskReducer {
     "busy", "running" -> {
       val continuing = previous?.active == true
       TaskState(sessionId, if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.phase else TaskPhase.THINKING,
-        if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.detail else "正在处理",
-        if (continuing) previous!!.since else System.currentTimeMillis())
+        TaskState.RUNNING_DETAIL, if (continuing) previous!!.since else System.currentTimeMillis())
     }
-    "retry" -> TaskState(sessionId, TaskPhase.THINKING, "正在重试",
+    "retry" -> TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL,
       if (previous?.active == true) previous.since else System.currentTimeMillis())
     "idle" -> when {
       previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since, System.currentTimeMillis())
@@ -261,14 +265,14 @@ object TaskReducer {
       "permission.asked" -> TaskState(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", since)
       "question.asked" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
       "permission.replied", "permission.rejected", "question.replied", "question.rejected" ->
-        TaskState(sessionId, TaskPhase.THINKING, "继续执行", since)
+        TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
       "message.part.updated" -> {
         val part = properties.obj("part")
         val toolStatus = part.obj("state").str("status")
         if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) ||
           part.str("type") == "tool" && toolStatus in setOf("completed", "error")) return previous
         when {
-          part.str("type") == "reasoning" -> TaskState(sessionId, TaskPhase.THINKING, "正在思考", since)
+          part.str("type") == "reasoning" -> TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
           part.str("type") == "tool" -> {
             // V1 parts carry `tool`; V2 parts carry `name`. Read both so the same V2 event produces the
             // same phase through the reducer as through the plugin (A13).
@@ -278,15 +282,14 @@ object TaskReducer {
               tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").str("command")) -> TaskPhase.TESTING
               else -> TaskPhase.TOOL
             }
-            val state = part.obj("state")
-            TaskState(sessionId, phase, state.str("title").ifBlank { state.str("error") }.ifBlank { "正在运行 $tool" }, since)
+            TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since)
           }
           else -> previous
         }
       }
       "message.part.delta", "session.next.text.delta", "session.next.reasoning.delta" ->
         if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
-        else TaskState(sessionId, TaskPhase.THINKING, "正在生成", since)
+        else TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
       "session.next.prompted", "session.next.prompt.admitted", "session.next.step.started", "session.next.retried" ->
         status(sessionId, "running", previous)
       "session.next.tool.called", "session.next.shell.started" -> {
@@ -297,7 +300,7 @@ object TaskReducer {
           else -> TaskPhase.TOOL
         }
         if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
-        else TaskState(sessionId, phase, "正在运行 $tool", since)
+        else TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since)
       }
       "session.next.step.failed" -> TaskState(sessionId, TaskPhase.FAILED,
         properties.obj("error").str("message").ifBlank { "执行失败" }, since, System.currentTimeMillis())

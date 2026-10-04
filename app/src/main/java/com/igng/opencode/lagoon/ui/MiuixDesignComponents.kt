@@ -14,6 +14,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.igng.opencode.lagoon.core.TaskPhase
+import com.igng.opencode.lagoon.core.TaskState
 import com.kyant.shapes.RoundedCornerStyle
 import com.kyant.shapes.RoundedRectangle
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -69,12 +70,10 @@ fun MiuixStatePill(
     else -> MiuixColorTokens.Primary to MiuixColorTokens.PrimarySubtle
   }
 
-  val label = detail ?: when (phase) {
+  // Running sub-phases (thinking / tool / subagent / testing) are one user-facing state.
+  val label = if (phase in TaskState.RUNNING_PHASES) TaskState.RUNNING_DETAIL else detail ?: when (phase) {
     TaskPhase.IDLE -> "空闲"
-    TaskPhase.THINKING -> "思考中"
-    TaskPhase.TOOL -> "执行工具"
-    TaskPhase.SUBAGENT -> "子任务"
-    TaskPhase.TESTING -> "测试中"
+    TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING -> TaskState.RUNNING_DETAIL
     TaskPhase.WAITING_PERMISSION -> "等待授权"
     TaskPhase.WAITING_QUESTION -> "等待回答"
     TaskPhase.COMPLETED -> "已完成"

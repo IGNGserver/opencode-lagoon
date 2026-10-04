@@ -53,7 +53,23 @@ object TranscriptRows {
       previousEnd = turn.maxOf { it.completedAt ?: it.created }
       rows += turnRows(turn, "turn:${turn.first().id}", expanded, working)
     }
-    return rows
+    return rows.withUniqueKeys()
+  }
+
+  /**
+   * A part's identity within the transcript. Part ids are not unique on their own: V2 text and
+   * reasoning parts carry no id at all, and providers may reuse a tool call id across messages of one
+   * turn. Scoping by message and falling back to the position keeps keys unique and stable.
+   */
+  private fun partRef(message: Message, index: Int, part: MessagePart): String = "${message.id}/${part.id.ifBlank { "#$index" }}"
+
+  /** LazyColumn rejects duplicate keys with a crash; never let server data reach it un-deduplicated. */
+  private fun List<TranscriptRow>.withUniqueKeys(): List<TranscriptRow> {
+    val seen = HashMap<String, Int>(size * 2)
+    return map { row ->
+      val count = seen.merge(row.key, 1, Int::plus)!!
+      if (count == 1) row else row.copy(key = "${row.key}~$count")
+    }
   }
 
   private fun turnRows(turn: List<Message>, turnKey: String, expanded: Set<String>, working: Boolean): List<TranscriptRow> {
@@ -69,37 +85,37 @@ object TranscriptRows {
     }
 
     val body = mutableListOf<TranscriptRow>()
-    val run = mutableListOf<MessagePart>()
+    val run = mutableListOf<Pair<String, MessagePart>>()
     fun flush() {
       if (run.isEmpty()) return
       val folded = mutableListOf<TranscriptRow>()
       var index = 0
       while (index < run.size) {
-        val part = run[index]
+        val (ref, part) = run[index]
         if (part.tool in CONTEXT_TOOLS) {
-          val group = mutableListOf<MessagePart>()
-          while (index < run.size && run[index].tool in CONTEXT_TOOLS) group += run[index++]
+          val group = mutableListOf<Pair<String, MessagePart>>()
+          while (index < run.size && run[index].second.tool in CONTEXT_TOOLS) group += run[index++]
           folded += contextGroupRows(turnKey, group, expanded)
         } else {
-          folded += toolRows(turnKey, part, expanded)
+          folded += toolRows(turnKey, ref, part, expanded)
           index++
         }
       }
       if (run.size >= SUMMARY_THRESHOLD) {
-        val key = "$turnKey:summary:${run.first().id}"
+        val key = "$turnKey:summary:${run.first().first}"
         body += TranscriptRow(key, "tool-summary", title = "已处理 ${run.size} 个操作")
         if (key in expanded) body += folded
       } else body += folded
       run.clear()
     }
     assistants.forEach { message ->
-      message.parts.forEach { part ->
+      message.parts.forEachIndexed { index, part ->
         when {
           part.type == "tool" && (part.tool in HIDDEN_TOOLS || (part.tool == "question" && part.status !in FINISHED_TOOLS)) -> Unit
-          part.type == "tool" && part.isDisplayable -> run += part
+          part.type == "tool" && part.isDisplayable -> run += partRef(message, index, part) to part
           else -> {
             flush()
-            body += partRows(turnKey, message, part)
+            body += partRows(turnKey, partRef(message, index, part), part)
           }
         }
       }
@@ -126,28 +142,29 @@ object TranscriptRows {
       rows += TranscriptRow("$turnKey:meta", "meta", meta = meta, copyText = copy.takeIf { it.isNotBlank() })
     }
     if (!working) {
-      val edits = assistants.flatMap { it.parts }.filter { it.tool in EDIT_TOOLS && (it.patch.isNotBlank() || it.files.isNotEmpty() || inputString(it, "filePath").isNotBlank()) }
+      val edits = assistants.flatMap { message -> message.parts.mapIndexed { index, part -> partRef(message, index, part) to part } }
+        .filter { (_, it) -> it.tool in EDIT_TOOLS && (it.patch.isNotBlank() || it.files.isNotEmpty() || inputString(it, "filePath").isNotBlank()) }
       if (edits.isNotEmpty()) {
         val key = "$turnKey:diff"
-        val files = edits.flatMap { edit -> edit.files.ifEmpty { listOf(inputString(edit, "filePath")) } }.filter { it.isNotBlank() }.distinct()
+        val files = edits.flatMap { (_, edit) -> edit.files.ifEmpty { listOf(inputString(edit, "filePath")) } }.filter { it.isNotBlank() }.distinct()
         rows += TranscriptRow(key, "diff-summary", title = "本轮改动 ${files.size} 个文件", subtitle = files.take(3).joinToString("、"))
-        if (key in expanded) edits.take(MAX_DIFF_FILES).forEach { edit ->
+        if (key in expanded) edits.take(MAX_DIFF_FILES).forEach { (ref, edit) ->
           val path = inputString(edit, "filePath").ifBlank { edit.files.firstOrNull().orEmpty() }.ifBlank { "改动" }
           val patch = edit.patch.ifBlank { edit.output }
-          rows += TranscriptRow("$key:${edit.id}", "diff-file", title = path)
+          rows += TranscriptRow("$key:$ref", "diff-file", title = path)
           MarkdownBlocks.chunks(patch).forEachIndexed { index, chunk ->
-            rows += TranscriptRow("$key:${edit.id}:$index", "tool-body", title = if (index == 0) "改动" else "", text = chunk,
+            rows += TranscriptRow("$key:$ref:$index", "tool-body", title = if (index == 0) "改动" else "", text = chunk,
               copyText = patch.takeIf { index == 0 })
           }
         }
       }
     }
-    if (working && body.none { it.kind != "meta" }) rows += TranscriptRow("$turnKey:thinking", "thinking", text = "正在思考…")
+    if (working && body.none { it.kind != "meta" }) rows += TranscriptRow("$turnKey:thinking", "thinking", text = "运行中…")
     return rows
   }
 
-  private fun partRows(turnKey: String, message: Message, part: MessagePart): List<TranscriptRow> {
-    val key = "$turnKey:${message.id}:${part.id}"
+  private fun partRows(turnKey: String, ref: String, part: MessagePart): List<TranscriptRow> {
+    val key = "$turnKey:$ref"
     return when {
       part.type == "text" && part.text.isNotBlank() -> listOf(TranscriptRow(key, "text", text = part.text.trim()))
       part.type == "reasoning" && part.text.isNotBlank() -> listOf(TranscriptRow(key, "reasoning", text = part.text.trim()))
@@ -167,8 +184,9 @@ object TranscriptRows {
     }
   }
 
-  private fun contextGroupRows(turnKey: String, parts: List<MessagePart>, expanded: Set<String>): List<TranscriptRow> {
-    val key = "$turnKey:ctx:${parts.first().id}"
+  private fun contextGroupRows(turnKey: String, refs: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> {
+    val key = "$turnKey:ctx:${refs.first().first}"
+    val parts = refs.map { it.second }
     val read = parts.count { it.tool == "read" }
     val search = parts.count { it.tool == "glob" || it.tool == "grep" }
     val list = parts.count { it.tool == "list" }
@@ -176,14 +194,14 @@ object TranscriptRows {
       "$read 个读取".takeIf { read > 0 }, "$search 个搜索".takeIf { search > 0 }, "$list 个列表".takeIf { list > 0 }
     ).joinToString("、").ifBlank { "无" }
     return listOf(TranscriptRow(key, "context-group", title = "已收集上下文", subtitle = summary, status = parts.last().status)) +
-      if (key !in expanded) emptyList() else parts.map { part ->
+      if (key !in expanded) emptyList() else refs.map { (ref, part) ->
         val (title, subtitle) = toolInfo(part)
-        TranscriptRow("$key:${part.id}", "context-item", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status)
+        TranscriptRow("$key:$ref", "context-item", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status)
       }
   }
 
-  private fun toolRows(turnKey: String, part: MessagePart, expanded: Set<String>): List<TranscriptRow> {
-    val key = "$turnKey:tool:${part.id}"
+  private fun toolRows(turnKey: String, ref: String, part: MessagePart, expanded: Set<String>): List<TranscriptRow> {
+    val key = "$turnKey:tool:$ref"
     val (title, subtitle) = toolInfo(part)
     val row = TranscriptRow(key, "tool", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status,
       attachments = part.files.map { Attachment(it, "", it.substringAfterLast('/')) } + part.attachments)

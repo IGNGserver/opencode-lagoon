@@ -40,12 +40,14 @@ class OpenCodeApiTest {
     assertEquals(TaskPhase.THINKING, busy.phase)
     val tool = TaskReducer.event("id", "message.part.updated", JSONObject("""{"part":{"type":"tool","tool":"bash","state":{"title":"Run test","input":{"command":"gradle test"}}}}"""), busy)
     assertEquals(TaskPhase.TESTING, tool!!.phase)
+    // Every running sub-phase shares one user-facing label, never “思考中 / 执行工具 / 测试中”.
+    assertEquals(TaskState.RUNNING_DETAIL, tool.detail)
     val completed = TaskReducer.status("id", "idle", tool)
     assertEquals(TaskPhase.COMPLETED, completed.phase)
     assertEquals(TaskPhase.COMPLETED, TaskReducer.status("id", "idle", completed).phase)
     val restarted = TaskReducer.status("id", "busy", completed)
     assertEquals(TaskPhase.THINKING, restarted.phase)
-    assertEquals("正在处理", restarted.detail)
+    assertEquals(TaskState.RUNNING_DETAIL, restarted.detail)
   }
 
   @Test fun taskPhaseGroupsStayConsistent() {
