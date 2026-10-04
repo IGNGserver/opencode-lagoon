@@ -25,7 +25,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.*
@@ -90,7 +89,7 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
       items(questions, key = { "question:${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
     AnimatedVisibility(!nearBottom && rows.isNotEmpty(), modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)) {
-      Button(onClick = { follow = true; newContent = false; scope.launch { scrollBottom() } }, colors = ButtonDefaults.buttonColors()) { Text(if (newContent) "新消息 ↓" else "回到底部 ↓") }
+      TextButton(text = if (newContent) "新消息 ↓" else "回到底部 ↓", onClick = { follow = true; newContent = false; scope.launch { scrollBottom() } })
     }
   }
 }
@@ -102,13 +101,13 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
       Text(row.text, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
     "user" -> UserMessageRow(row, onFile)
-    "text" -> parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block) }
-    "reasoning" -> Column(Modifier.padding(start = 10.dp)) {
-      parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true) }
-    }
+    // One selection container per reply so a long press can select across paragraphs; no copy buttons.
+    "text" -> SelectionContainer { Column { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
+    "reasoning" -> SelectionContainer { Column(Modifier.padding(start = 10.dp)) {
+      parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) }
+    } }
     "meta" -> Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       if (row.meta.isNotBlank()) Text(row.meta, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-      if (!row.copyText.isNullOrBlank()) CopyButton(row.copyText)
     }
     "divider" -> DividerRow(row.text)
     "thinking" -> ThinkingRow(row.text)
@@ -126,10 +125,7 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
       row.args.forEach { arg -> ArgChip(arg) }
     }
     "tool-body" -> Column(Modifier.fillMaxWidth().padding(start = 24.dp, top = 4.dp)) {
-      if (row.title.isNotBlank() || row.copyText != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(row.title.ifBlank { "详细" }, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        row.copyText?.let { CopyButton(it) }
-      }
+      if (row.title.isNotBlank()) Text(row.title, modifier = Modifier.padding(bottom = 4.dp), style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
       CodePanel(row.text)
     }
     "diff-file" -> Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -159,7 +155,6 @@ private fun UserMessageRow(row: TranscriptRow, onFile: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
       Spacer(Modifier.weight(1f))
       if (row.meta.isNotBlank()) Text(row.meta, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-      if (!row.copyText.isNullOrBlank()) CopyButton(row.copyText)
     }
   }
 }
@@ -250,12 +245,6 @@ internal fun ResourceHint(status: ResourceStatus, empty: String, explanation: St
 }
 
 @Composable
-private fun CopyButton(text: String) {
-  val clipboard = LocalClipboardManager.current
-  TextButton(text = "复制", onClick = { clipboard.setText(AnnotatedString(text)) })
-}
-
-@Composable
 private fun annotated(spans: List<MarkdownSpan>): AnnotatedString {
   val primary = MiuixTheme.colorScheme.primary
   val chip = MiuixTheme.colorScheme.secondaryContainer
@@ -275,7 +264,9 @@ private fun annotated(spans: List<MarkdownSpan>): AnnotatedString {
 }
 
 @Composable
-internal fun MarkdownBlockView(block: MarkdownBlock, subdued: Boolean = false) {
+internal fun MarkdownBlockView(block: MarkdownBlock, subdued: Boolean = false, selectable: Boolean = true) {
+  // Nested SelectionContainers would split selection per paragraph; callers wrapping a whole reply pass false.
+  val select: @Composable (@Composable () -> Unit) -> Unit = { inner -> if (selectable) SelectionContainer { inner() } else inner() }
   val base = MiuixTheme.textStyles.body1.copy(
     color = if (subdued) MiuixTheme.colorScheme.onSurfaceVariantSummary else MiuixTheme.colorScheme.onSurface,
     lineHeight = 26.sp, fontSize = if (subdued) 14.sp else 16.sp
@@ -286,18 +277,15 @@ internal fun MarkdownBlockView(block: MarkdownBlock, subdued: Boolean = false) {
     when (block.kind) {
       "rule" -> HorizontalDivider()
       "code" -> Column(Modifier.fillMaxWidth().background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(10.dp)).padding(10.dp)) {
-        if (block.copyText != null || block.prefix.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-          Text(block.prefix.ifBlank { "代码" }, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.footnote2)
-          block.copyText?.let { CopyButton(it) }
-        }
-        SelectionContainer { BasicText(block.text, Modifier.horizontalScroll(rememberScrollState()), style = base.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp)) }
+        if (block.prefix.isNotBlank()) Text(block.prefix, modifier = Modifier.padding(bottom = 4.dp), style = MiuixTheme.textStyles.footnote2)
+        select { BasicText(block.text, Modifier.horizontalScroll(rememberScrollState()), style = base.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp)) }
       }
       "table-head", "table-row" -> Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(MiuixTheme.colorScheme.secondaryContainer).padding(8.dp)) {
-        block.cells.forEach { cell -> SelectionContainer { BasicText(annotated(cell), Modifier.width(180.dp).padding(end = 12.dp), style = base.copy(fontWeight = if (block.kind == "table-head") FontWeight.SemiBold else FontWeight.Normal)) } }
+        block.cells.forEach { cell -> select { BasicText(annotated(cell), Modifier.width(180.dp).padding(end = 12.dp), style = base.copy(fontWeight = if (block.kind == "table-head") FontWeight.SemiBold else FontWeight.Normal)) } }
       }
       else -> {
         val task = taskMarker(block)
-        SelectionContainer { BasicText(buildAnnotatedString { append(displayPrefix); append(task.first); append(annotated(task.second)) },
+        select { BasicText(buildAnnotatedString { append(displayPrefix); append(task.first); append(annotated(task.second)) },
           style = if (block.kind == "heading") base.copy(fontSize = when (block.level) { 1 -> 25.sp; 2 -> 21.sp; else -> 18.sp }, fontWeight = FontWeight.SemiBold) else base) }
       }
     }

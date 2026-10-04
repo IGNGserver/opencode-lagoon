@@ -39,6 +39,7 @@ import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperArrow
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.extra.SuperDropdown
 import top.yukonga.miuix.kmp.extra.SuperSwitch
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.*
@@ -640,13 +641,8 @@ fun ServersModal(
           verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
           item {
-            Button(
-              onClick = { editing = null; showForm = true },
-              modifier = Modifier.fillMaxWidth(),
-              colors = ButtonDefaults.buttonColorsPrimary()
-            ) {
-              Text("＋ 添加新服务器")
-            }
+            TextButton(text = "添加新服务器", onClick = { editing = null; showForm = true }, modifier = Modifier.fillMaxWidth(),
+              colors = ButtonDefaults.textButtonColorsPrimary())
           }
           items(state.profiles, key = { it.id }) { profile ->
             Card(insideMargin = PaddingValues(16.dp)) {
@@ -680,25 +676,12 @@ fun ServersModal(
               }
               Spacer(Modifier.height(12.dp))
               Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                  onClick = { controller.connect(profile.id); onConnected() },
-                  enabled = profile.id != state.serverId || !state.connected,
-                  cornerRadius = 16.dp,
-                  colors = ButtonDefaults.buttonColorsPrimary()
-                ) {
-                  Text("连接")
-                }
-                Button(
-                  onClick = { editing = profile; showForm = true },
-                  cornerRadius = 16.dp,
-                  colors = ButtonDefaults.buttonColors()
-                ) {
-                  Text("编辑")
-                }
-                TextButton(
-                  text = "删除",
-                  onClick = { deleting = profile }
-                )
+                TextButton(text = "连接", onClick = { controller.connect(profile.id); onConnected() },
+                  enabled = profile.id != state.serverId || !state.connected, modifier = Modifier.weight(1f),
+                  colors = ButtonDefaults.textButtonColorsPrimary())
+                TextButton(text = "编辑", onClick = { editing = profile; showForm = true }, modifier = Modifier.weight(1f))
+                TextButton(text = "删除", onClick = { deleting = profile }, modifier = Modifier.weight(1f),
+                  colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
               }
             }
           }
@@ -718,18 +701,9 @@ fun ServersModal(
           "仅从此设备删除连接记录和存储凭据，不会对远程服务器数据产生任何影响。",
           style = MiuixTheme.textStyles.body1
         )
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-          TextButton(text = "取消", onClick = { deleting = null })
-          Spacer(Modifier.width(10.dp))
-          TextButton(
-            text = "确认删除",
-            colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error),
-            onClick = {
-              controller.deleteServer(profile.id)
-              deleting = null
-            }
-          )
+        DialogActions("取消", { deleting = null }, "确认删除", danger = true) {
+          controller.deleteServer(profile.id)
+          deleting = null
         }
       }
     }
@@ -875,38 +849,20 @@ private fun MiuixServerForm(
     }
 
     item {
-      Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+      DialogActions(
+        "取消", onCancel, if (working) "正在测试…" else "保存并连接",
+        enabled = !working && name.isNotBlank() &&
+          (normalizedInput.startsWith("https://", true) || (normalizedInput.startsWith("http://", true) && allowHttp))
       ) {
-        Button(
-          onClick = onCancel,
-          modifier = Modifier.weight(1f),
-          cornerRadius = 18.dp,
-          colors = ButtonDefaults.buttonColors()
-        ) {
-          Text("取消")
-        }
-        Button(
-          onClick = {
-            working = true
-            val normalizedUrl = normalizedInput.trimEnd('/')
-            val profile = (existing ?: ServerProfile(id, "", "")).copy(
-              name = name.trim().ifBlank { "OpenCode" }, url = normalizedUrl, username = username.trim().ifBlank { "opencode" }, autoConnect = autoConnect, notifications = notifications,
-              allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp
-            )
-            onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message ->
-              result = message
-              working = false
-            }
-          },
-          enabled = !working && name.isNotBlank() &&
-              (normalizedInput.startsWith("https://", true) || (normalizedInput.startsWith("http://", true) && allowHttp)),
-          modifier = Modifier.weight(1.6f),
-          cornerRadius = 18.dp,
-          colors = ButtonDefaults.buttonColorsPrimary()
-        ) {
-          Text(if (working) "正在测试…" else "保存并连接")
+        working = true
+        val normalizedUrl = normalizedInput.trimEnd('/')
+        val profile = (existing ?: ServerProfile(id, "", "")).copy(
+          name = name.trim().ifBlank { "OpenCode" }, url = normalizedUrl, username = username.trim().ifBlank { "opencode" }, autoConnect = autoConnect, notifications = notifications,
+          allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp
+        )
+        onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message ->
+          result = message
+          working = false
         }
       }
     }
@@ -941,94 +897,40 @@ fun SettingsScreen(
   LaunchedEffect(Unit) { crashReport = withContext(Dispatchers.IO) { CrashLog.read(context) } }
 
 
+  var showModels by remember { mutableStateOf(false) }
+  var showSaved by remember { mutableStateOf(false) }
+  val permissionProject = state.session?.let { resolveSessionProject(it, state.projects) } ?: state.project
+
+  // MIUIX settings layout: 12dp card margin + SmallTitle's 28dp inset aligns titles with row content.
   LazyColumn(
     modifier = Modifier
       .fillMaxSize()
       .overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 48.dp),
-    verticalArrangement = Arrangement.spacedBy(16.dp)
+    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 120.dp)
   ) {
-    // 1. 网络与连接
     item {
-      MiuixSectionHeader("网络与连接")
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 20.dp,
-        insideMargin = PaddingValues(16.dp)
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Column(Modifier.weight(1f)) {
-            Text(
-              state.server?.name ?: "未连接服务器",
-              style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.SemiBold)
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-              if (state.connected) "OpenCode ${state.version.ifBlank { "V2" }} · 正常通信中" else "离线或尚未连接",
-              style = MiuixTheme.textStyles.footnote1.copy(
-                color = if (state.connected) MiuixColorTokens.Success else MiuixTheme.colorScheme.onSurfaceVariantSummary
-              )
-            )
-          }
-          Button(
-            onClick = onManageServers,
-            cornerRadius = 18.dp,
-            colors = ButtonDefaults.buttonColorsPrimary()
-          ) {
-            Text("管理服务器")
-          }
-        }
+      SmallTitle("网络与连接")
+      Card(Modifier.fillMaxWidth()) {
+        SuperArrow(
+          title = state.server?.name ?: "未连接服务器",
+          summary = if (state.connected) "OpenCode ${state.version.ifBlank { "V2" }} · 正常通信中" else "离线或尚未连接 · 点按管理服务器",
+          startAction = {
+            StatusDot(if (state.connected) MiuixColorTokens.Success else MiuixTheme.colorScheme.onSurfaceVariantSummary, Modifier.padding(end = 12.dp))
+          },
+          onClick = onManageServers
+        )
       }
     }
 
-    // 2. 显示与交互
     item {
-      MiuixSectionHeader("显示与交互")
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 20.dp,
-        insideMargin = PaddingValues(0.dp)
-      ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-          Text(
-            text = "深浅色外观",
-            style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium)
-          )
-          Spacer(Modifier.height(10.dp))
-          Row(
-            modifier = Modifier
-              .fillMaxWidth()
-              .background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(14.dp))
-              .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-          ) {
-            ThemeMode.entries.forEach { mode ->
-              val isSelected = themeMode == mode
-              Box(
-                modifier = Modifier
-                  .weight(1f)
-                  .clip(miuixSquircleShape(10.dp))
-                  .background(if (isSelected) MiuixTheme.colorScheme.surface else Color.Transparent)
-                  .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { onTheme(mode) }
-                  )
-                  .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center
-              ) {
-                Text(
-                  text = mode.label,
-                  style = MiuixTheme.textStyles.footnote1.copy(
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (isSelected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
-                  )
-                )
-              }
-            }
-          }
-        }
-        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+      SmallTitle("显示与交互")
+      Card(Modifier.fillMaxWidth()) {
+        SuperDropdown(
+          title = "深浅色外观",
+          items = ThemeMode.entries.map { it.label },
+          selectedIndex = ThemeMode.entries.indexOf(themeMode),
+          onSelectedIndexChange = { onTheme(ThemeMode.entries[it]) }
+        )
         SuperSwitch(
           title = "返回手势预览",
           summary = "拖动返回手势时轻微预览上一级页面",
@@ -1038,54 +940,41 @@ fun SettingsScreen(
       }
     }
 
-    // 3. 超级岛与通知
     item {
-      MiuixSectionHeader("超级岛与通知")
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 20.dp,
-        insideMargin = PaddingValues(0.dp)
-      ) {
-        Column(Modifier.padding(16.dp)) {
-          Text("系统通知与超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-          Spacer(Modifier.height(4.dp))
-          Text(
-            "有任务运行或等你处理时，以系统「实时更新」显示「运行中 / 已完成 / 待回复 / 失败」计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云）；全部结束后变为普通通知。外观与配色由系统决定。",
-            style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          )
-          Spacer(Modifier.height(12.dp))
-          Button(
-            onClick = onNotifications,
-            cornerRadius = 18.dp,
-            colors = ButtonDefaults.buttonColors()
-          ) {
-            Text("检查 / 授予通知权限")
-          }
-        }
-        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-        Column(Modifier.padding(16.dp)) {
-          Text("实时更新通道状态", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
-          Spacer(Modifier.height(10.dp))
-          val list = islandSupport
-          if (list == null) {
-            Text("正在检测本机灵动岛能力…", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-          } else {
-            list.forEachIndexed { index, item ->
-              if (index > 0) Spacer(Modifier.height(12.dp))
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                  Modifier.size(8.dp).background(
-                    when {
-                      !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                      item.granted -> MiuixColorTokens.Success
-                      else -> MiuixColorTokens.Warning
-                    },
-                    miuixSquircleShape(4.dp)
-                  )
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(item.label, style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
-                Spacer(Modifier.weight(1f))
+      SmallTitle("模型与权限")
+      Card(Modifier.fillMaxWidth()) {
+        SuperArrow(
+          title = "管理模型",
+          summary = if (state.modelCatalog.isEmpty()) "连接服务器后可选择显示哪些模型" else "显示 ${state.visibleModels.size} / ${state.modelCatalog.size} 个模型",
+          enabled = state.modelCatalog.isNotEmpty(),
+          onClick = { showModels = true }
+        )
+        if (state.supportsSavedPermissions) SuperArrow(
+          title = "已保存的项目权限",
+          summary = permissionProject?.let { "当前项目：${it.name}" } ?: "先在会话页选择项目",
+          enabled = permissionProject != null && state.connected,
+          onClick = { showSaved = true; controller.loadSavedPermissions() }
+        )
+      }
+    }
+
+    item {
+      SmallTitle("超级岛与通知")
+      Card(Modifier.fillMaxWidth()) {
+        SuperArrow(
+          title = "通知权限",
+          summary = "有任务运行或等你处理时，以系统「实时更新」显示运行中 / 已完成 / 待回复 / 失败计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云），外观与配色由系统决定",
+          onClick = onNotifications
+        )
+        val list = islandSupport
+        if (list == null) {
+          BasicComponent(title = "实时更新通道", summary = "正在检测本机实时更新能力…")
+        } else {
+          list.forEach { item ->
+            BasicComponent(
+              title = item.label,
+              summary = item.note,
+              endActions = {
                 Text(
                   when {
                     !item.supported -> "不支持"
@@ -1101,61 +990,52 @@ fun SettingsScreen(
                   )
                 )
               }
-              Spacer(Modifier.height(2.dp))
-              Text(item.note, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-            }
-            val promoted = list.firstOrNull { it.vendor == "android" && it.supported && !it.granted }
-            if (promoted != null) {
-              Spacer(Modifier.height(12.dp))
-              Button(
-                onClick = {
-                  TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } }
-                },
-                cornerRadius = 18.dp,
-                colors = ButtonDefaults.buttonColorsPrimary()
-              ) {
-                Text("开启实时更新权限")
-              }
-            }
-            Spacer(Modifier.height(10.dp))
-            Text("荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+            )
           }
+          if (list.any { it.vendor == "android" && it.supported && !it.granted }) SuperArrow(
+            title = "开启实时更新权限",
+            summary = "Android 16 实时更新需要单独授权",
+            onClick = { TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } } }
+          )
+          BasicComponent(summary = "荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。")
         }
       }
     }
 
-    // 4. 关于与诊断
     item {
-      MiuixSectionHeader("关于与诊断")
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 20.dp,
-        insideMargin = PaddingValues(16.dp)
-      ) {
-        Text("OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()})", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-        Spacer(Modifier.height(4.dp))
-        Text("服务器接口：${state.protocol} · ${if (state.connected) "可连接" else "未连接"}\n实时同步：${if (state.streamConnected) "正常" else "恢复中"} · ${if (state.degraded || state.cached) "数据待更新" else "数据已同步"}", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-          Button(
-            onClick = {
-              clipboard.setText(AnnotatedString("OpenCode Lagoon ${packageInfo.versionName}\nAndroid ${android.os.Build.VERSION.RELEASE} / API ${android.os.Build.VERSION.SDK_INT}\n${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\nprotocol=${state.protocol}, api=${state.connected}, stream=${state.streamConnected}, stale=${state.degraded}, cached=${state.cached}\ncapabilitiesDocumented=${state.capabilities.documented}, sessions=${state.sessions.size}, messages=${state.messages.size}"))
-            },
-            cornerRadius = 16.dp,
-            colors = ButtonDefaults.buttonColors()
-          ) {
-            Text("复制诊断信息")
+      SmallTitle("关于与诊断")
+      Card(Modifier.fillMaxWidth()) {
+        BasicComponent(
+          title = "OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else @Suppress("DEPRECATION") packageInfo.versionCode.toLong()})",
+          summary = "服务器接口：${state.protocol} · ${if (state.connected) "可连接" else "未连接"}\n实时同步：${if (state.streamConnected) "正常" else "恢复中"} · ${if (state.degraded || state.cached) "数据待更新" else "数据已同步"}"
+        )
+        SuperArrow(
+          title = "复制诊断信息",
+          summary = "版本、系统与连接状态，不含凭据",
+          onClick = {
+            clipboard.setText(AnnotatedString("OpenCode Lagoon ${packageInfo.versionName}\nAndroid ${android.os.Build.VERSION.RELEASE} / API ${android.os.Build.VERSION.SDK_INT}\n${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\nprotocol=${state.protocol}, api=${state.connected}, stream=${state.streamConnected}, stale=${state.degraded}, cached=${state.cached}\ncapabilitiesDocumented=${state.capabilities.documented}, sessions=${state.sessions.size}, messages=${state.messages.size}"))
           }
-        }
+        )
         crashReport?.let { report ->
-          Spacer(Modifier.height(12.dp))
-          Text("上次崩溃", style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
-          Text("${report.lineSequence().firstOrNull().orEmpty()}\n${CrashLog.headline(report)}", maxLines = 3, overflow = TextOverflow.Ellipsis,
-            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-          Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            TextButton(text = "清除", onClick = { CrashLog.clear(context); crashReport = null })
-            TextButton(text = "复制崩溃日志", onClick = { clipboard.setText(AnnotatedString(report)) })
-          }
+          BasicComponent(title = "上次崩溃", summary = "${report.lineSequence().firstOrNull().orEmpty()}\n${CrashLog.headline(report)}")
+          SuperArrow(title = "复制崩溃日志", onClick = { clipboard.setText(AnnotatedString(report)) })
+          SuperArrow(title = "清除崩溃记录", onClick = { CrashLog.clear(context); crashReport = null })
+        }
+      }
+    }
+  }
+
+  if (showModels) ManageModelsSheet(state, controller) { showModels = false }
+  if (showSaved) SuperBottomSheet(title = "已保存的项目权限", show = true, onDismissRequest = { showSaved = false; controller.closeSavedPermissions() }) {
+    Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(bottom = 16.dp)) {
+      permissionProject?.let { Text("项目：${it.name}", Modifier.padding(bottom = 8.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)) }
+      ResourceHint(state.resource("saved"), "没有已保存的权限规则", retry = { controller.loadSavedPermissions() })
+      LazyColumn {
+        items(state.savedPermissions.orEmpty().distinctBy { it.id }, key = { it.id }) { rule ->
+          BasicComponent(title = rule.action, summary = rule.resource, endActions = {
+            TextButton(text = "撤销", enabled = !state.pending("revoke:${rule.id}"), onClick = { controller.revokeSavedPermission(rule) },
+              colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
+          })
         }
       }
     }

@@ -497,12 +497,17 @@ class OpenCodeApi(
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
-  suspend fun send(session: Session, text: String, agent: String?, model: ModelChoice?, references: List<FileReference> = emptyList()) {
+  /**
+   * [inline] carries files picked on the phone as `data:` URIs; both protocols accept them in the
+   * prompt itself, so nothing is uploaded into the project directory first.
+   */
+  suspend fun send(session: Session, text: String, agent: String?, model: ModelChoice?, references: List<FileReference> = emptyList(), inline: List<InlineFile> = emptyList()) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> {
         val parts = JSONArray().put(JSONObject().put("type", "text").put("text", text))
         references.forEach { ref -> parts.put(JSONObject().put("type", "file").put("mime", ref.mime)
           .put("filename", ref.path.substringAfterLast('/')).put("url", referenceUri(session, ref))) }
+        inline.forEach { file -> parts.put(JSONObject().put("type", "file").put("mime", file.mime).put("filename", file.name).put("url", file.uri)) }
         val body = JSONObject().put("parts", parts)
         if (!agent.isNullOrBlank()) body.put("agent", agent)
         if (model != null) body.put("model", JSONObject().put("providerID", model.providerId).put("modelID", model.modelId))
@@ -510,13 +515,16 @@ class OpenCodeApi(
       }
       ServerProtocol.V2 -> {
         val contract = capabilities()
-        check(references.isEmpty() || contract.fileReferences) { "此实例尚未确认文件引用协议，请移除附件或刷新连接" }
+        check((references.isEmpty() && inline.isEmpty()) || contract.fileReferences) { "此实例尚未确认文件引用协议，请移除附件或刷新连接" }
         if (!agent.isNullOrBlank()) request("POST", "api/session/${segment(session.id)}/agent", body = JSONObject().put("agent", agent))
         if (model != null) request("POST", "api/session/${segment(session.id)}/model", body = JSONObject().put("model", JSONObject().put("providerID", model.providerId).put("id", model.modelId)))
         val prompt = JSONObject().put("text", text)
-        if (references.isNotEmpty()) prompt.put("files", JSONArray().apply { references.forEach { ref ->
-          put(JSONObject().put(contract.fileUriField, referenceUri(session, ref)).put("mime", ref.mime).put("name", ref.path.substringAfterLast('/')))
-        } })
+        if (references.isNotEmpty() || inline.isNotEmpty()) prompt.put("files", JSONArray().apply {
+          references.forEach { ref ->
+            put(JSONObject().put(contract.fileUriField, referenceUri(session, ref)).put("mime", ref.mime).put("name", ref.path.substringAfterLast('/')))
+          }
+          inline.forEach { file -> put(JSONObject().put(contract.fileUriField, file.uri).put("mime", file.mime).put("name", file.name)) }
+        })
         request("POST", "api/session/${segment(session.id)}/prompt", body = if (contract.promptEnvelope) JSONObject().put("prompt", prompt) else prompt)
       }
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
@@ -548,21 +556,29 @@ class OpenCodeApi(
     ServerProtocol.V2 -> dataArray(obj("api/command", query = locationQuery(directory))).objects().map { CommandChoice(it.str("name"), it.str("description")) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
-  suspend fun models(directory: String): List<ModelChoice> {
+  suspend fun models(directory: String): List<ModelChoice> = modelCatalog(directory).map { it.choice }
+
+  /** Models the server can run in [directory], with the metadata [ModelVisibility] needs. */
+  suspend fun modelCatalog(directory: String): List<ModelInfo> {
     return when (ensureProtocol()) {
       ServerProtocol.V1 -> {
+        // config/providers only lists connected providers, like the official selector's `connected()`.
         val providers = obj("config/providers", directory).arr("providers").objects()
         providers.flatMap { provider ->
           val providerId = provider.str("id")
           val models = provider.obj("models")
           models.keys().asSequence().map { key ->
-            val model = models.optJSONObject(key) ?: JSONObject()
-            ModelChoice(providerId, key, model.str("name").ifBlank { key })
+            (models.optJSONObject(key) ?: JSONObject()).toV1ModelInfo(providerId, provider.str("name"), key)
           }.toList()
         }
       }
-      ServerProtocol.V2 -> dataArray(obj("api/model", query = locationQuery(directory))).objects().map {
-        ModelChoice(it.str("providerID"), it.str("id"), it.str("name").ifBlank { it.str("id") })
+      ServerProtocol.V2 -> {
+        val models = dataArray(obj("api/model", query = locationQuery(directory))).objects()
+        // Display names only; the catalog stays usable when this optional route is missing.
+        val names = try {
+          dataArray(obj("api/provider", query = locationQuery(directory))).objects().associate { it.str("id") to it.str("name") }
+        } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel } catch (_: Exception) { emptyMap() }
+        models.mapNotNull { it.toV2ModelInfo(names) }
       }
       ServerProtocol.UNKNOWN -> emptyList()
     }

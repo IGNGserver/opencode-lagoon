@@ -15,7 +15,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -46,8 +48,6 @@ import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-
-private data class Route(val tab: RootTab, val session: String?)
 
 class MainActivity : ComponentActivity() {
   private var deepLink by mutableStateOf<Pair<String, String>?>(null)
@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
       val keyboardOpen = WindowInsets.ime.getBottom(density) > 0
       val wide = LocalConfiguration.current.screenWidthDp >= 640
       val inChatDetail = sessionStack.isNotEmpty()
-      val route = Route(currentTab, sessionStack.lastOrNull())
+      val route = NavRoute(currentTab, sessionStack.lastOrNull(), sessionStack.size)
       fun openSession(id: String, child: Boolean = false) {
         focusManager.clearFocus()
         if (state.session != null) snapshots["${state.serverId}:${state.sessionId}"] = state
@@ -142,10 +142,9 @@ class MainActivity : ComponentActivity() {
       }
       val backProgress = remember { Animatable(0f) }
       var gestureActive by remember { mutableStateOf(false) }
-      var backDirection by remember { mutableStateOf(false) }
-      var gestureRoute by remember { mutableStateOf<Route?>(null) }
+      var gestureRoute by remember { mutableStateOf<NavRoute?>(null) }
       PredictiveBackHandler(enabled = SessionNavigation(currentTab, sessionStack).canGoBack && !keyboardOpen && !chatModal && !showingServersSheet && !showingNewSession && !showingProjects) { progress ->
-        gestureActive = true; gestureRoute = route; backDirection = true
+        gestureActive = true; gestureRoute = route
         try {
           progress.collect { if (previewBack) backProgress.snapTo(it.progress.coerceIn(0f, 1f)) }
           goBack()
@@ -172,9 +171,12 @@ class MainActivity : ComponentActivity() {
               }
             }
             AnimatedContent(route, transitionSpec = {
-              val enter = if (backDirection) -1 else 1
-              (fadeIn(tween(200)) + slideInHorizontally(tween(220)) { it * enter / 12 }) togetherWith
-                (fadeOut(tween(150)) + slideOutHorizontally(tween(220)) { -it * enter / 12 })
+              // Direction comes from the route change itself: tabs to the right / deeper pages enter
+              // from the right, tabs to the left / going back enter from the left.
+              val direction = slideDirection(initialState, targetState)
+              val motion = tween<IntOffset>(300, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
+              (fadeIn(tween(220, delayMillis = 40)) + slideInHorizontally(motion) { it * direction / 4 }) togetherWith
+                (fadeOut(tween(160)) + slideOutHorizontally(motion) { -it * direction / 4 })
             }, label = "navigation") { target ->
               val active = target == route
               val displayed = if (target.session == state.sessionId) state else snapshots["${state.serverId}:${target.session}"] ?: state
@@ -183,7 +185,7 @@ class MainActivity : ComponentActivity() {
               }.then(if (active) Modifier else Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
                 .background(MiuixTheme.colorScheme.background)) {
                 if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
-                  ChatScreen(displayed, controller, onBack = { backDirection = true; goBack() }, onOpenChild = { backDirection = false; openSession(it, true) }, onModal = { if (active) chatModal = it }, interactive = active)
+                  ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { openSession(it, true) }, onModal = { if (active) chatModal = it }, interactive = active)
                 } else holder.SaveableStateProvider("root:${state.serverId}:${target.tab}") {
                   Column(Modifier.fillMaxSize().then(if (target.tab == RootTab.SESSIONS)
                     Modifier.windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)) else Modifier)) {
@@ -195,12 +197,12 @@ class MainActivity : ComponentActivity() {
                     Row(Modifier.weight(1f).fillMaxWidth()) {
                       if (wide) NavigationRail {
                         val icons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
-                        RootTab.entries.forEachIndexed { i, tab -> NavigationRailItem(target.tab == tab, { backDirection = false; currentTab = tab }, icons[i], tab.label) }
+                        RootTab.entries.forEachIndexed { i, tab -> NavigationRailItem(target.tab == tab, { currentTab = tab }, icons[i], tab.label) }
                       }
                       Box(Modifier.weight(1f).fillMaxHeight()) {
                       when (target.tab) {
-                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { backDirection = false; openSession(it) }, { showingServersSheet = true }, { showingNewSession = true }, { showingProjects = true })
-                        RootTab.ACTIVITY -> ActivityScreen(state, controller) { backDirection = false; openSession(it) }
+                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { openSession(it) }, { showingServersSheet = true }, { showingNewSession = true }, { showingProjects = true })
+                        RootTab.ACTIVITY -> ActivityScreen(state, controller) { openSession(it) }
                         RootTab.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
                           if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                           else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
@@ -208,7 +210,7 @@ class MainActivity : ComponentActivity() {
                       }
                       }
                     }
-                    if (!wide && state.profiles.isNotEmpty()) MiuixNavigationDock(target.tab, { backDirection = false; currentTab = it }, dark)
+                    if (!wide && state.profiles.isNotEmpty()) MiuixNavigationDock(target.tab, { currentTab = it }, dark)
                   }
                 }
               }
