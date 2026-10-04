@@ -849,7 +849,7 @@ class LagoonController private constructor(private val appContext: Context) {
         if (state.value.draft == text) updateDraft("")
         accepted?.invoke()
       }
-      op.commitConnection { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送")),
+      op.commitConnection { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL)),
         previews = it.previews + (session.id to SessionPreview(SessionContent.CONTENT, text.take(300))))) }
       op.commit { it.copy(agentChanged = false, modelChanged = false, references = emptyList()) }
     }

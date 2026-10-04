@@ -1,5 +1,6 @@
 package com.igng.opencode.lagoon.core
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -153,6 +154,66 @@ class TranscriptRowsTest {
       .copy(finish = "aborted")))
     assertTrue(rows.any { it.kind == "divider" && it.text.contains("中断") })
     assertTrue(rows.none { it.kind == "error" })
+  }
+
+  private fun assertUniqueKeys(rows: List<TranscriptRow>) {
+    val duplicates = rows.groupBy { it.key }.filterValues { it.size > 1 }.keys
+    assertTrue("duplicate LazyColumn keys: $duplicates", duplicates.isEmpty())
+  }
+
+  @Test fun v2TextAndReasoningWithoutIdsInOneMessageGetDistinctKeys() {
+    // Official V2 schema: Assistant.Text / Assistant.Reasoning carry no id field.
+    val message = JSONObject("""{"id":"msg_a","type":"assistant","time":{"created":$t0},"agent":"build","model":{"id":"m","providerID":"p"},
+      "content":[{"type":"reasoning","text":"想一想"},{"type":"text","text":"答案"},{"type":"text","text":"补充"}]}""").toMessage()
+    assertEquals(listOf("msg_a#0", "msg_a#1", "msg_a#2"), message.parts.map { it.id })
+    val rows = TranscriptRows.build(listOf(user("u1", t0), message))
+    assertEquals(1, rows.count { it.kind == "reasoning" })
+    assertEquals(2, rows.count { it.kind == "text" })
+    assertUniqueKeys(rows)
+  }
+
+  @Test fun idlessPartsAreKeyedByPositionWhenTheParserDidNotAssignIds() {
+    val rows = TranscriptRows.build(listOf(user("u1", t0),
+      assistant("a1", t0 + 500, part("", "reasoning", text = "r"), part("", "text", text = "x"), part("", "text", text = "y"))))
+    assertEquals(3, rows.count { it.kind == "reasoning" || it.kind == "text" })
+    assertUniqueKeys(rows)
+  }
+
+  @Test fun toolCallIdReusedAcrossMessagesOfOneTurnDoesNotCollide() {
+    // Real data: the provider returned call_1966253 twice within one turn, each after a reasoning part.
+    val messages = listOf(user("u1", t0),
+      assistant("a1", t0 + 500, part("a1#0", "reasoning", text = "查找"), tool("call_1966253", "grep", input = """{"pattern":"x"}""")),
+      assistant("a2", t0 + 900, part("a2#0", "reasoning", text = "再查"), tool("call_1966253", "grep", input = """{"pattern":"y"}""")),
+      assistant("a3", t0 + 1_300, tool("call_7", "bash", input = """{"command":"ls"}"""), tool("call_7", "bash", input = """{"command":"pwd"}""")))
+    val rows = TranscriptRows.build(messages)
+    assertEquals(2, rows.count { it.kind == "context-group" })
+    assertEquals(2, rows.count { it.kind == "tool" })
+    assertUniqueKeys(rows)
+    val expanded = TranscriptRows.build(messages, rows.filter { it.kind == "context-group" || it.kind == "tool" }.map { it.key }.toSet())
+    assertEquals(2, expanded.count { it.kind == "context-item" })
+    assertUniqueKeys(expanded)
+  }
+
+  @Test fun duplicateMessagesStillProduceUniqueKeys() {
+    val answer = assistant("a1", t0 + 500, part("p1", "text", text = "答案"), tool("t1", "edit", input = """{"filePath":"a.kt"}""", patch = "@@ -1 +1 @@"))
+    val rows = TranscriptRows.build(listOf(user("u1", t0), answer, answer, user("u1", t0 + 4_000_000), answer))
+    assertUniqueKeys(rows)
+    val summary = rows.first { it.kind == "diff-summary" }
+    assertUniqueKeys(TranscriptRows.build(listOf(user("u1", t0), answer, answer), setOf(summary.key)))
+  }
+
+  @Test fun keysAreStableAcrossRebuildsSoExpansionSurvivesUpdates() {
+    val first = listOf(user("u1", t0), assistant("a1", t0 + 500, part("a1#0", "reasoning", text = "r"), tool("call_1", "bash", input = """{"command":"ls"}""", output = "x")))
+    val toolKey = TranscriptRows.build(first).single { it.kind == "tool" }.key
+    val grown = first + assistant("a2", t0 + 900, part("a2#0", "text", text = "完成"))
+    val rebuilt = TranscriptRows.build(grown, setOf(toolKey))
+    assertEquals(toolKey, rebuilt.single { it.kind == "tool" }.key)
+    assertTrue(rebuilt.any { it.kind == "tool-body" })
+  }
+
+  @Test fun workingPlaceholderSaysRunningNotThinking() {
+    val pending = TranscriptRows.build(listOf(user("u1", t0)), working = true).single { it.kind == "thinking" }
+    assertEquals("运行中…", pending.text)
   }
 
   @Test fun errorRowShowsReadableMessage() {

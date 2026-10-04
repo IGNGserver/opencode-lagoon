@@ -155,14 +155,11 @@ fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen:
   }
 }
 
-private fun buildMeta(state: LagoonState, session: Session, task: TaskState?, includeServer: Boolean = false): String =
+/** The state itself is the pill (“运行中 / 等待授权 …”); the meta line only locates the session. */
+private fun buildMeta(state: LagoonState, session: Session, includeServer: Boolean = false): String =
   buildList {
     add(projectName(state, session))
     if (includeServer && state.profiles.size > 1) state.server?.name?.let(::add)
-    val phase = task?.phase
-    if (task != null && (phase in TaskState.RUNNING_PHASES || phase in TaskState.WAITING_PHASES) && task.detail.isNotBlank()) {
-      add(task.detail)
-    }
   }.joinToString(" · ")
 
 /**
@@ -333,7 +330,7 @@ fun ActivityScreen(
         MiuixSessionRow(
           session = session.copy(title = state.title(session)),
           task = state.rootTasks[session.id],
-          meta = buildMeta(state, session, state.tasks[session.id], includeServer = true),
+          meta = buildMeta(state, session, includeServer = true),
           onClick = { onOpen(session.id) },
           trailing = state.tasks[session.id]?.let { formatElapsed(it.since, now) } ?: formatRelative(session.updated)
         )
@@ -346,7 +343,7 @@ fun ActivityScreen(
         MiuixSessionRow(
           session = session.copy(title = state.title(session)),
           task = task,
-          meta = buildMeta(state, session, null, includeServer = true),
+          meta = buildMeta(state, session, includeServer = true),
           onClick = { onOpen(session.id) },
           trailing = formatRelative(task.finishedAt ?: task.since)
         )
@@ -990,6 +987,8 @@ fun SettingsScreen(
   }
   val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
   val clipboard = LocalClipboardManager.current
+  var crashReport by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(Unit) { crashReport = withContext(Dispatchers.IO) { CrashLog.read(context) } }
 
 
   LazyColumn(
@@ -1196,6 +1195,16 @@ fun SettingsScreen(
             colors = ButtonDefaults.buttonColors()
           ) {
             Text("复制诊断信息")
+          }
+        }
+        crashReport?.let { report ->
+          Spacer(Modifier.height(12.dp))
+          Text("上次崩溃", style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
+          Text("${report.lineSequence().firstOrNull().orEmpty()}\n${CrashLog.headline(report)}", maxLines = 3, overflow = TextOverflow.Ellipsis,
+            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+          Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+            TextButton(text = "清除", onClick = { CrashLog.clear(context); crashReport = null })
+            TextButton(text = "复制崩溃日志", onClick = { clipboard.setText(AnnotatedString(report)) })
           }
         }
       }

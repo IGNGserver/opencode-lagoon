@@ -111,7 +111,7 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
       if (!row.copyText.isNullOrBlank()) CopyButton(row.copyText)
     }
     "divider" -> DividerRow(row.text)
-    "thinking" -> ThinkingRow()
+    "thinking" -> ThinkingRow(row.text)
     "error" -> Column(Modifier.fillMaxWidth().background(MiuixColorTokens.ErrorSubtle, miuixSquircleShape(10.dp)).padding(12.dp)) {
       Text(row.text, color = MiuixColorTokens.Error, style = MiuixTheme.textStyles.body2)
     }
@@ -231,10 +231,10 @@ private fun DividerRow(label: String) {
 }
 
 @Composable
-private fun ThinkingRow() {
+private fun ThinkingRow(text: String) {
   val transition = rememberInfiniteTransition(label = "thinking")
   val alpha by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "alpha")
-  Text("正在思考…", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary), modifier = Modifier.alpha(alpha).padding(top = 4.dp))
+  Text(text, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary), modifier = Modifier.alpha(alpha).padding(top = 4.dp))
 }
 
 @Composable

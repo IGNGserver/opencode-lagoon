@@ -5,6 +5,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -77,13 +78,14 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
         if (which != ChatSheet.FILES) ResourceHint(state.resource(resource), "暂无记录", retry = controller::reload)
         when (which) {
           ChatSheet.TODO -> LazyColumn { items(state.todos) { todo -> Text("${if (todo.status == "completed") "✓" else "○"} ${todo.content}", modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) } }
-          ChatSheet.CHANGES -> LazyColumn { items(state.changes, key = { it.path }) { change ->
+          // Server lists may repeat an entry; LazyColumn crashes on a duplicate key, so keys never come from data alone.
+          ChatSheet.CHANGES -> LazyColumn { itemsIndexed(state.changes, key = { index, change -> "$index:${change.path}" }) { _, change ->
             var expanded by rememberSaveable(change.path) { mutableStateOf(false) }
             TextButton(text = "${change.path}  +${change.additions} −${change.deletions}", onClick = { expanded = !expanded })
             if (expanded) VirtualText(change.patch.ifBlank { change.after })
           } }
           ChatSheet.FILES -> FilesPanel(state, controller) { path -> controller.addReference(path); sheet = null }
-          ChatSheet.CHILDREN -> LazyColumn { items(state.children, key = { it.id }) { child ->
+          ChatSheet.CHILDREN -> LazyColumn { items(state.children.distinctBy { it.id }, key = { it.id }) { child ->
             Card(Modifier.fillMaxWidth().padding(bottom = 8.dp), insideMargin = PaddingValues(14.dp), onClick = { sheet = null; onOpenChild(child.id) }) {
               Text(state.title(child)); state.tasks[child.id]?.let { MiuixStatePill(it.phase) }
             }
@@ -117,7 +119,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   }
   if (revertPicker) SuperDialog(title = "选择撤销边界", show = true, onDismissRequest = { revertPicker = false }) {
     Column { Text("将撤销所选用户消息及其后续修改，可通过“恢复撤销”恢复。", style = MiuixTheme.textStyles.footnote1)
-      LazyColumn(Modifier.heightIn(max = 280.dp)) { items(state.messages.filter { it.role == "user" && it.isDisplayable }, key = { it.id }) { message -> TextButton(text = (if (revertId == message.id) "✓ " else "") + message.parts.filter { it.type == "text" }.joinToString(" ") { it.text }.take(140), onClick = { revertId = message.id }) } }
+      LazyColumn(Modifier.heightIn(max = 280.dp)) { items(state.messages.filter { it.role == "user" && it.isDisplayable }.distinctBy { it.id }, key = { it.id }) { message -> TextButton(text = (if (revertId == message.id) "✓ " else "") + message.parts.filter { it.type == "text" }.joinToString(" ") { it.text }.take(140), onClick = { revertId = message.id }) } }
       ActionError(state, "revert"); TextButton(text = "撤销所选消息及后续修改", enabled = revertId != null && !state.pending("revert"), onClick = { revertId?.let { controller.revert(it) { revertPicker = false } } })
     }
   }
@@ -132,7 +134,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   } }
   state.savedPermissions?.let { rules -> SuperDialog(title = "已保存的项目权限", show = true, onDismissRequest = controller::closeSavedPermissions) {
     Column { ResourceHint(state.resource("saved"), "没有已保存的权限规则", retry = { controller.loadSavedPermissions() })
-      LazyColumn(Modifier.heightIn(max = 360.dp)) { items(rules, key = { it.id }) { rule -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+      LazyColumn(Modifier.heightIn(max = 360.dp)) { items(rules.distinctBy { it.id }, key = { it.id }) { rule -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { Text(rule.action); Text(rule.resource, style = MiuixTheme.textStyles.footnote2) }
         TextButton(text = "撤销", enabled = !state.pending("revoke:${rule.id}"), onClick = { controller.revokeSavedPermission(rule) })
       } } }
@@ -395,14 +397,14 @@ private fun ChatComposer(state: LagoonState, controller: LagoonController, inter
       LazyColumn {
         when (which) {
           "files" -> {
-            val nodes = if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files
+            val nodes = (if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files).distinctBy { it.path }
             items(nodes, key = { it.path }) { node -> TextButton(text = (if (node.type == "directory") "目录 · " else "") + node.path, onClick = {
               if (node.type == "directory") controller.listFiles(node.path) else { controller.addReference(node.path); picker = null }
             }) }
           }
-          "commands" -> items(state.commands, key = { it.name }) { cmd -> TextButton(text = "/${cmd.name} · ${cmd.description}", onClick = { command = cmd.name; picker = null }) }
-          "agents" -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseAgent(null); picker = null }) }; items(state.agents, key = { it.name }) { agent -> TextButton(text = agent.name + " · " + agent.description, onClick = { controller.chooseAgent(agent.name); picker = null }) } }
-          else -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseModel(null); picker = null }) }; items(state.models, key = { "${it.providerId}:${it.modelId}" }) { model -> TextButton(text = "${model.providerId} · ${model.label}", onClick = { controller.chooseModel(model); picker = null }) } }
+          "commands" -> items(state.commands.distinctBy { it.name }, key = { it.name }) { cmd -> TextButton(text = "/${cmd.name} · ${cmd.description}", onClick = { command = cmd.name; picker = null }) }
+          "agents" -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseAgent(null); picker = null }) }; items(state.agents.distinctBy { it.name }, key = { it.name }) { agent -> TextButton(text = agent.name + " · " + agent.description, onClick = { controller.chooseAgent(agent.name); picker = null }) } }
+          else -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseModel(null); picker = null }) }; items(state.models.distinctBy { "${it.providerId}:${it.modelId}" }, key = { "${it.providerId}:${it.modelId}" }) { model -> TextButton(text = "${model.providerId} · ${model.label}", onClick = { controller.chooseModel(model); picker = null }) } }
         }
       }
     }
@@ -419,7 +421,7 @@ private fun FilesPanel(state: LagoonState, controller: LagoonController, onRefer
     ResourceHint(state.resource(if (query.length >= 2) "search" else "files"), "此目录没有文件", retry = { if (query.length >= 2) controller.searchFiles(query) else controller.listFiles() })
     if (state.fileBinary) { Text("当前无法预览此二进制文件"); TextButton(text = "引用文件", enabled = !state.pending("send"), onClick = { onReference(state.filePath) }) }
     state.fileText?.let { text -> Row { TextButton(text = "引用文件", onClick = { onReference(state.filePath) }); TextButton(text = "复制全文", onClick = { clipboard.setText(AnnotatedString(text)) }) }; VirtualText(text, Modifier.weight(1f)) }
-      ?: LazyColumn { items(if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files, key = { it.path }) { node -> TextButton(text = (if (node.type == "directory") "目录 · " else "") + node.path, onClick = { if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path) }) } }
+      ?: LazyColumn { items((if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files).distinctBy { it.path }, key = { it.path }) { node -> TextButton(text = (if (node.type == "directory") "目录 · " else "") + node.path, onClick = { if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path) }) } }
   }
 }
 
