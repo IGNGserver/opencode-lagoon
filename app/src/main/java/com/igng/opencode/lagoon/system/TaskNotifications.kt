@@ -142,10 +142,24 @@ class TaskNotifications(private val context: Context) {
    */
   fun buildSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?): Notification {
     val text = summary.text.orEmpty()
+    val notificationTitle = if (summary.running > 0) "${summary.running} 运行中 · ${summary.completed} 已完成" else "${summary.completed} 项任务已完成"
+    val expandedBody = if (summary.items.isNotEmpty()) {
+      summary.items.take(3).joinToString("\n") { item ->
+        val tag = when {
+          item.phase in TaskState.RUNNING_PHASES -> "● [运行中]"
+          item.phase in TaskState.WAITING_PHASES -> "! [待处理]"
+          item.phase == TaskPhase.FAILED -> "✕ [失败]"
+          else -> "✓ [已完成]"
+        }
+        "$tag ${item.title}"
+      }
+    } else {
+      text
+    }
     val builder = NotificationCompat.Builder(context, SUMMARY)
       .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
-      .setContentTitle("OpenCode 任务总览").setContentText(text)
-      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+      .setContentTitle(notificationTitle).setContentText(text)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(expandedBody))
       .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
       .setCategory(NotificationCompat.CATEGORY_PROGRESS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -153,7 +167,7 @@ class TaskNotifications(private val context: Context) {
       .setShortCriticalText(summary.shortText)
     targetSessionId?.let { builder.setContentIntent(open(profile.id, it)) }
     val notification = builder.build()
-    IslandRegistry.extendAll(context, profile, notification, "OpenCode 任务总览", text, running = summary.running > 0)
+    IslandRegistry.extendAll(context, profile, notification, notificationTitle, expandedBody, running = summary.running > 0, summary = summary)
     return notification
   }
 

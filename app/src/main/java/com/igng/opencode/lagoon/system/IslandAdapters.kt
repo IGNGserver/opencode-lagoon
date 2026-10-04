@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import com.igng.opencode.lagoon.R
 import com.igng.opencode.lagoon.core.ServerProfile
+import com.igng.opencode.lagoon.core.TaskSummary
 import org.json.JSONObject
 
 /** 灵动岛 / 实时活动在某一设备上的可用状态，用于设置页展示与诊断。 */
@@ -30,7 +31,7 @@ internal interface IslandAdapter {
   /** 当前设备是否支持该通道，以及权限是否就绪。[profile] 为当前服务器资料，携带各通道开关。 */
   fun support(context: Context, profile: ServerProfile?): IslandSupport
   /** 在不改变通知语义的前提下，向 [notification] 附加该通道所需的 extras。 */
-  fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean)
+  fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary? = null)
 }
 
 /**
@@ -58,8 +59,8 @@ internal object IslandRegistry {
     XiaomiIslandAdapter, VivoIslandAdapter, HonorIslandAdapter, OppoFluidCloudAdapter, StandardLiveUpdateAdapter
   )
 
-  fun extendAll(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
-    adapters.forEach { runCatching { it.extend(context, profile, notification, title, detail, running) } }
+  fun extendAll(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary? = null) {
+    adapters.forEach { runCatching { it.extend(context, profile, notification, title, detail, running, summary) } }
   }
 
   /** 全部通道的可用状态；[context] 用于读取厂商协议版本与标准通道权限。可能较慢，请在 IO 线程调用。 */
@@ -104,11 +105,30 @@ internal object XiaomiIslandAdapter : IslandAdapter {
     )
   }
 
-  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary?) {
     val version = protocolVersion(context)
     if (version < 3) return
     val iconKey = "miui.focus.pic_app"
     val pics = Bundle().apply { putParcelable(iconKey, Icon.createWithResource(context, R.drawable.ic_app)) }
+
+    // 展开态大岛内容：如果存在 summary，用紧凑文字展示前 3 个具体任务，干掉“任务总览”废话
+    val (islandFrontTitle, islandTitle, islandContent) = if (summary != null && !summary.isEmpty) {
+      val firstItem = summary.items.firstOrNull()
+      val taskLines = summary.items.take(3).joinToString(" | ") { item ->
+        val tag = when {
+          item.phase in com.igng.opencode.lagoon.core.TaskState.RUNNING_PHASES -> "●"
+          item.phase in com.igng.opencode.lagoon.core.TaskState.WAITING_PHASES -> "!"
+          item.phase == com.igng.opencode.lagoon.core.TaskPhase.FAILED -> "✕"
+          else -> "✓"
+        }
+        "$tag${item.title}"
+      }
+      val mainHeading = if (summary.running > 0) "${summary.running}运行·${summary.completed}完成" else "${summary.completed}已完成"
+      Triple(mainHeading, firstItem?.title?.take(24) ?: title.take(24), taskLines.take(32).ifBlank { detail.take(32) })
+    } else {
+      Triple("OpenCode", title.take(24), detail.take(32))
+    }
+
     val parameters = JSONObject().put("param_v2", JSONObject()
       .put("protocol", 1).put("business", "app").put("updatable", running)
       .put("ticker", detail.take(32)).put("aodTitle", title.take(32))
@@ -118,8 +138,10 @@ internal object XiaomiIslandAdapter : IslandAdapter {
         .put("bigIslandArea", JSONObject()
           .put("imageTextInfoLeft", JSONObject().put("type", 1)
             .put("picInfo", JSONObject().put("type", 1).put("pic", iconKey))
-            .put("miui.focus.paramtextInfo", JSONObject().put("frontTitle", "OpenCode")
-              .put("title", title.take(24)).put("content", detail.take(32)))))))
+            .put("miui.focus.paramtextInfo", JSONObject()
+              .put("frontTitle", islandFrontTitle.take(16))
+              .put("title", islandTitle)
+              .put("content", islandContent))))))
     notification.extras.putBundle("miui.focus.pics", pics)
     notification.extras.putString("miui.focus.param", parameters.toString())
   }
@@ -147,21 +169,29 @@ internal object VivoIslandAdapter : IslandAdapter {
            else "当前设备不是 vivo / iQOO。"
   )
 
-  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary?) {
     if (!isVivo()) return
     val extras = Bundle()
-    // 0=创建，1=更新，2=结束。客户端本地接口没有“首次创建”的显式信号，采用 operation=1（更新），
-    // 系统在不存在活动时会按创建处理；真正结束由取消通知完成。若真机验证要求严格的 0→1 序列，
-    // 需由持有活动状态的调用方传入 operation。
     extras.putInt("notification.superx.operation", 1)
     extras.putBoolean("notification.superx.showNotify", true)
     extras.putInt("notification.superx.template", 1)
-    // 官方示例使用 HEALTH_REGISTER 等垂域场景值；TASK 需在 vivo 开放平台申请时确认。
     extras.putString("notification.superx.scene", "TASK")
+
+    val vivoTitle = if (summary != null && !summary.isEmpty) {
+      "${summary.running}运行·${summary.completed}完成"
+    } else {
+      title.take(40)
+    }
+    val vivoContent = if (summary != null && summary.items.isNotEmpty()) {
+      summary.items.take(3).joinToString("；") { "${it.title}: ${it.phase}" }.take(100)
+    } else {
+      detail.take(100)
+    }
+
     val baseInfo = Bundle().apply {
       putParcelable("notification.superx.baseInfos.icon", Icon.createWithResource(context, R.drawable.ic_notification))
-      putCharSequence("notification.superx.baseInfos.title", title.take(40))
-      putCharSequence("notification.superx.baseInfos.content", detail.take(100))
+      putCharSequence("notification.superx.baseInfos.title", vivoTitle)
+      putCharSequence("notification.superx.baseInfos.content", vivoContent)
     }
     extras.putBundle("notification.superx.baseInfos", baseInfo)
     notification.extras.putAll(extras)
@@ -191,9 +221,8 @@ internal object HonorIslandAdapter : IslandAdapter {
     }
   )
 
-  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary?) {
     if (!isHonor() || !enabled(profile)) return
-    // 荣耀通道走独立对接（非通知 extras），此处按约定不写入 notification.extras，避免影响标准提示。
   }
 }
 
@@ -224,15 +253,21 @@ internal object OppoFluidCloudAdapter : IslandAdapter {
     }
   )
 
-  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary?) {
     if (!isOppo() || !enabled(profile)) return
+    val oppoTitle = if (summary != null && !summary.isEmpty) "${summary.running}运行·${summary.completed}完成" else title.take(40)
+    val oppoDetail = if (summary != null && summary.items.isNotEmpty()) {
+      summary.items.take(3).joinToString("；") { it.title }.take(100)
+    } else {
+      detail.take(100)
+    }
     val payload = JSONObject()
       .put("intentName", "OpenCode.TaskSummary")
-      .put("actionStatus", if (running) 1 else 0) // 0=创建，1=更新；结束由取消通知触发
+      .put("actionStatus", if (running) 1 else 0)
       .put("entityName", "TASK")
       .put("entityId", "opencode-task-summary")
-      .put("capsule", JSONObject().put("rightText", detail.take(20)))
-      .put("primary", JSONObject().put("title", title.take(40)).put("content", detail.take(100)))
+      .put("capsule", JSONObject().put("rightText", (summary?.shortText ?: detail).take(20)))
+      .put("primary", JSONObject().put("title", oppoTitle).put("content", oppoDetail))
       .toString()
     runCatching { OppoFluidCloud.transport.publish(context, OppoFluidCloud.serviceId, payload) }
   }
@@ -263,5 +298,5 @@ internal object StandardLiveUpdateAdapter : IslandAdapter {
     )
   }
 
-  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) = Unit
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean, summary: TaskSummary?) = Unit
 }

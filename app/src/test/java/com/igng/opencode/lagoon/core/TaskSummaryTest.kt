@@ -81,13 +81,23 @@ class TaskSummaryTest {
     assertTrue(summary.isEmpty)
   }
 
-  @Test fun shortTextForStatusChip() {
+  @Test fun shortTextForStatusChipIncludesCompleted() {
     val summary = TaskSummary.of(tasks(
       "a" to TaskPhase.THINKING,
       "b" to TaskPhase.WAITING_QUESTION,
       "c" to TaskPhase.FAILED
     ))
-    assertEquals("1跑·1待·1败", summary.shortText)
+    assertEquals("1跑·0完·1待·1败", summary.shortText)
+
+    val completedOnly = TaskSummary.of(tasks("a" to TaskPhase.COMPLETED))
+    assertEquals("0跑·1完", completedOnly.shortText)
+
+    val runningAndCompleted = TaskSummary.of(tasks(
+      "a" to TaskPhase.THINKING,
+      "b" to TaskPhase.COMPLETED,
+      "c" to TaskPhase.COMPLETED
+    ))
+    assertEquals("1跑·2完", runningAndCompleted.shortText)
   }
 
   @Test fun fullSentenceOrderIsRunningCompletedWaitingFailed() {
@@ -98,5 +108,32 @@ class TaskSummaryTest {
       "d" to TaskPhase.FAILED
     ))
     assertEquals("1个运行中，1个已完成，1个待回复，1个失败", summary.text)
+  }
+
+  @Test fun takesAtMostThreeItemsWithPriorityOrder() {
+    val tasksMap = mapOf(
+      "comp1" to TaskState("comp1", TaskPhase.COMPLETED, since = 100),
+      "comp2" to TaskState("comp2", TaskPhase.COMPLETED, since = 200),
+      "run1" to TaskState("run1", TaskPhase.THINKING, since = 300),
+      "run2" to TaskState("run2", TaskPhase.TOOL, since = 400),
+      "wait1" to TaskState("wait1", TaskPhase.WAITING_QUESTION, since = 500),
+      "fail1" to TaskState("fail1", TaskPhase.FAILED, since = 600)
+    )
+    val titles = mapOf(
+      "comp1" to "完成任务1",
+      "comp2" to "完成任务2",
+      "run1" to "运行任务1",
+      "run2" to "运行任务2",
+      "wait1" to "等待任务1",
+      "fail1" to "失败任务1"
+    )
+    val summary = TaskSummary.of(tasksMap, titles = titles)
+    assertEquals(3, summary.items.size)
+    // Priority order: wait(5) > run(4) > fail(3) > comp(2)
+    // Top 3 should be wait1, run2, run1
+    assertEquals("wait1", summary.items[0].sessionId)
+    assertEquals("等待任务1", summary.items[0].title)
+    assertEquals("run2", summary.items[1].sessionId)
+    assertEquals("run1", summary.items[2].sessionId)
   }
 }
