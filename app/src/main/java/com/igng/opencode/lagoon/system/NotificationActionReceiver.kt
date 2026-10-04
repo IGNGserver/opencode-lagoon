@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.igng.opencode.lagoon.core.Diagnostics
 import com.igng.opencode.lagoon.core.LagoonController
+import com.igng.opencode.lagoon.core.LiveUpdateStage
 import com.igng.opencode.lagoon.core.OpenCodeApi
 import com.igng.opencode.lagoon.core.PermissionRequest
 import com.igng.opencode.lagoon.core.ServerStore
@@ -21,9 +22,17 @@ class NotificationActionReceiver : BroadcastReceiver() {
   companion object {
     /** goAsync() extends the receiver for ~10s; keep the whole action inside that budget. */
     private const val ACTION_TIMEOUT_MILLIS = 8_000L
+    /** Delete intent of the server-wide summary: the user swiped it away. */
+    const val ACTION_SUMMARY_DISMISSED = "summary_dismissed"
   }
 
   override fun onReceive(context: Context, intent: Intent) {
+    if (intent.action == ACTION_SUMMARY_DISMISSED) {
+      val serverId = intent.getStringExtra("serverId") ?: return
+      val stage = LiveUpdateStage.entries.firstOrNull { it.name == intent.getStringExtra("stage") } ?: return
+      SummaryDismissals.record(context.applicationContext, serverId, stage)
+      return
+    }
     val pending = goAsync()
     val appContext = context.applicationContext
     CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {

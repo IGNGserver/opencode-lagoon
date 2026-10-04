@@ -15,6 +15,8 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.igng.opencode.lagoon.R
+import com.igng.opencode.lagoon.core.LiveUpdateContent
+import com.igng.opencode.lagoon.core.LiveUpdateStage
 import com.igng.opencode.lagoon.core.ServerStore
 import com.igng.opencode.lagoon.core.displayTitle
 import com.igng.opencode.lagoon.core.PermissionRequest
@@ -87,10 +89,9 @@ class TaskNotifications(private val context: Context) {
       .setOnlyAlertOnce(state.active).setOngoing(running)
       .setCategory(if (waiting) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_PROGRESS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-    if (running) {
-      builder.setRequestPromotedOngoing(true)
-      builder.addAction(0, "停止", action("abort", profile, session))
-    }
+    // Per-session notifications stay ordinary: only the server-wide summary owns the Live Update /
+    // island slot, otherwise every running session would compete for the status bar chip.
+    if (running) builder.addAction(0, "停止", action("abort", profile, session))
     if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null && permission.action.isNotBlank() && permission.detail !in setOf("", "{}", "[]")) {
       builder.addAction(0, "拒绝", action("reject", profile, session, permission))
       builder.addAction(0, "允许一次", action("once", profile, session, permission))
@@ -99,9 +100,7 @@ class TaskNotifications(private val context: Context) {
     if (state.phase == TaskPhase.WAITING_QUESTION) {
       builder.addAction(0, "回答", open(profile.id, session.id))
     }
-    val notification = builder.build()
-    IslandRegistry.extendAll(context, profile, notification, title, body, running)
-    return notification
+    return builder.build()
   }
   private fun permissionSummary(permission: PermissionRequest): String = buildString {
     append(permission.action.ifBlank { "操作请求" })
@@ -137,42 +136,48 @@ class TaskNotifications(private val context: Context) {
   }
 
   /**
-   * Server-wide island/Live Update summary. `contentTitle` is required for promotion; when counts are
-   * all zero the notification is removed so the status chip does not linger.
+   * Server-wide summary. While tasks run or wait for the user it is an ongoing, promoted
+   * notification (Android 16 Live Update: status bar chip / HyperOS Super Island); once everything has
+   * settled it is demoted to an ordinary, dismissible notification. Look and colors are left to the
+   * system; this only supplies content.
    */
   fun buildSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?): Notification {
-    val text = summary.text.orEmpty()
-    val notificationTitle = if (summary.running > 0) "${summary.running} 运行中 · ${summary.completed} 已完成" else "${summary.completed} 项任务已完成"
-    val expandedBody = if (summary.items.isNotEmpty()) {
-      summary.items.take(3).joinToString("\n") { item ->
-        val tag = when {
-          item.phase in TaskState.RUNNING_PHASES -> "● [运行中]"
-          item.phase in TaskState.WAITING_PHASES -> "! [待处理]"
-          item.phase == TaskPhase.FAILED -> "✕ [失败]"
-          else -> "✓ [已完成]"
-        }
-        "$tag ${item.title}"
-      }
-    } else {
-      text
-    }
+    val content = LiveUpdateContent.of(summary)
+    val active = content.stage == LiveUpdateStage.ACTIVE
     val builder = NotificationCompat.Builder(context, SUMMARY)
       .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
-      .setContentTitle(notificationTitle).setContentText(text)
-      .setStyle(NotificationCompat.BigTextStyle().bigText(expandedBody))
-      .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
-      .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+      .setContentTitle(content.title).setContentText(content.text)
+      .setSubText(profile.name)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
+      .setOngoing(active).setAutoCancel(!active)
+      .setOnlyAlertOnce(true).setShowWhen(false)
+      .setCategory(if (active) NotificationCompat.CATEGORY_PROGRESS else NotificationCompat.CATEGORY_STATUS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .setRequestPromotedOngoing(true)
-      .setShortCriticalText(summary.shortText)
-    targetSessionId?.let { builder.setContentIntent(open(profile.id, it)) }
+      .setRequestPromotedOngoing(active)
+      .setDeleteIntent(summaryDismissed(profile.id, content.stage))
+    if (active) builder.setShortCriticalText(content.shortCriticalText)
+    (targetSessionId ?: content.headlineSessionId)?.let { builder.setContentIntent(open(profile.id, it)) }
     val notification = builder.build()
-    IslandRegistry.extendAll(context, profile, notification, notificationTitle, expandedBody, running = summary.running > 0, summary = summary)
+    IslandRegistry.extendAll(context, profile, notification, content.title, content.expandedText, running = active, summary = summary)
     return notification
   }
 
+  private fun summaryDismissed(serverId: String, stage: LiveUpdateStage): PendingIntent {
+    val intent = Intent(context, NotificationActionReceiver::class.java).apply {
+      action = NotificationActionReceiver.ACTION_SUMMARY_DISMISSED
+      data = Uri.parse("opencode-lagoon://summary/${Uri.encode(serverId)}/${stage.name}")
+      putExtra("serverId", serverId)
+      putExtra("stage", stage.name)
+    }
+    return PendingIntent.getBroadcast(context, summaryId(serverId), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+  }
+
   fun showSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?) {
-    if (!allowed() || !profile.notifications || summary.isEmpty) {
+    val stage = LiveUpdateContent.stageOf(summary)
+    val dismissed = SummaryDismissals.stage(context, profile.id)
+    // Any stage change ends the user's dismissal, so a new run or a final result shows again.
+    if (dismissed != null && dismissed != stage) SummaryDismissals.clear(context, profile.id)
+    if (!allowed() || !profile.notifications || !LiveUpdateContent.shouldPost(stage, dismissed)) {
       manager.cancel(summaryId(profile.id))
       return
     }

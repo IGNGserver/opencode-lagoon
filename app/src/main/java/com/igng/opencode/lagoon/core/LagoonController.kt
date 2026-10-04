@@ -97,11 +97,13 @@ class LagoonController private constructor(private val appContext: Context) {
   private fun withSummary(state: LagoonState): LagoonState {
     state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
     val titles = state.sessions.associate { it.id to state.title(it) }
+    val summary = TaskSummary.of(state.tasks, state.acknowledged, state.parents, titles)
     return state.copy(
-    summary = TaskSummary.of(state.tasks, state.acknowledged, state.parents, titles),
-    // Prefer a session that needs a reply; otherwise jump to the first unread terminal result.
+    summary = summary,
+    // Prefer the exact session that needs a reply; otherwise open the headline task of the summary,
+    // so tapping the island always lands somewhere, including when tasks are only running.
     summaryTargetId = state.tasks.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
-      ?: state.tasks.values.firstOrNull { it.phase in TERMINAL_PHASES && it.sessionId !in state.acknowledged }?.sessionId
+      ?: summary.items.firstOrNull()?.sessionId
   )
   }
   private val store = ServerStore(appContext)

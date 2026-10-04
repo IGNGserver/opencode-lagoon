@@ -1,81 +1,67 @@
-# 灵动岛（实时活动）适配矩阵
+# 灵动岛（实时更新）适配矩阵
 
-本文件记录 OpenCode Lagoon 的灵动岛 / 实时通知在各手机品牌上的接入方式、代码位置与验收状态。
-所有通道共用同一份任务计数口径（`app/src/main/java/com/igng/opencode/lagoon/core/TaskSummary.kt`）：
-`运行中 / 未读已完成 / 待回复 / 失败`，由 `LagoonController` 派生后统一发布一条 ongoing 通知。
+本文件记录 OpenCode Lagoon 的任务总览如何出现在各系统的“岛 / 状态栏胶囊 / 实时卡片”上。
+
+## 设计原则
+
+- **系统表面交给系统画**：岛、胶囊、下拉卡片、锁屏 / 息屏的外观与配色全部由系统决定，App 只按各系统的
+  原生格式提供内容，不写颜色、不用自定义布局（`RemoteViews`）、不在 App 内模仿灵动岛。
+  这样在每个系统上都与其他应用保持同一套设计。
+- **只有一个岛**：只有“服务器总览”通知申请提升为实时更新；单会话通知（运行中、待授权、完成 / 失败结果）
+  都是普通通知，不申请提升、不挂厂商参数。
+- **只在进行中上岛**：小米（“服务进程必须有明确的开始和结束条件，禁止长期常驻”）与 Google
+  （“A Live Update must represent an activity that is actively in progress”）的规范一致，
+  因此总览只在有任务运行或等待处理时常驻上岛，结束后降级为普通通知。
+
+所有文案由 `core/LiveUpdateContent.kt` 从 `core/TaskSummary.kt` 纯函数派生，计数口径不变：
+`运行中 / 未读已完成 / 待回复 / 失败`。
+
+## 生命周期
+
+| 阶段 | 条件 | 通知形态 |
+|---|---|---|
+| `ACTIVE` | 有运行中或待处理任务 | ongoing + `setRequestPromotedOngoing(true)` + `setShortCriticalText("2跑·1完")`，即系统实时更新（上岛） |
+| `SETTLED` | 只剩未读的完成 / 失败 | 非 ongoing、不提升、可划掉的普通通知 |
+| `EMPTY` | 无内容 | 移除通知 |
+
+- 用户划掉总览后（`deleteIntent` → `NotificationActionReceiver`），在阶段不变期间不再重发；阶段一变
+  （例如全部结束、或有新任务开始）就重新展示。
+- 点击落点：优先正在等待回复的会话，否则为头条任务（待处理 > 运行中 > 失败 > 已完成）。
+- 展开内容：标题为主计数（如“2 个任务运行中”），副标题为服务器名，正文最多 3 行“状态 · 会话名”，
+  超出追加“另有 N 个任务”。
 
 ## 通道矩阵
 
-| 品牌 / 系统 | 官方名称 | 接入方式 | 代码位置 | 是否需要申请 / 合作 | 当前状态 |
-|---|---|---|---|---|---|
-| Android 16+（Pixel、三星、一加、Nothing 等遵循 AOSP 的 ROM） | Live Updates | 标准通知提升：`setRequestPromotedOngoing` + `setShortCriticalText` + ongoing | `system/IslandAdapters.kt` 的 `StandardLiveUpdateAdapter` | 否 | 已接入；待真机验收 |
-| OPPO ColorOS 16 | 流体云 | 已声明**完整兼容 Android 16 Live Updates API**，随标准通道生效 | 同上 | 否 | 已随标准通道覆盖；待真机验收 |
-| 小米 HyperOS 3 | 超级岛 / 焦点通知 | `notification.extras["miui.focus.param"]`（`param_v2`）+ `miui.focus.pics` | `system/IslandAdapters.kt` 的 `XiaomiIslandAdapter` | **是**，需向小米申请焦点通知权限 | 已接入；待权限与真机验收 |
-| vivo / iQOO OriginOS | 原子岛 / 原子通知 | `notification.extras["notification.superx.*"]` | `system/IslandAdapters.kt` 的 `VivoIslandAdapter` | **是**，需在 vivo 开放平台申请原子岛接入权限（当前公测） | 已接入参数；待权限与真机验收 |
-| OPPO ColorOS 15 | 流体云 | 端侧「意图共享」`ContentProviderClient`，或推送侧 `AndroidOppoIntelligentIntent` | `system/IslandAdapters.kt` 的 `OppoFluidCloudAdapter`（骨架，默认关闭） | **是**，需 OPPO 开放平台分配 `serviceId` 并确认需求 | 骨架就绪；ColorOS 16 用户不受影响（走标准通道） |
-| 荣耀 MagicOS | 灵动胶囊 / YOYO 建议 | 荣耀开发者平台快捷服务 / 卡片模板，白名单制，非运行时通知 extras | `system/IslandAdapters.kt` 的 `HonorIslandAdapter`（骨架，默认关闭） | **是**，需企业认证 + 白名单 | 骨架就绪；待厂商对接协议 |
-| 华为 HarmonyOS NEXT | 实况窗 | 鸿蒙原生 `LiveView`（ArkTS） | 不适用 | 需鸿蒙原生工程 | **超出范围**（Android APK 无法运行） |
-| 华为 EMUI / HarmonyOS 4（Android 底座） | 实况窗 | 无公开第三方接入 API | 不适用 | — | 不可行 |
-| 其他品牌 | 无专属岛 | 标准通知 / Android 16 Live Updates | 标准通道 | 否 | 已覆盖 |
+| 品牌 / 系统 | 呈现 | 接入方式 | 是否需要申请 | 当前状态 |
+|---|---|---|---|---|
+| Android 16+（Pixel 等 AOSP ROM） | 状态栏胶囊 + 实时更新卡片 | 标准 Live Updates（`StandardLiveUpdateAdapter` 仅做探测） | 否；用户可在系统设置关闭 | 主通道 |
+| 小米澎湃 OS 3（Android 16 底座） | 超级岛（系统把实时更新映射上岛） | 同上 | 否 | 主通道；点开后的卡片为系统普通通知样式，跟随系统深浅色 |
+| OPPO ColorOS 16 | 流体云 | 同上（官方声明完整兼容 Live Updates） | 否 | 主通道；待真机验收 |
+| vivo / iQOO OriginOS | 原子岛 | `notification.superx.*` extras，仅挂在总览通知上 | **是**，vivo 开放平台审批 | 参数就绪，未获批时系统忽略 |
+| OPPO ColorOS 15 | 流体云 | 意图共享（骨架，默认关闭） | **是**，需 `serviceId` | 骨架 |
+| 荣耀 MagicOS | 灵动胶囊 | 白名单制快捷服务（骨架，默认关闭） | **是** | 骨架 |
+| Android 15 及以下 | 普通常驻通知 | 标准通知 | 否 | 已覆盖 |
+| 华为 HarmonyOS NEXT | 实况窗 | 需鸿蒙原生工程 | — | 超出范围 |
+
+### 为什么不用小米焦点通知模板
+
+小米的焦点通知 / 超级岛模板（`miui.focus.param`，Qoder 等应用的深色展开卡就是它）只对小米白名单内的应用
+生效：未开通时 `canShowFocus=false`，国行系统直接忽略这些参数。本应用不申请白名单（2026-10-04 决定），
+因此不再写入该参数，澎湃 OS 3 上统一走 Android 实时更新。若将来开通白名单，可按官方展开态模板 9/10
+（文本组件 2 + 识别图形组件 1 + 按钮组件）重新接入；注意官方文档示例里的 `miui.focus.paramtextInfo`
+是排版错误，实际键名为 `textInfo`。
 
 ## 代码结构
 
-- `system/IslandAdapters.kt`：定义 `IslandAdapter` 接口与 `IslandRegistry`。约定按「能力探测 + 品牌兜底」路由，
-  不支持时不产生任何副作用；`IslandRegistry.extendAll` 对每个适配器 `runCatching`，单个厂商异常不会中断通知。
-  需厂商授权 / 合作的通道（荣耀、OPPO ColorOS 15）由**服务器资料内的持久化开关**控制
-  （`ServerProfile.islandHonor` / `islandOppoFluidCloud`，在设置页「灵动岛适配」分区切换），**默认关闭**；
-  关闭时对应适配器不产生副作用，开启后显示为「已就绪」。OPPO 流体云还需在申请到 `serviceId` 后
-  填入 `OppoFluidCloud.serviceId`（代码级常量）。
-- `system/TaskNotifications.kt`：`build` / `buildSummary` 构建通知后调用 `IslandRegistry.extendAll`；
-  总览通知额外承载 Android 16 提升所需属性，并提供 `promotedNotificationSettingsIntent()` 跳转授权页。
-- `ui/Screens.kt` 设置页「灵动岛适配」分区：列出各通道的 `已就绪 / 待授权 / 不支持` 与说明，并在需要时提供授权按钮。
-- `core/TaskSummary.kt`：全服务器计数与统一文案（`text` / `shortText`）。
-
-## 各通道接入步骤
-
-### 小米 HyperOS 3 超级岛
-1. 在小米开放平台申请「焦点通知」使用权限（邮件主题格式见官方 FAQ）。
-2. 系统 `notification_focus_protocol >= 3` 时客户端自动写入 `miui.focus.param`；无需发版。
-3. 在真机确认：息屏 AOD、状态栏胶囊、通知中心卡片、展开态大岛文案为任务计数。
-
-### vivo 原子岛
-1. 在 vivo 开放平台申请原子通知 / 原子岛接入权限（当前为公测）。
-2. 依官方样式模板核对 `notification.superx.*` 字段；未获批时系统忽略这些 extras，`showNotify=true` 保证退化为普通通知。
-3. **待确认项**：官方示例场景值为 `HEALTH_REGISTER`、`TAXI` 等垂域；当前实现使用 `TASK`，需在申请时与 vivo 确认是否可用。本地接口的 `operation` 采用 `1`（更新），若真机要求严格的 `0→1` 创建序列需调整。
-4. 注意系统限制：单活动最多 10s/次刷新、超 2 小时不更新会被清除、最长显示 8 小时。
-
-### Android 16 Live Updates / OPPO ColorOS 16
-1. 无需厂商合作。
-2. 首次使用需用户在系统设置中允许「实时更新 / 提升为常驻通知」；设置页提供跳转按钮。
-3. 锁屏、状态栏 chip（`shortText`）与通知中心应显示任务总览。
-
-### OPPO ColorOS 15 流体云（骨架就绪，待合作）
-1. 在 OPPO 开放平台「接入准备」确认需求并获得 `serviceId`、`client_id` / `client_secret`。
-2. 端侧按「意图共享」数据结构通过 `ContentProviderClient` 创建 / 更新 / 结束，`actionStatus = 0/1/2`。
-3. 实现 `OppoFluidCloudTransport` 并注入 `OppoFluidCloud.transport`，在 `OppoFluidCloud.serviceId` 填入
-   `serviceId`，再在设置页开启「OPPO 流体云（ColorOS 15）」开关即启用。
-   `OppoFluidCloudAdapter` 已负责构建意图 JSON（`intentName` / `actionStatus` / `capsule` / `primary`），
-   SDK 细节留在传输层，便于在无厂商环境下构建与测试。
-
-### 荣耀灵动胶囊（骨架就绪，待合作）
-1. 完成荣耀开发者企业认证，提交快捷服务 / 卡片模板申请并进入白名单。
-2. 胶囊由 YOYO 建议服务呈现，非通行的通知 extras 通道；需与荣耀确认可用模板与下发方式。
-3. 对接层就绪后在设置页开启「荣耀灵动胶囊」开关（持久化于服务器资料）；`HonorIslandAdapter` 不会写入
-   `notification.extras`，避免干扰标准提示。
+- `core/LiveUpdateContent.kt`：阶段判定、标题 / 正文 / 展开文案、胶囊短文案、点击落点、划掉后的重发规则。
+- `system/TaskNotifications.kt`：`buildSummary` / `showSummary` 按阶段构建总览；单会话通知不申请提升。
+- `system/SummaryDismissals.kt`：按服务器记录用户划掉总览时的阶段。
+- `system/IslandAdapters.kt`：`IslandRegistry` 与各通道适配器；设置页「实时更新通道状态」读取其诊断。
 
 ## 真机验收清单
 
-1. 连接服务器并运行多个任务，确认灵动岛 / 系统通知 / 状态栏 chip 均显示一致的计数。
-2. 触发权限确认与问题回答，确认「待回复」计数出现；处理完成后下降。
-3. 打开某个已完成会话，确认「已完成」计数下降（已读语义）。
-4. 触发失败任务，确认「失败」单独显示。
-5. 分品牌验证：小米 HyperOS 3（超级岛）、vivo OriginOS（原子岛）、Pixel/三星/OPPO ColorOS 16（实时更新）。
-6. 记录每个未通过项的服务端版本、系统版本与截图，回填本文件。
-
-## 已知限制
-
-- 小米、vivo、荣耀、OPPO ColorOS 15 均需向厂商申请权限或白名单，**应用侧无法自证可用**；未获批时退化为标准通知。
-- 华为实况窗需鸿蒙原生应用，Android APK 不可用。
-- 各厂商对刷新频率与展示时长有限制（vivo 见上；小米、OPPO 各有销卡/超时规则）。
-- 本文件中的「已接入」仅表示代码路径就绪，**不代表已在实体设备上验收通过**。
-- 荣耀与 OPPO ColorOS 15 目前仅为骨架，且在厂商权限 / 对接就绪前由服务器资料内的开关保持关闭，不产生任何行为。
+1. 运行多个任务：状态栏胶囊 / 超级岛显示 `x跑·y完`，点开后为系统样式卡片，正文列出最多 3 个会话。
+2. 触发权限确认：标题变为“N 个任务待你处理”，点击进入对应会话。
+3. 全部结束：胶囊 / 岛消失，总览变为可划掉的普通通知；划掉后不再弹出，直到有新任务开始。
+4. 打开已完成会话：计数下降，全部已读后总览移除。
+5. 分别在浅色 / 深色模式截图，确认外观完全由系统决定。
