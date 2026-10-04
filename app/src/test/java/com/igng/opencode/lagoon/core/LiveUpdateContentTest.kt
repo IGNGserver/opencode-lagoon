@@ -7,10 +7,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LiveUpdateContentTest {
-  private fun summary(vararg tasks: Triple<String, TaskPhase, Long>): TaskSummary = TaskSummary.of(
-    tasks.associate { (id, phase, since) -> id to TaskState(id, phase, since = since) },
-    titles = tasks.associate { (id, _, _) -> id to "会话$id" }
-  )
+  /** Live phases are task state; COMPLETED/FAILED fixtures are unread results in the ledger. */
+  private fun summary(vararg tasks: Triple<String, TaskPhase, Long>): TaskSummary {
+    val (results, live) = tasks.partition { (_, phase, _) -> phase == TaskPhase.COMPLETED || phase == TaskPhase.FAILED }
+    return TaskSummary.of(
+      live.associate { (id, phase, since) -> id to TaskState(id, phase, since = since) },
+      results.map { (id, phase, since) -> SessionNotice("n-$id", id, since, phase == TaskPhase.FAILED) },
+      titles = tasks.associate { (id, _, _) -> id to "会话$id" }
+    )
+  }
 
   @Test fun runningOrWaitingIsActive() {
     assertEquals(LiveUpdateStage.ACTIVE, LiveUpdateContent.stageOf(summary(Triple("a", TaskPhase.TOOL, 1))))
