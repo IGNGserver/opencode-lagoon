@@ -1101,7 +1101,7 @@ fun SettingsScreen(
           Text("系统通知与超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
           Spacer(Modifier.height(4.dp))
           Text(
-            "常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数，并分发到系统超级岛/灵动岛胶囊。无论深浅色主题，灵动岛均保持极深色呈现。",
+            "有任务运行或等你处理时，以系统「实时更新」显示「运行中 / 已完成 / 待回复 / 失败」计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云）；全部结束后变为普通通知。外观与配色由系统决定。",
             style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
           )
           Spacer(Modifier.height(12.dp))
@@ -1115,7 +1115,7 @@ fun SettingsScreen(
         }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
         Column(Modifier.padding(16.dp)) {
-          Text("灵动岛通道适配状态", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
+          Text("实时更新通道状态", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
           Spacer(Modifier.height(10.dp))
           val list = islandSupport
           if (list == null) {

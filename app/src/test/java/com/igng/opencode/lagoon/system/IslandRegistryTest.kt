@@ -20,17 +20,17 @@ class IslandRegistryTest {
 
   @Test fun adaptersExposeStableVendorIds() {
     val vendors = listOf(
-      XiaomiIslandAdapter.vendor, VivoIslandAdapter.vendor, HonorIslandAdapter.vendor,
-      OppoFluidCloudAdapter.vendor, StandardLiveUpdateAdapter.vendor
+      StandardLiveUpdateAdapter.vendor, VivoIslandAdapter.vendor, HonorIslandAdapter.vendor, OppoFluidCloudAdapter.vendor
     )
-    assertEquals(listOf("xiaomi", "vivo", "honor", "oppo", "android"), vendors)
+    assertEquals(listOf("android", "vivo", "honor", "oppo"), vendors)
     assertEquals(vendors.size, vendors.toSet().size)
   }
 
   @Test fun registryDiagnosticsCoversEveryAdapter() {
     val vendors = IslandRegistry.registeredVendorsForTest()
-    assertTrue(vendors.containsAll(listOf("xiaomi", "vivo", "honor", "oppo", "android")))
-    assertEquals(5, vendors.size)
+    // Live Updates is the primary channel and is listed first; the Xiaomi focus template is not used
+    // because it only renders for packages on Xiaomi's whitelist.
+    assertEquals(listOf("android", "vivo", "honor", "oppo"), vendors)
   }
 
   @Test fun vendorChannelsDefaultOffInProfile() {
