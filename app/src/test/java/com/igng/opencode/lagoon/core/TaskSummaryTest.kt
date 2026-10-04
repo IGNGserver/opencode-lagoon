@@ -10,14 +10,24 @@ class TaskSummaryTest {
   private fun tasks(vararg phases: Pair<String, TaskPhase>): Map<String, TaskState> =
     phases.associate { (id, phase) -> id to TaskState(id, phase) }
 
+  /**
+   * Results are unread ledger entries, not task phases: COMPLETED/FAILED fixtures become notices.
+   * Any other phase stays live task state.
+   */
+  private fun summarize(tasks: Map<String, TaskState>, titles: Map<String, String> = emptyMap(), viewed: Set<String> = emptySet()): TaskSummary {
+    val results = tasks.values.filter { it.phase == TaskPhase.COMPLETED || it.phase == TaskPhase.FAILED }
+    val notices = results.map { SessionNotice("n-${it.sessionId}", it.sessionId, it.since, it.phase == TaskPhase.FAILED, it.sessionId in viewed) }
+    return TaskSummary.of(tasks - results.map { it.sessionId }.toSet(), notices, titles = titles)
+  }
+
   @Test fun emptySummaryHidesIsland() {
     assertTrue(TaskSummary.of(emptyMap()).isEmpty)
     assertNull(TaskSummary.of(emptyMap()).text)
-    assertTrue(TaskSummary.of(tasks("a" to TaskPhase.IDLE, "b" to TaskPhase.DISCONNECTED)).isEmpty)
+    assertTrue(summarize(tasks("a" to TaskPhase.IDLE, "b" to TaskPhase.DISCONNECTED)).isEmpty)
   }
 
   @Test fun alwaysShowsRunningAndCompletedBaseline() {
-    val summary = TaskSummary.of(tasks(
+    val summary = summarize(tasks(
       "a" to TaskPhase.THINKING,
       "b" to TaskPhase.TOOL,
       "c" to TaskPhase.COMPLETED
@@ -29,14 +39,14 @@ class TaskSummaryTest {
   }
 
   @Test fun zeroCountsStillRenderBaselineWithoutWaitingOrFailed() {
-    val summary = TaskSummary.of(tasks("a" to TaskPhase.COMPLETED))
+    val summary = summarize(tasks("a" to TaskPhase.COMPLETED))
     assertEquals("0个运行中，1个已完成", summary.text)
     assertFalse(summary.text!!.contains("待回复"))
     assertFalse(summary.text!!.contains("失败"))
   }
 
   @Test fun permissionAndQuestionBothCountAsWaiting() {
-    val summary = TaskSummary.of(tasks(
+    val summary = summarize(tasks(
       "a" to TaskPhase.WAITING_PERMISSION,
       "b" to TaskPhase.WAITING_QUESTION,
       "c" to TaskPhase.SUBAGENT,
@@ -48,7 +58,7 @@ class TaskSummaryTest {
   }
 
   @Test fun failedIsReportedSeparatelyFromCompleted() {
-    val summary = TaskSummary.of(tasks(
+    val summary = summarize(tasks(
       "a" to TaskPhase.FAILED,
       "b" to TaskPhase.COMPLETED
     ))
@@ -59,40 +69,49 @@ class TaskSummaryTest {
     assertEquals("0个运行中，1个已完成，1个失败", summary.text)
   }
 
-  @Test fun acknowledgedTerminalResultsAreNotUnread() {
-    val all = tasks("done" to TaskPhase.COMPLETED, "boom" to TaskPhase.FAILED)
-    val summary = TaskSummary.of(all, acknowledged = setOf("done", "boom"))
+  @Test fun viewedResultsAreNotCounted() {
+    val summary = summarize(tasks("done" to TaskPhase.COMPLETED, "boom" to TaskPhase.FAILED), viewed = setOf("done", "boom"))
     assertTrue(summary.isEmpty)
     assertNull(summary.text)
   }
 
-  @Test fun acknowledgementIsPerSession() {
-    val summary = TaskSummary.of(
-      tasks("done" to TaskPhase.COMPLETED, "other" to TaskPhase.FAILED),
-      acknowledged = setOf("done")
-    )
+  @Test fun viewingIsPerSession() {
+    val summary = summarize(tasks("done" to TaskPhase.COMPLETED, "other" to TaskPhase.FAILED), viewed = setOf("done"))
     assertEquals(0, summary.completed)
     assertEquals(1, summary.failed)
     assertEquals("0个运行中，0个已完成，1个失败", summary.text)
   }
 
+  @Test fun aSessionRunningAgainCountsOnlyAsRunning() {
+    val summary = TaskSummary.of(tasks("s" to TaskPhase.THINKING), listOf(SessionNotice("old", "s", 1, false)))
+    assertEquals(1, summary.running)
+    assertEquals(0, summary.completed)
+  }
+
+  @Test fun severalUnreadResultsOfOneSessionCountOnceAndFailureWins() {
+    val summary = TaskSummary.of(emptyMap(), listOf(SessionNotice("a", "s", 1, false), SessionNotice("b", "s", 2, true)))
+    assertEquals(0, summary.completed)
+    assertEquals(1, summary.failed)
+    assertEquals(TaskPhase.FAILED, summary.items.single().phase)
+  }
+
   @Test fun abortedIsNeitherCompletedNorFailed() {
-    val summary = TaskSummary.of(tasks("a" to TaskPhase.ABORTED))
+    val summary = summarize(tasks("a" to TaskPhase.ABORTED))
     assertTrue(summary.isEmpty)
   }
 
   @Test fun shortTextForStatusChipIncludesCompleted() {
-    val summary = TaskSummary.of(tasks(
+    val summary = summarize(tasks(
       "a" to TaskPhase.THINKING,
       "b" to TaskPhase.WAITING_QUESTION,
       "c" to TaskPhase.FAILED
     ))
     assertEquals("1跑·0完·1待·1败", summary.shortText)
 
-    val completedOnly = TaskSummary.of(tasks("a" to TaskPhase.COMPLETED))
+    val completedOnly = summarize(tasks("a" to TaskPhase.COMPLETED))
     assertEquals("0跑·1完", completedOnly.shortText)
 
-    val runningAndCompleted = TaskSummary.of(tasks(
+    val runningAndCompleted = summarize(tasks(
       "a" to TaskPhase.THINKING,
       "b" to TaskPhase.COMPLETED,
       "c" to TaskPhase.COMPLETED
@@ -101,7 +120,7 @@ class TaskSummaryTest {
   }
 
   @Test fun fullSentenceOrderIsRunningCompletedWaitingFailed() {
-    val summary = TaskSummary.of(tasks(
+    val summary = summarize(tasks(
       "a" to TaskPhase.THINKING,
       "b" to TaskPhase.WAITING_PERMISSION,
       "c" to TaskPhase.COMPLETED,
@@ -127,7 +146,7 @@ class TaskSummaryTest {
       "wait1" to "等待任务1",
       "fail1" to "失败任务1"
     )
-    val summary = TaskSummary.of(tasksMap, titles = titles)
+    val summary = summarize(tasksMap, titles = titles)
     assertEquals(3, summary.items.size)
     // Priority order: wait(5) > run(4) > fail(3) > comp(2)
     // Top 3 should be wait1, run2, run1

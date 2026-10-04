@@ -238,15 +238,16 @@ fun ActivityScreen(
   val permissions = state.permissions
   val questions = state.questions
   val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
-  val running = state.sessions.filter { session ->
-    val phase = state.rootTasks[session.id]?.phase
-    session.parentId == null && (phase in TaskState.RUNNING_PHASES || phase == TaskPhase.DISCONNECTED)
-  }
-  val finished = state.sessions.mapNotNull { session ->
-    state.rootTasks[session.id]?.takeIf { session.parentId == null }
-      ?.takeIf { it.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) }
-      ?.let { session to it }
-  }.sortedByDescending { it.second.since }.take(12)
+  val active = state.activeRootTasks
+  val running = state.sessions.filter { session -> session.parentId == null && active[session.id]?.phase in TaskState.RUNNING_PHASES }
+  // Results come from the unread ledger: unread ones carry “已完成 / 失败”, opened ones are history.
+  val finished = state.notices.groupBy { it.sessionId }.mapNotNull { (id, notices) ->
+    val session = state.sessions.firstOrNull { it.id == id && it.parentId == null } ?: return@mapNotNull null
+    val latest = notices.maxBy { it.time }
+    val unseen = notices.unseenFor(id)
+    val phase = when { id in active -> null; unseen.any { it.error } -> TaskPhase.FAILED; unseen.isNotEmpty() -> TaskPhase.COMPLETED; else -> null }
+    Triple(session, latest.time, phase?.let { TaskState(id, it, since = latest.time, finishedAt = latest.time) })
+  }.sortedByDescending { it.second }.take(12)
 
   LazyColumn(
     modifier = Modifier.fillMaxSize().overScrollVertical(),
@@ -278,23 +279,23 @@ fun ActivityScreen(
       items(running, key = { "activity-running-${it.id}" }) { session ->
         MiuixSessionRow(
           session = session.copy(title = state.title(session)),
-          task = state.rootTasks[session.id],
+          task = active[session.id],
           meta = buildMeta(state, session, includeServer = true),
           onClick = { onOpen(session.id) },
-          trailing = state.tasks[session.id]?.let { formatElapsed(it.since, now) } ?: formatRelative(session.updated)
+          trailing = active[session.id]?.let { formatElapsed(it.since, now) } ?: formatRelative(session.updated)
         )
       }
     }
 
     if (finished.isNotEmpty()) {
       item { MiuixSectionHeader("最近完成", finished.size) }
-      items(finished, key = { "activity-done-${it.first.id}" }) { (session, task) ->
+      items(finished, key = { "activity-done-${it.first.id}" }) { (session, time, task) ->
         MiuixSessionRow(
           session = session.copy(title = state.title(session)),
           task = task,
           meta = buildMeta(state, session, includeServer = true),
           onClick = { onOpen(session.id) },
-          trailing = formatRelative(task.finishedAt ?: task.since)
+          trailing = formatRelative(time)
         )
       }
     }

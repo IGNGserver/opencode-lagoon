@@ -56,6 +56,11 @@ class MainActivity : ComponentActivity() {
     enableEdgeToEdge()
     parseDeepLink(intent)
     val controller = LagoonController.get(this)
+    // Opening the app refreshes from the server; leaving it lets the live stream wind down.
+    lifecycle.addObserver(LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_START) controller.onForeground()
+      else if (event == Lifecycle.Event.ON_STOP) controller.onBackground()
+    })
     setContent {
       val state by controller.state.collectAsState()
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }

@@ -78,11 +78,21 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     }.keys.map { it.removePrefix("taskRead:$id:") }.toSet()
   }
 
-  fun unacknowledgeTask(id: String, session: String) {
-    preferences.edit().remove("taskRead:$id:$session").apply()
-  }
-  fun acknowledgeTask(id: String, session: String) {
-    preferences.edit().putString("taskRead:$id:$session", taskStates(id)[session]?.since?.toString() ?: "1").apply()
+  /**
+   * One-time move to the unread ledger: earlier versions persisted finished phases as permanent
+   * “已完成/失败” states plus per-session read markers. Drop both; keep only runs this device saw still
+   * running (they turn into unread results when found finished), unless they are older than the ledger TTL.
+   */
+  fun migrateTaskLedger(id: String, now: Long = System.currentTimeMillis()) = synchronized(taskLock) {
+    if (preferences.getInt("taskLedgerVersion:$id", 0) >= 2) return@synchronized
+    val ttl = 30L * 24 * 60 * 60 * 1000
+    val states = taskStates(id)
+    val editor = preferences.edit()
+    preferences.all.keys.filter { it.startsWith("taskRead:$id:") }.forEach(editor::remove)
+    states.values.filter { !it.active || preferences.getLong("taskTime:$id:${it.sessionId}", it.since) < now - ttl }.forEach { task ->
+      editor.remove("taskState:$id:${task.sessionId}").remove("taskTime:$id:${task.sessionId}")
+    }
+    editor.putInt("taskLedgerVersion:$id", 2).commit()
   }
 
   fun sessionNotices(server: String, now: Long = System.currentTimeMillis()): List<SessionNotice> = synchronized(taskLock) {

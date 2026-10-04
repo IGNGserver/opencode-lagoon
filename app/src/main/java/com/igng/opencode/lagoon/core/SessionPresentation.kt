@@ -33,20 +33,22 @@ fun Session.displayTitle(): String {
   return if (parentId != null) "子会话" else "新会话"
 }
 
-/** Attention and running states include descendants; result/unread states belong to the root. */
+/**
+ * One indicator per session, in the official client's priority: attention › running › unread failure ›
+ * unread result › nothing. Attention and running include descendants; results belong to the root and
+ * exist only while unread — a session that finished long ago, or that was already opened, shows nothing.
+ */
 enum class SessionStatus(val label: String) {
   WAITING_PERMISSION("等待授权"), WAITING_QUESTION("等待回答"), RUNNING("运行中"),
-  NEEDS_REVIEW("待查看"), FAILED("失败"), INTERRUPTED("已中断"), COMPLETED("已完成"), NONE("")
+  FAILED("失败"), COMPLETED("已完成"), NONE("")
 }
 
-fun Session.status(activeFamily: TaskState?, rootTask: TaskState?, unseen: Boolean): SessionStatus = when {
+fun sessionStatus(activeFamily: TaskState?, unseen: List<SessionNotice>): SessionStatus = when {
   activeFamily?.phase == TaskPhase.WAITING_PERMISSION -> SessionStatus.WAITING_PERMISSION
   activeFamily?.phase == TaskPhase.WAITING_QUESTION -> SessionStatus.WAITING_QUESTION
   activeFamily?.phase in TaskState.RUNNING_PHASES -> SessionStatus.RUNNING
-  unseen -> SessionStatus.NEEDS_REVIEW
-  outcome == "failed" || rootTask?.phase == TaskPhase.FAILED -> SessionStatus.FAILED
-  outcome == "interrupted" || rootTask?.phase == TaskPhase.ABORTED -> SessionStatus.INTERRUPTED
-  outcome == "succeeded" || rootTask?.phase == TaskPhase.COMPLETED -> SessionStatus.COMPLETED
+  unseen.any { it.error } -> SessionStatus.FAILED
+  unseen.isNotEmpty() -> SessionStatus.COMPLETED
   else -> SessionStatus.NONE
 }
 

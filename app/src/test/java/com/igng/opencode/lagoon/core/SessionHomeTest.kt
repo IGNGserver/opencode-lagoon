@@ -49,13 +49,16 @@ class SessionHomeTest {
     val root = Session("root", "/repo", "Root", 1, outcome = "succeeded", viewed = 0, idle = 100)
     val child = Session("child", "/repo", "Child", 1, parentId = "root")
     val idle = LagoonState(sessions = listOf(root, child), tasks = mapOf("child" to TaskState("child", TaskPhase.FAILED)))
-    assertEquals(SessionStatus.COMPLETED, idle.sessionStatus(root))
+    // A historical outcome and a child's result are not “已完成”: only an unread root result is.
+    assertEquals(SessionStatus.NONE, idle.sessionStatus(root))
     val running = idle.copy(tasks = mapOf("child" to TaskState("child", TaskPhase.THINKING)))
     assertEquals(SessionStatus.RUNNING, running.sessionStatus(root))
     val waiting = running.copy(tasks = mapOf("child" to TaskState("child", TaskPhase.WAITING_QUESTION)))
     assertEquals(SessionStatus.WAITING_QUESTION, waiting.sessionStatus(root))
     val unseen = idle.copy(notices = listOf(SessionNotice("result", "root", System.currentTimeMillis(), false)))
-    assertEquals(SessionStatus.NEEDS_REVIEW, unseen.sessionStatus(root))
+    assertEquals(SessionStatus.COMPLETED, unseen.sessionStatus(root))
+    assertEquals(SessionStatus.FAILED, idle.copy(notices = listOf(SessionNotice("boom", "root", System.currentTimeMillis(), true))).sessionStatus(root))
+    assertEquals(SessionStatus.NONE, idle.copy(notices = unseen.notices.map { it.copy(viewed = true) }).sessionStatus(root))
   }
 
   @Test fun modernEventsRetainExecutionTimestampAndInterruptedRunsCreateNoUnreadResult() {

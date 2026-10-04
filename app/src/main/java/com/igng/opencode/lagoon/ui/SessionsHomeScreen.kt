@@ -30,7 +30,8 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-private enum class HomeFilter(val label: String) { ALL("全部"), ATTENTION("待处理"), UNSEEN("待查看"), RUNNING("运行中") }
+/** “已完成” = results this device saw finish and the user has not opened yet. */
+private enum class HomeFilter(val label: String) { ALL("全部"), ATTENTION("待处理"), RUNNING("运行中"), UNSEEN("已完成") }
 
 /** Current server's projects. Chat/project selection never narrows or resets the home catalog. */
 @Composable
@@ -44,7 +45,7 @@ fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen:
   val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(60_000); value = System.currentTimeMillis() } }
   val active = remember(state.tasks, state.parents) { state.activeRootTasks }
   val unseen = remember(state.notices) { state.notices.filterNot { it.viewed }.map { it.sessionId }.toSet() }
-  val statuses = remember(state.sessions, state.tasks, active, unseen) { state.sessions.associate { it.id to it.status(active[it.id], state.tasks[it.id], it.id in unseen) } }
+  val statuses = remember(state.sessions, state.notices, active) { state.sessions.associate { it.id to state.sessionStatus(it, active) } }
   val roots = state.sessions.filter { it.visibleOnHome }
   val groups = groupSessions(roots.filter { session ->
     val status = statuses[session.id]
@@ -162,7 +163,8 @@ private fun ProjectSessionRow(session: Session, status: SessionStatus, unseen: B
     unseen -> MiuixTheme.colorScheme.primary
     else -> muted.copy(alpha = 0.25f)
   }
-  val label = status.label.takeUnless { status in setOf(SessionStatus.NONE, SessionStatus.COMPLETED) }.orEmpty()
+  // “已完成 / 失败” only exist while unread, so every non-empty status is worth a label.
+  val label = status.label
   Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClick = onClick)
     .padding(start = 28.dp, end = 20.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
     Box(Modifier.size(6.dp).background(color, CircleShape))

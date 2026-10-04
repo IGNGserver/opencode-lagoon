@@ -65,6 +65,8 @@ dependencies {
   // "No NavigationEventDispatcher was provided via LocalNavigationEventDispatcherOwner".
   implementation("androidx.activity:activity-compose:1.12.0")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+  // 后台定时刷新（BackgroundSyncWorker）：Android 上唯一可靠的周期性后台执行方式。
+  implementation("androidx.work:work-runtime-ktx:2.10.1")
   implementation(platform("androidx.compose:compose-bom:2024.12.01"))
   implementation("androidx.compose.ui:ui")
   implementation("androidx.compose.foundation:foundation")

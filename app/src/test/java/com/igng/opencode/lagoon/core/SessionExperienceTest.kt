@@ -53,11 +53,13 @@ class SessionExperienceTest {
     assertEquals(1, summary.waiting); assertEquals(0, summary.running)
   }
 
-  @Test fun readParentCannotHideANewUnreadChildResult() {
-    val tasks=mapOf("parent" to TaskState("parent",TaskPhase.COMPLETED),"child" to TaskState("child",TaskPhase.FAILED))
-    assertEquals(1,TaskSummary.of(tasks,setOf("parent"),mapOf("child" to "parent")).failed)
-    assertEquals(TaskSummary.EMPTY,TaskSummary.of(tasks,setOf("parent","child"),mapOf("child" to "parent")))
-    assertEquals(TaskSummary.EMPTY,TaskSummary.of(mapOf("parent" to TaskState("parent",TaskPhase.IDLE),"child" to TaskState("child",TaskPhase.COMPLETED)),setOf("child"),mapOf("child" to "parent")))
+  @Test fun childResultsNeverCountAndOnlyUnreadRootResultsDo() {
+    val parents = mapOf("child" to "parent")
+    val finishedChild = mapOf("parent" to TaskState("parent", TaskPhase.IDLE), "child" to TaskState("child", TaskPhase.COMPLETED))
+    assertEquals(TaskSummary.EMPTY, TaskSummary.of(finishedChild, emptyList(), parents))
+    val unread = listOf(SessionNotice("r", "parent", 1, true))
+    assertEquals(1, TaskSummary.of(finishedChild, unread, parents).failed)
+    assertEquals(TaskSummary.EMPTY, TaskSummary.of(finishedChild, unread.map { it.copy(viewed = true) }, parents))
   }
 
 

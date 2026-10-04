@@ -1,6 +1,7 @@
 package com.igng.opencode.lagoon.core
 
 import android.content.Context
+import com.igng.opencode.lagoon.system.BackgroundSyncWorker
 import com.igng.opencode.lagoon.system.TaskNotifications
 import com.igng.opencode.lagoon.system.TaskMonitorService
 import kotlinx.coroutines.CancellationException
@@ -57,10 +58,12 @@ data class LagoonState(
   val draftSessions: Set<String> = emptySet(), val draft: String = "", val references: List<FileReference> = emptyList(),
   val cacheComplete: Boolean = true, val sessionCursors: Map<String, String> = emptyMap(), val messagesCursor: String? = null,
   val catalogComplete: Boolean = true, val loadedOlderMessages: Boolean = false,
-  /** 已被用户查看过、不再计入“未读已完成/失败”的会话 id（本会话内有效）。 */
-  val acknowledged: Set<String> = emptySet(),
+  /**
+   * 未读结果账本（对齐官方客户端的通知账本）：只有本机见证“运行中 → 结束”的主会话才会产生一条，
+   * 打开会话即标记已读。列表的“已完成 / 失败”、灵动岛计数都只读这里，从不由历史数据推断。
+   */
   val notices: List<SessionNotice> = emptyList(), val collapsedProjects: Set<String> = emptySet(),
-  /** 全服务器范围的任务计数，由 [tasks] 与 [acknowledged] 派生，供灵动岛与系统通知复用。 */
+  /** 全服务器范围的任务计数，由实时 [tasks] 与未读 [notices] 派生，供灵动岛与系统通知复用。 */
   val summary: TaskSummary = TaskSummary.EMPTY,
   /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
   val summaryTargetId: String? = null
@@ -73,21 +76,28 @@ data class LagoonState(
   fun resource(name: String): ResourceStatus = resources[name] ?: ResourceStatus()
   fun title(session: Session): String = session.displayTitle()
   val parents: Map<String, String> get() = knownParents + sessions.mapNotNull { it.parentId?.let { parent -> it.id to parent } }.toMap()
-  val rootTasks: Map<String, TaskState> get() = TaskSummary.aggregate(tasks, parents)
+  /** Live (running / waiting) state of each session family, rolled up to its root. */
   val activeRootTasks: Map<String, TaskState> get() = TaskSummary.aggregate(tasks.filterValues { it.active }, parents)
   fun sessionStatus(session: Session, active: Map<String, TaskState> = activeRootTasks): SessionStatus =
-    session.status(active[session.id], tasks[session.id], notices.any { it.sessionId == session.id && !it.viewed })
+    sessionStatus(active[session.id], notices.unseenFor(session.id))
 }
 
 class LagoonController private constructor(private val appContext: Context) {
   companion object {
+    // Events that change the control plane and warrant a debounced full refresh. Metadata-only events
+    // (session.updated / renamed / archived / viewed) are applied incrementally in handleEvent: a running
+    // agent emits session.updated continuously, and refreshing on each one used to reload every project.
     private val CATALOG_REFRESH_EVENTS = setOf(
-      "session.created", "session.updated", "session.deleted", "session.idle", "session.error",
+      "session.created", "session.deleted", "session.idle", "session.error",
       "permission.asked", "question.asked", "permission.replied", "permission.rejected",
-      "question.replied", "question.rejected", "session.renamed", "session.archived",
-      "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.viewed", "project.updated", "form.created", "form.replied", "form.cancelled"
+      "question.replied", "question.rejected",
+      "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "project.updated", "form.created", "form.replied", "form.cancelled"
     )
     private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED)
+    /** Returning to the foreground re-reads the server unless a full refresh just happened. */
+    private const val FOREGROUND_REFRESH_MILLIS = 15_000L
+    /** Keep the live stream briefly after leaving the app so quick app switches do not reconnect. */
+    private const val BACKGROUND_GRACE_MILLIS = 30_000L
     @Volatile private var instance: LagoonController? = null
     fun get(context: Context): LagoonController = instance ?: synchronized(this) {
       instance ?: LagoonController(context.applicationContext).also { instance = it }
@@ -96,18 +106,21 @@ class LagoonController private constructor(private val appContext: Context) {
     private const val RECONCILE_INTERVAL_MILLIS = 45_000L
   }
   /**
-   * Recomputes the server-wide island summary. A session's unread terminal state keeps counting until
-   * its terminal transcript is successfully fetched while visible, so “已完成/失败” means “未读”。
+   * Recomputes the server-wide island summary and persists live task state. Persisted running states are
+   * what lets a later refresh — even after the process was frozen or killed — notice that a run this device
+   * saw has ended and record it as an unread result.
    */
   private fun withSummary(state: LagoonState): LagoonState {
     state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
     val titles = state.sessions.associate { it.id to state.title(it) }
-    val summary = TaskSummary.of(state.tasks, state.acknowledged, state.parents, titles)
+    val active = state.activeRootTasks
+    val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles)
     return state.copy(
     summary = summary,
-    // Prefer the exact session that needs a reply; otherwise open the headline task of the summary,
-    // so tapping the island always lands somewhere, including when tasks are only running.
-    summaryTargetId = state.tasks.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
+    // Prefer the session that needs a reply, then the newest unread result; otherwise the summary's
+    // headline task, so tapping the island always lands somewhere, including when tasks are only running.
+    summaryTargetId = active.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
+      ?: state.notices.filter { !it.viewed && it.sessionId !in active }.maxByOrNull { it.time }?.sessionId
       ?: summary.items.firstOrNull()?.sessionId
   )
   }
@@ -139,19 +152,30 @@ class LagoonController private constructor(private val appContext: Context) {
   private var visibleConversation: Pair<String, String>? = null
   private val seenEvents = linkedSetOf<String>()
   private val eventTimestamps = mutableMapOf<String, Long>()
-  private val observedTerminal = mutableMapOf<String, Long>()
-  private val observedNotices = mutableMapOf<String, Set<String>>()
-  private val observedIdle = mutableMapOf<String, Long>()
   private val draftWrites = mutableMapOf<String, Job>()
+  /** An activity is started (ON_START…ON_STOP). The live stream runs only while foreground or monitoring. */
+  @Volatile private var foreground = false
+  /** [TaskMonitorService] keeps the process alive for running tasks; the stream may then run in background. */
+  @Volatile private var monitoring = false
+  private var backgroundStop: Job? = null
+  private var connecting: Job? = null
+  @Volatile private var lastFullRefreshAt = 0L
+  /** Root sessions already handed to [TaskMonitorService] during this run. */
+  private val monitorRequested = mutableSetOf<String>()
 
   init {
     // Single publisher for the server-wide island summary, so the system notification never drifts
     // from the in-app island: both read the same derived `summary` on every state emission.
     scope.launch { state.collect { state ->
       val signature = Triple(state.server, state.summary, state.summaryTargetId)
-      if (signature != lastSummary) { lastSummary = signature; publishSummary(state) }
+      if (signature != lastSummary) { lastSummary = signature; publishSummary(state); ensureMonitoring(state) }
     } }
     if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!)
+    scheduleBackgroundSync()
+  }
+  private fun scheduleBackgroundSync() {
+    attempt { BackgroundSyncWorker.schedule(appContext, store.profiles().isNotEmpty()) }
+      .onFailure { Diagnostics.warn("BackgroundSync", "无法安排后台定时刷新", it) }
   }
   private fun publishSummary(state: LagoonState) {
     val profile = state.server ?: return
@@ -172,6 +196,7 @@ class LagoonController private constructor(private val appContext: Context) {
   fun saveServer(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null, connect: Boolean = true) {
     store.save(profile, password, cookie, credentialUsername)
     mutable.update { it.copy(profiles = store.profiles()) }
+    scheduleBackgroundSync()
     if (connect) connect(profile.id)
   }
   /** 持久化待合作灵动岛通道开关（荣耀 / OPPO 流体云），不触发重连。 */
@@ -192,6 +217,7 @@ class LagoonController private constructor(private val appContext: Context) {
     }
     store.delete(id)
     cache.delete(id)
+    scheduleBackgroundSync()
 
     if (mutable.value.serverId == id) {
       mutable.update { LagoonState(profiles = store.profiles(), serverId = store.profiles().firstOrNull()?.id) }
@@ -212,18 +238,20 @@ class LagoonController private constructor(private val appContext: Context) {
     api = OpenCodeApi(profile, store.credentials(id))
     val rememberedProject = store.selectedProject(id)
     val rememberedSession = store.selectedSession(id)
-    seenEvents.clear(); eventTimestamps.clear(); observedTerminal.clear(); observedNotices.clear(); observedIdle.clear(); visibleConversation = null
+    seenEvents.clear(); eventTimestamps.clear(); visibleConversation = null
     val configuration = rememberedSession?.let { store.configuration(id, it) } ?: SessionConfiguration()
     store.select(id, rememberedProject, rememberedSession)
+    // Drop the pre-ledger “永久已完成” states and read markers; keep runs this device saw as still running.
+    store.migrateTaskLedger(id)
     mutable.update { LagoonState(profiles = store.profiles(), serverId = id, loading = true, projectId = rememberedProject, sessionId = rememberedSession,
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
-      tasks = store.taskStates(id), knownParents = store.taskParents(id), acknowledged = store.acknowledgedTasks(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
+      tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
-    scope.launch {
+    connecting = scope.launch {
       try {
         loadAll(token)
-        if (token == generation) {
+        if (token == generation && streamAllowed()) {
           startStream(token)
         }
       } catch (error: Exception) {
@@ -250,7 +278,7 @@ class LagoonController private constructor(private val appContext: Context) {
     try {
       loadAll(token)
       if (token != generation) return
-      startStream(token)
+      if (streamAllowed()) startStream(token)
     } catch (error: Exception) {
       if (error is CancellationException) throw error
       if (token == generation) showOffline(id, token, "连接失败，正在重试")
@@ -273,7 +301,7 @@ class LagoonController private constructor(private val appContext: Context) {
       }
     }
   }
-  private suspend fun loadAll(token: Int, controlOnly: Boolean = false) {
+  private suspend fun loadAll(token: Int, controlOnly: Boolean = false, followUp: Boolean = true) {
     val client = api ?: return
     val requestSequence = ++catalogSequence
     val version = client.health()
@@ -290,15 +318,19 @@ class LagoonController private constructor(private val appContext: Context) {
     // control endpoints must be global; legacy V1 reads each known execution directory.
     val scopes = if (client.detectedProtocol() == ServerProtocol.V2) listOf("") else directories.ifEmpty { listOf("") }
     fun stale(directory: String, failures: Set<String>) = "" in failures || failures.any { normalizedDirectory(it) == normalizedDirectory(directory) }
+    // V2's catalog is one global request, so reconciliation re-reads its first page too: a session
+    // created elsewhere while an event was missed still appears without a manual refresh.
+    val freshCatalog = !controlOnly || client.detectedProtocol() == ServerProtocol.V2
     val sessionResults = coroutineScope {
       scopes.map { directory -> async { directory to attempt {
-        if (controlOnly) ApiPage(state.value.sessions.filter { directory.isBlank() || normalizedDirectory(it.directory) == normalizedDirectory(directory) }, state.value.sessionCursors[directory])
+        if (!freshCatalog) ApiPage(state.value.sessions.filter { directory.isBlank() || normalizedDirectory(it.directory) == normalizedDirectory(directory) }, state.value.sessionCursors[directory])
         else client.rootSessionsPage(directory.takeIf(String::isNotBlank))
       } } }.awaitAll()
     }
     if (sessionResults.all { it.second.isFailure }) throw sessionResults.first().second.exceptionOrNull()!!
     val failedSessionDirs = sessionResults.filter { it.second.isFailure }.map { it.first }.toSet()
-    val nextCursors = sessionResults.fold(if (controlOnly) state.value.sessionCursors else emptyMap()) { cursors, (directory, result) ->
+    // Reconciliation keeps “加载更多” progress; a full refresh restarts paging from the first page.
+    val nextCursors = if (controlOnly) state.value.sessionCursors else sessionResults.fold(emptyMap<String, String>()) { cursors, (directory, result) ->
       result.getOrNull()?.let { page -> if (page.next == null) cursors - directory else cursors + (directory to page.next) }
         ?: (cursors + state.value.sessionCursors.filterKeys { it == directory })
     }
@@ -342,25 +374,25 @@ class LagoonController private constructor(private val appContext: Context) {
     if (degraded.isNotEmpty()) Diagnostics.warn("LagoonController", "部分数据读取失败，保留上次可信状态：$degraded")
 
     val storedTasks = store.taskStates(serverId)
+    var finishedRuns = emptyList<Pair<Session, Long>>()
     mutable.update { previous ->
       // A session whose project failed to report status keeps its previous phase; only an actual
       // authoritative status (or its absence from a successful response) may reduce it.
+      val previousTasks = previous.tasks + storedTasks.filter { (id, task) -> previous.tasks[id]?.let { old -> task.since > old.since || (task.finishedAt ?: 0) > (old.finishedAt ?: 0) } ?: true }
       val nextSessions = (sessions + extraSessions + previous.sessions.filter {
-        stale(it.directory, failedSessionDirs) || it.id in statuses || it.id == previous.sessionId ||
+        // A session this device saw running, or one with an unread result, never silently drops out.
+        stale(it.directory, failedSessionDirs) || it.id in statuses || it.id == previous.sessionId || previousTasks[it.id]?.active == true ||
+          previous.notices.unseenFor(it.id).isNotEmpty() ||
           sessionResults.any { (directory, result) -> result.getOrNull()?.next != null && (directory.isBlank() || normalizedDirectory(it.directory) == normalizedDirectory(directory)) }
       }).distinctBy { it.id }.sortedWith(sessionActivityOrder)
       val degradedDirs = failedStatusDirs + failedSessionDirs
-      val previousTasks = previous.tasks + storedTasks.filter { (id, task) -> previous.tasks[id]?.let { old -> task.since > old.since || (task.finishedAt ?: 0) > (old.finishedAt ?: 0) } ?: true }
-      val states = previousTasks.filterValues { it.phase in TERMINAL_PHASES || it.phase == TaskPhase.ABORTED }.toMutableMap()
+      // Only live state is carried; finished runs live in the unread ledger, never as a permanent phase.
+      val states = mutableMapOf<String, TaskState>()
       nextSessions.forEach { session ->
         val authoritative = !stale(session.directory, degradedDirs)
         val next = if (!authoritative) previousTasks[session.id]
-        else {
-          val reduced = TaskReducer.status(session.id, statuses[session.id] ?: "idle", previousTasks[session.id])
-          val phase = when (session.outcome) { "failed" -> TaskPhase.FAILED; "interrupted" -> TaskPhase.ABORTED; "succeeded" -> TaskPhase.COMPLETED; else -> null }
-          if (phase != null && !reduced.active && previousTasks[session.id]?.active == true) reduced.copy(phase = phase, finishedAt = session.idle.takeIf { it > 0 } ?: reduced.finishedAt) else reduced
-        }
-        if (next != null) states[session.id] = next
+        else TaskReducer.status(session.id, statuses[session.id] ?: "idle", previousTasks[session.id]?.takeIf { it.active })
+        if (next != null && next.phase != TaskPhase.IDLE) states[session.id] = next
       }
       // A fully successful read is authoritative; otherwise merge fetched entries with the previous
       // ones for the failed directories so a pending approval is never silently dropped.
@@ -370,16 +402,27 @@ class LagoonController private constructor(private val appContext: Context) {
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
       nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
+      // Roots whose family this device saw running and that an authoritative read now shows idle.
+      val parentMap = store.taskParents(serverId) + nextSessions.mapNotNull { s -> s.parentId?.let { s.id to it } }
+      val wasActive = TaskSummary.aggregate(previousTasks.filterValues { it.active }, parentMap)
+      val isActive = TaskSummary.aggregate(states.filterValues { it.active }, parentMap)
+      finishedRuns = nextSessions.filter { it.parentId == null && it.id in wasActive && it.id !in isActive && !stale(it.directory, degradedDirs) }
+        .map { it to wasActive.getValue(it.id).since }
       withSummary(previous.copy(version = version, protocol = client.detectedProtocol(), capabilities = capabilities, supportsSavedPermissions = capabilities.savedPermissions,
         draftSessions = store.draftSessionIds(serverId), previews = nextSessions.associate { session -> session.id to (previous.previews[session.id] ?: store.sessionPreview(serverId, session.id)) }, connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
         error = null, degraded = degraded.isNotEmpty(), staleDirectories = degraded,
-        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, acknowledged = store.acknowledgedTasks(serverId), notices = store.sessionNotices(serverId), collapsedProjects = store.collapsedProjects(serverId), sessionCursors = nextCursors, catalogComplete = nextCursors.isEmpty(),
+        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, notices = store.sessionNotices(serverId), collapsedProjects = store.collapsedProjects(serverId), sessionCursors = nextCursors, catalogComplete = nextCursors.isEmpty(),
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject(serverId))?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
         sessionId = (previous.sessionId ?: store.selectedSession(serverId))?.takeIf { id -> nextSessions.any { it.id == id } }))
     }
+    finishedRuns.forEach { (session, runSince) ->
+      if (!state.value.notices.coversRun(session.id, runSince)) session.transitionNotice(runSince)?.let { recordNotice(serverId, session, it, runSince) }
+    }
+    if (!controlOnly) lastFullRefreshAt = System.currentTimeMillis()
     val current = mutable.value
     current.serverId?.let { cache.saveCatalog(it, current.projects, current.sessions, complete = current.catalogComplete) }
+    if (!followUp) return
     if (controlOnly) {
       current.session?.let { loadSession(it, token = token, ancillary = false) }
       return
@@ -412,10 +455,78 @@ class LagoonController private constructor(private val appContext: Context) {
         loadAll(token)
         // A refresh after an offline start must also (re)establish the live event stream, otherwise
         // the UI shows connected=true with no realtime updates (A10).
-        if (token == generation && stream?.isActive != true) startStream(token)
+        if (token == generation && stream?.isActive != true && streamAllowed()) startStream(token)
       } catch (error: Exception) {
         if (token == generation) mutable.update { state -> state.copy(error = error.message) }
       }
+    }
+  }
+
+  /** Live events need a visible app or the monitoring service; otherwise the socket would only go stale. */
+  private fun streamAllowed() = foreground || monitoring
+
+  /** The app came to the foreground: re-read the server unless that just happened, and resume live events. */
+  fun onForeground() {
+    foreground = true
+    backgroundStop?.cancel()
+    val server = state.value.serverId ?: return
+    if (api == null || connecting?.isActive == true || refresh?.isActive == true) return
+    when {
+      !state.value.connected -> reload()
+      System.currentTimeMillis() - lastFullRefreshAt > FOREGROUND_REFRESH_MILLIS -> reload()
+      stream?.isActive != true && state.value.serverId == server -> startStream(generation)
+    }
+    ensureMonitoring(state.value)
+  }
+
+  /** The app left the foreground: keep live events only while the monitoring service runs. */
+  fun onBackground() {
+    foreground = false
+    backgroundStop?.cancel()
+    backgroundStop = scope.launch {
+      delay(BACKGROUND_GRACE_MILLIS)
+      if (!foreground && !monitoring) stopStream()
+    }
+  }
+
+  /** Called by [TaskMonitorService]: while it runs, the process (and the live stream) may stay up in background. */
+  fun setMonitoring(active: Boolean) {
+    monitoring = active
+    if (active && stream?.isActive != true && state.value.connected) startStream(generation)
+    if (!active && !foreground) stopStream()
+  }
+
+  private fun stopStream() {
+    stream?.cancel(); reconcile?.cancel()
+    mutable.update { it.copy(streamConnected = false) }
+  }
+
+  /**
+   * Periodic background check (WorkManager): one authoritative read without opening the live stream.
+   * A run this device saw that has since ended becomes an unread result and a completion notification.
+   */
+  suspend fun backgroundSync() {
+    if (foreground || monitoring && stream?.isActive == true) return
+    connecting?.takeIf { it.isActive }?.join()
+    if (state.value.serverId == null || api == null) return
+    if (System.currentTimeMillis() - lastFullRefreshAt < FOREGROUND_REFRESH_MILLIS) return
+    val token = generation
+    attempt { loadAll(token, followUp = false) }.onFailure { Diagnostics.warn("BackgroundSync", "后台同步失败", it) }
+  }
+
+  /**
+   * Running tasks — from this phone or any other client — are monitored while they run, so their
+   * results arrive in real time even after the app is backgrounded. A foreground service can only be
+   * started from the foreground, so this runs on state changes while the app is visible.
+   */
+  private fun ensureMonitoring(state: LagoonState) {
+    val server = state.server ?: return
+    if (!foreground || !server.notifications) return
+    val running = state.activeRootTasks.keys
+    monitorRequested.retainAll(running)
+    (running - monitorRequested).forEach { session ->
+      monitorRequested += session
+      attempt { TaskMonitorService.start(appContext, server.id, session) }.onFailure { Diagnostics.warn("Monitor", "无法启动任务监控", it) }
     }
   }
   private fun startStream(token: Int) {
@@ -492,19 +603,14 @@ class LagoonController private constructor(private val appContext: Context) {
         val next = after
         if (!(next.phase == TaskPhase.COMPLETED && pending)) {
           val enteringTerminal = next.phase in TERMINAL_PHASES && before?.phase !in TERMINAL_PHASES
-          mutable.update { current ->
-            // A fresh completion/failure is unread again even if this session was viewed before.
-            val acknowledged = if (enteringTerminal) current.acknowledged - sessionId else current.acknowledged
-            if (enteringTerminal) current.serverId?.let { store.unacknowledgeTask(it, sessionId) }
-            withSummary(current.copy(tasks = current.tasks + (sessionId to next), acknowledged = acknowledged))
-          }
+          mutable.update { current -> withSummary(current.copy(tasks = current.tasks + (sessionId to next))) }
           if (enteringTerminal && sessionId == state.value.sessionId && messageRefresh?.isActive != true) {
             state.value.session?.let { selected -> val token = generation; messageRefresh = scope.launch { delay(250); loadSession(selected, ancillary = false, token = token) } }
           }
-          // A READY transcript from the previous run cannot acknowledge this terminal event.
+          // Live states notify here; results notify once, from the unread ledger (recordNotice).
           val session = mutable.value.sessions.firstOrNull { it.id == sessionId }
           val profile = mutable.value.server
-          if (session != null && profile?.notifications == true && next.phase != before?.phase && sessionId !in mutable.value.acknowledged) notifications.show(profile, session, next,
+          if (session != null && profile?.notifications == true && next.active && next.phase != before?.phase) notifications.show(profile, session, next,
             mutable.value.permissions.firstOrNull { it.sessionId == sessionId })
         }
       }
@@ -587,19 +693,35 @@ class LagoonController private constructor(private val appContext: Context) {
     val server = current.serverId ?: return
     val token = generation
     val known = current.sessions.firstOrNull { it.id == sessionId }
+    val runSince = current.tasks[sessionId]?.since ?: System.currentTimeMillis()
     fun record(session: Session) {
       if (generation != token || state.value.serverId != server) return
-      val notice = event.resultNotice(session) ?: return
-      val notices = store.rememberNotice(server, notice)
-      mutable.update { it.copy(notices = notices) }
-      // Fetch again after inserting the notice: a READY transcript from an earlier run cannot read it.
-      if (state.value.sessionId == session.id) scope.launch { loadSession(state.value.session ?: session, ancillary = false, token = token) }
+      event.resultNotice(session)?.let { recordNotice(server, session, it, runSince) }
     }
     if (known != null) record(known)
     else scope.launch {
       val client = api ?: return@launch
       attempt { findSession(client, sessionId, current.projects.flatMap { it.directories }) }.getOrNull()?.let(::record)
     }
+  }
+
+  /**
+   * Adds one unread result to the ledger. As in the official client it is born viewed when the user is
+   * looking at that conversation; otherwise it raises the completion/failure notification. A second
+   * report of the same run (`session.idle` plus a V2 execution event, or event plus reconciliation)
+   * only upgrades a success to a failure.
+   */
+  private fun recordNotice(server: String, session: Session, notice: SessionNotice, runSince: Long) {
+    val existing = state.value.notices.filter { it.sessionId == session.id && it.time >= runSince }
+    if (existing.any { it.error || !notice.error }) return
+    val viewing = foreground && visibleConversation == (server to session.id)
+    val notices = store.rememberNotice(server, notice.copy(viewed = viewing))
+    mutable.update { if (it.serverId == server) withSummary(it.copy(notices = notices)) else it }
+    if (viewing) return
+    val profile = state.value.server?.takeIf { it.id == server && it.notifications } ?: return
+    val result = TaskState(session.id, if (notice.error) TaskPhase.FAILED else TaskPhase.COMPLETED,
+      if (notice.error) "执行失败" else "任务已完成", runSince, notice.time)
+    attempt { notifications.show(profile, session, result) }
   }
 
   fun toggleProjectGroup(key: String) {
@@ -690,14 +812,12 @@ class LagoonController private constructor(private val appContext: Context) {
     visibleConversation = null
     val offline = mutable.value.cached && !mutable.value.connected
     val messages = emptyList<Message>()
-    // Keep the unread marker until the terminal transcript has been fetched and is visible.
-    val acknowledged = mutable.value.acknowledged
     mutable.update { withSummary(it.copy(projectId = project?.id, sessionId = id, messages = messages,
       agent = configuration.agent ?: session.agent, model = configuration.model ?: session.model,
       agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = draft, references = store.references(serverId, id), savedPermissions = null, sharedUrl = null, loadedOlderMessages = false, messagesCursor = null, resources = mapOf("messages" to ResourceStatus(ResourceState.LOADING)),
       todos = emptyList(), children = emptyList(), changes = emptyList(), files = emptyList(),
-      searchResults = emptyList(), fileText = null, fileBinary = false, acknowledged = acknowledged)) }
+      searchResults = emptyList(), fileText = null, fileBinary = false)) }
     store.rememberLocation(project?.id, id)
     if (offline) {
       val serverId = state.value.serverId ?: return
@@ -720,9 +840,6 @@ class LagoonController private constructor(private val appContext: Context) {
     val requestSequence = ++messageSequence
     fun current() = token == generation && revision == selectionRevision && state.value.sessionId == session.id && state.value.executionDirectory == session.directory && requestSequence == messageSequence
     if (current() && state.value.messages.isEmpty()) mutable.update { it.copy(resources = it.resources + ("messages" to ResourceStatus(ResourceState.LOADING))) }
-    val noticesAtRequest = state.value.notices.filter { it.sessionId == session.id && !it.viewed }.map { it.id }.toSet()
-    val idleAtRequest = state.value.session?.idle ?: 0
-    val terminalAtRequest = state.value.tasks[session.id]?.takeIf { it.phase in TERMINAL_PHASES }?.since
     var nextCursor: String? = null
     val result = attempt { client.messagesPage(session.id, session.directory).let { nextCursor = it.next; it.items } }
     if (token != generation) return
@@ -749,20 +866,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = if (it.agentChanged) it.agent else latestAgent,
       model = if (it.modelChanged) it.model else latestModel,
       resources = it.resources + ("messages" to ResourceStatus(if (result.isSuccess) { if (messages.none { message -> message.isDisplayable }) ResourceState.EMPTY else ResourceState.READY } else ResourceState.STALE))) }
-    if (result.isSuccess) {
-      val last = messages.lastOrNull { it.isDisplayable }?.takeIf { it.role == "assistant" }
-      val task = state.value.tasks[session.id]
-      if (last != null && (task == null || task.phase == TaskPhase.IDLE) && (last.error != null || last.completedAt != null && last.finish !in setOf("tool-calls", "tool_calls"))) {
-        val phase = if (last.error != null) TaskPhase.FAILED else TaskPhase.COMPLETED
-        mutable.update { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, phase,
-          last.error ?: "任务已完成", task?.since ?: last.created, last.completedAt)))) }
-      }
-      val terminal = state.value.tasks[session.id]?.takeIf { it.phase in TERMINAL_PHASES }
-      if (terminal != null && (terminalAtRequest == terminal.since || terminalAtRequest == null && task?.phase in setOf(null, TaskPhase.IDLE))) observedTerminal[session.id] = terminal.since
-      observedNotices[session.id] = noticesAtRequest
-      observedIdle[session.id] = idleAtRequest
-      acknowledgeVisible()
-    }
+    // Opening a session never infers a result from its history: “已完成” exists only in the ledger.
     if (ancillary) {
       // Todos, children and diff are independent; fetch in parallel (one round trip when connected).
       mutable.update { it.copy(resources = it.resources + listOf("todos", "children", "changes").associateWith { ResourceStatus(ResourceState.LOADING) }) }
@@ -825,30 +929,31 @@ class LagoonController private constructor(private val appContext: Context) {
     else if (visibleConversation == (server to session)) visibleConversation = null
     acknowledgeVisible()
   }
+  /**
+   * Official `MarkSessionNotificationsViewed`: once the conversation is on screen, every unread result of
+   * that session is viewed — immediately, not after its transcript loads — and its result notification is
+   * withdrawn. On V2 the server's own read marker for that idle transition is synced best-effort.
+   */
   private fun acknowledgeVisible() {
     val current = state.value
     val server = current.serverId ?: return
     val session = current.sessionId ?: return
-    if (visibleConversation != (server to session) || current.resource("messages").state !in setOf(ResourceState.READY, ResourceState.EMPTY)) return
-    val ids = observedNotices[session].orEmpty()
-    if (current.notices.any { it.sessionId == session && !it.viewed && it.id in ids }) {
-      val notices = store.viewNotices(server, session, ids)
-      mutable.update { it.copy(notices = notices) }
+    if (!foreground || visibleConversation != (server to session)) return
+    val unseen = current.notices.unseenFor(session)
+    if (unseen.isNotEmpty()) {
+      val notices = store.viewNotices(server, session, unseen.map { it.id }.toSet())
+      mutable.update { if (it.serverId == server) withSummary(it.copy(notices = notices)) else it }
+      attempt { notifications.cancel(server, session) }
     }
-    val idle = observedIdle[session] ?: 0
-    if (idle > 0 && current.session?.idle == idle && current.session!!.viewed < idle && current.capabilities.sessionView != null) {
-      observedIdle.remove(session)
-      val client = api; val target = current.session!!; val token = generation
+    val target = current.session ?: return
+    val idle = target.idle
+    if (idle > 0 && target.viewed < idle && current.capabilities.sessionView != null) {
+      val client = api
+      mutable.update { it.copy(sessions = it.sessions.map { item -> if (item.id == session && item.idle == idle) item.copy(viewed = idle) else item }) }
       operationScope.launch {
-        attempt { client?.viewSession(target, idle) }.onSuccess {
-          if (token == generation && state.value.serverId == server) mutable.update { it.copy(sessions = it.sessions.map { item -> if (item.id == session && item.idle == idle) item.copy(viewed = maxOf(item.viewed, idle)) else item }) }
-        }.onFailure { Diagnostics.warn("SessionView", "服务端已读同步失败，保留本地已读记录") }
+        attempt { client?.viewSession(target, idle) }.onFailure { Diagnostics.warn("SessionView", "服务端已读同步失败，保留本地已读记录") }
       }
     }
-    if (current.tasks[session]?.phase !in TERMINAL_PHASES || observedTerminal[session] != current.tasks[session]?.since || session in current.acknowledged) return
-    store.acknowledgeTask(server, session)
-    mutable.update { withSummary(it.copy(acknowledged = it.acknowledged + session)) }
-    notifications.cancel(server, session)
   }
   private fun <T> Result<List<T>>.resourceStatus(): ResourceStatus = fold(
     { ResourceStatus(if (it.isEmpty()) ResourceState.EMPTY else ResourceState.READY) },

@@ -327,7 +327,15 @@ class OpenCodeApi(
     ServerProtocol.V1 -> arr("project").objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
     ServerProtocol.V2 -> {
       val projectPath = capabilities().projectPath
-      if (projectPath != null) dataArray(obj(projectPath)).objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
+      // The published V2 contract returns `Project[]` as a bare array; accept a `{data: […]}` envelope
+      // too. A server without the endpoint (404) falls back to its single current location.
+      val listed = projectPath?.let { path ->
+        try {
+          val raw = withContext(Dispatchers.IO) { request("GET", path) }
+          (if (raw.trimStart().startsWith("[")) jsonArray(raw) else dataArray(jsonObject(raw))).objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
+        } catch (error: ApiException) { if (error.status == 404) null else throw error }
+      }
+      if (listed != null) listed
       else {
         val location = dataObject(obj("api/location"))
         val directory = location.str("directory")
