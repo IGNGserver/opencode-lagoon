@@ -32,6 +32,9 @@ internal fun operationKey(server: String?, session: String?, project: String?, a
   return "$server:$target:$action"
 }
 
+/** Pending phone attachments belong to one composer: a session, or the not-yet-created draft. */
+internal fun attachmentKey(session: String?): String = session ?: "draft"
+
 data class LagoonState(
   val profiles: List<ServerProfile> = emptyList(), val serverId: String? = null, val version: String = "", val protocol: ServerProtocol = ServerProtocol.UNKNOWN,
   val connected: Boolean = false, val cached: Boolean = false, val loading: Boolean = false, val error: String? = null,
@@ -47,6 +50,10 @@ data class LagoonState(
   val permissions: List<PermissionRequest> = emptyList(), val questions: List<QuestionRequest> = emptyList(),
   val todos: List<TodoItem> = emptyList(), val children: List<Session> = emptyList(), val changes: List<FileChange> = emptyList(),
   val agents: List<AgentChoice> = emptyList(), val models: List<ModelChoice> = emptyList(), val commands: List<CommandChoice> = emptyList(),
+  /** [models] with catalog metadata; visibility follows [ModelVisibility] plus this phone's switches. */
+  val modelCatalog: List<ModelInfo> = emptyList(), val modelOverrides: Map<String, Boolean> = emptyMap(), val recentModels: List<String> = emptyList(),
+  /** Files picked on this phone, per session (`draft` before a session exists), until they are sent. */
+  val pendingAttachments: Map<String, List<LocalAttachment>> = emptyMap(),
   val agent: String? = null, val model: ModelChoice? = null,
   val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
   val searchResults: List<String> = emptyList(),
@@ -72,6 +79,8 @@ data class LagoonState(
   val project: Project? get() = projects.firstOrNull { it.id == projectId }
   val session: Session? get() = sessions.firstOrNull { it.id == sessionId }
   val executionDirectory: String? get() = session?.directory ?: project?.directory
+  val attachments: List<LocalAttachment> get() = pendingAttachments[attachmentKey(sessionId)].orEmpty()
+  val visibleModels: List<ModelInfo> get() = ModelVisibility.visible(modelCatalog, modelOverrides)
   fun pending(action: String): Boolean = pendingOperations.contains(operationKey(serverId, sessionId, projectId, action))
   fun resource(name: String): ResourceStatus = resources[name] ?: ResourceStatus()
   fun title(session: Session): String = session.displayTitle()
@@ -127,6 +136,7 @@ class LagoonController private constructor(private val appContext: Context) {
   private val store = ServerStore(appContext)
   private val cache = OfflineCache(appContext)
   private val notifications = TaskNotifications(appContext)
+  private val attachmentImporter = AttachmentImporter(appContext)
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   // Writing operations that must survive the UI leaving the foreground (permission replies, aborts)
   // run here rather than in a composer-scoped coroutine.
@@ -247,6 +257,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
+      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -761,13 +772,16 @@ class LagoonController private constructor(private val appContext: Context) {
     val revision = selectionRevision
     val (agents, models, commands) = coroutineScope {
       val agentsTask = async { attempt { client.agents(directory) } }
-      val modelsTask = async { attempt { client.models(directory) } }
+      val modelsTask = async { attempt { client.modelCatalog(directory) } }
       val commandsTask = async { attempt { client.commands(directory) } }
       Triple(agentsTask.await(), modelsTask.await(), commandsTask.await())
     }
     if (token == generation && revision == selectionRevision && mutable.value.executionDirectory == directory) {
-      mutable.update { current -> current.copy(agents = agents.getOrDefault(current.agents), models = models.getOrDefault(current.models), commands = commands.getOrDefault(current.commands),
-        resources = current.resources + mapOf("agents" to agents.resourceStatus(), "models" to models.resourceStatus(), "commands" to commands.resourceStatus())) }
+      mutable.update { current ->
+        val catalog = models.getOrDefault(current.modelCatalog)
+        current.copy(agents = agents.getOrDefault(current.agents), models = catalog.map { it.choice }, modelCatalog = catalog, commands = commands.getOrDefault(current.commands),
+          resources = current.resources + mapOf("agents" to agents.resourceStatus(), "models" to models.resourceStatus(), "commands" to commands.resourceStatus()))
+      }
     }
   }
   /** Resolve a notification/child target independently of the current catalog page. */
@@ -886,6 +900,42 @@ class LagoonController private constructor(private val appContext: Context) {
   }
   fun chooseModel(model: ModelChoice?) {
     mutable.update { it.copy(model = model ?: it.messages.asReversed().firstNotNullOfOrNull { message -> message.model } ?: it.session?.model, modelChanged = model != null) }; rememberConfiguration()
+    val server = state.value.serverId ?: return
+    if (model != null) {
+      store.rememberRecentModel(server, modelKey(model))
+      mutable.update { it.copy(recentModels = store.recentModels(server)) }
+    }
+  }
+  /** A switch from the phone's "管理模型" list; it overrides the official default rule for this server. */
+  fun setModelVisible(model: ModelInfo, visible: Boolean) {
+    val server = state.value.serverId ?: return
+    store.rememberModelOverride(server, model.key, visible)
+    mutable.update { it.copy(modelOverrides = it.modelOverrides + (model.key to visible)) }
+  }
+  /** Copies picked phone files into the cache off the main thread; each rejection is reported once. */
+  fun addLocalAttachments(uris: List<android.net.Uri>) {
+    if (uris.isEmpty() || state.value.pending("send")) return
+    val server = state.value.serverId ?: return
+    val key = attachmentKey(state.value.sessionId)
+    operationScope.launch {
+      val errors = mutableListOf<String>()
+      for (uri in uris) {
+        val pending = state.value.pendingAttachments[key].orEmpty().sumOf { it.size }
+        val result = kotlinx.coroutines.withContext(Dispatchers.IO) { attempt { attachmentImporter.import(uri, pending) } }
+        result.onSuccess { item ->
+          if (state.value.serverId == server) mutable.update { it.copy(pendingAttachments = it.pendingAttachments + (key to (it.pendingAttachments[key].orEmpty() + item))) }
+          else attachmentImporter.discard(listOf(item))
+        }.onFailure { errors += it.message ?: "无法添加附件" }
+      }
+      if (errors.isNotEmpty() && state.value.serverId == server) mutable.update { it.copy(error = errors.distinct().joinToString("\n")) }
+    }
+  }
+  fun removeLocalAttachment(id: String) {
+    if (state.value.pending("send")) return
+    val key = attachmentKey(state.value.sessionId)
+    val removed = state.value.pendingAttachments[key].orEmpty().filter { it.id == id }
+    mutable.update { it.copy(pendingAttachments = it.pendingAttachments + (key to it.pendingAttachments[key].orEmpty().filterNot { item -> item.id == id })) }
+    operationScope.launch(Dispatchers.IO) { attachmentImporter.discard(removed) }
   }
   private fun rememberConfiguration() {
     val current = state.value
@@ -1011,7 +1061,8 @@ class LagoonController private constructor(private val appContext: Context) {
   fun send(text: String, expectedServer: String? = state.value.serverId, expectedSession: String? = state.value.sessionId, accepted: (() -> Unit)? = null): Job {
     if (state.value.serverId != expectedServer || state.value.sessionId != expectedSession) return operationScope.launch { }
     return act("send") { op ->
-    check(text.isNotBlank() || op.snapshot.references.isNotEmpty()) { "请输入任务" }
+    val attachments = op.snapshot.attachments
+    check(text.isNotBlank() || op.snapshot.references.isNotEmpty() || attachments.isNotEmpty()) { "请输入任务" }
     val session = op.snapshot.session ?: error("先打开会话")
     sendMutex.withLock {
       if (!op.isCurrent(this)) return@act
@@ -1020,9 +1071,16 @@ class LagoonController private constructor(private val appContext: Context) {
       val agent = op.snapshot.agent.takeIf { op.snapshot.protocol == ServerProtocol.V1 || op.snapshot.agentChanged }
       val model = op.snapshot.model.takeIf { op.snapshot.protocol == ServerProtocol.V1 || op.snapshot.modelChanged }
       if (command != null) {
-        check(op.snapshot.references.isEmpty()) { "该命令未确认附件接口，任务正文与附件已保留" }
+        check(op.snapshot.references.isEmpty() && attachments.isEmpty()) { "该命令未确认附件接口，任务正文与附件已保留" }
         op.client.command(session, command.name, text.substringAfter(' ', ""), agent, model)
-      } else op.client.send(session, text, agent, model, op.snapshot.references)
+      } else {
+        val inline = if (attachments.isEmpty()) emptyList() else kotlinx.coroutines.withContext(Dispatchers.IO) { attachments.map(attachmentImporter::inline) }
+        op.client.send(session, text, agent, model, op.snapshot.references, inline)
+      }
+      if (attachments.isNotEmpty()) {
+        mutable.update { it.copy(pendingAttachments = it.pendingAttachments + (attachmentKey(session.id) to it.pendingAttachments[attachmentKey(session.id)].orEmpty().filterNot { item -> item in attachments })) }
+        kotlinx.coroutines.withContext(Dispatchers.IO) { attachmentImporter.discard(attachments) }
+      }
       store.rememberConfiguration(op.serverId, session.id, SessionConfiguration(op.snapshot.agent, op.snapshot.model))
       referenceMutex.withLock { kotlinx.coroutines.withContext(Dispatchers.IO) { store.rememberReferences(op.serverId, session.id, emptyList()) } }
       store.rememberPreview(op.serverId, session.id, SessionPreview(SessionContent.CONTENT, text.take(300)))

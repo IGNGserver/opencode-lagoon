@@ -32,6 +32,21 @@ internal data class SessionNavigation(val tab: RootTab = RootTab.SESSIONS, val s
   fun back() = if (sessions.isNotEmpty()) copy(sessions = sessions.dropLast(1)) else copy(tab = RootTab.SESSIONS)
 }
 
+/** What the root AnimatedContent shows: a tab, or a chat at [depth] levels into that tab's stack. */
+internal data class NavRoute(val tab: RootTab, val session: String?, val depth: Int = if (session == null) 0 else 1)
+
+/**
+ * Horizontal direction of a route change: 1 = the new page enters from the right, -1 = from the left.
+ * Going deeper (open chat / child) or to a tab further right enters from the right; going back up or
+ * to a tab further left enters from the left. Derived from the routes themselves so every entry point
+ * (dock, rail, back gesture, notification) agrees.
+ */
+internal fun slideDirection(from: NavRoute, to: NavRoute): Int = when {
+  to.depth != from.depth -> if (to.depth > from.depth) 1 else -1
+  to.depth == 0 && to.tab != from.tab -> if (to.tab.ordinal > from.tab.ordinal) 1 else -1
+  else -> 1
+}
+
 internal object AppBackStack {
   /** Whether an in-app step exists; when false the system should handle back (leave the app). */
   fun canGoBack(detail: Boolean, tab: RootTab): Boolean = detail || !tab.isRoot

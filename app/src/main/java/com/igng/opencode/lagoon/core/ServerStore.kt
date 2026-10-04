@@ -124,6 +124,25 @@ class ServerStore internal constructor(private val preferences: SharedPreference
   fun selectedSession(id: String? = selectedId()): String? = id?.let { preferences.getString("location:$it:session", null)
     ?: preferences.getString("selectedSession", null).takeIf { selectedId() == id } }
 
+  /** Per-server model switches made on this phone (key = [modelKey]); absent keys follow [ModelVisibility]. */
+  fun modelOverrides(id: String): Map<String, Boolean> = runCatching {
+    val json = JSONObject(preferences.getString("modelVisibility:$id", "{}").orEmpty())
+    json.keys().asSequence().associateWith { json.optBoolean(it) }
+  }.getOrDefault(emptyMap())
+  fun rememberModelOverride(id: String, key: String, visible: Boolean) {
+    val json = JSONObject(modelOverrides(id) + (key to visible))
+    preferences.edit().putString("modelVisibility:$id", json.toString()).apply()
+  }
+  /** Most recently chosen models first, at most five like the official selector. */
+  fun recentModels(id: String): List<String> = runCatching {
+    val json = JSONArray(preferences.getString("recentModels:$id", "[]"))
+    (0 until json.length()).mapNotNull { json.optString(it).takeIf(String::isNotBlank) }
+  }.getOrDefault(emptyList())
+  fun rememberRecentModel(id: String, key: String) {
+    val next = (listOf(key) + recentModels(id).filterNot { it == key }).take(5)
+    preferences.edit().putString("recentModels:$id", JSONArray(next).toString()).apply()
+  }
+
   fun knownDirectories(id: String): Set<String> = preferences.getStringSet("directories:$id", emptySet()).orEmpty().toSet()
   fun rememberDirectory(id: String, directory: String) {
     preferences.edit().putStringSet("directories:$id", knownDirectories(id) + directory).apply()
@@ -246,6 +265,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
     val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedProjects:$id")
+      .remove("modelVisibility:$id").remove("recentModels:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
     editor.apply()
