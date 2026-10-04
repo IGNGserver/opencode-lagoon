@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import com.igng.opencode.lagoon.core.*
 import com.igng.opencode.lagoon.system.IslandRegistry
@@ -129,8 +130,7 @@ private fun MiuixSessionRow(
     modifier = Modifier.fillMaxWidth(),
     pressFeedbackType = PressFeedbackType.Sink,
     showIndication = true,
-    cornerRadius = 12.dp,
-    insideMargin = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+    insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     colors = CardDefaults.defaultColors(
       color = if (emphasized) MiuixColorTokens.WarningSubtle else MiuixTheme.colorScheme.surfaceContainer
     ),
@@ -234,8 +234,11 @@ private fun MiuixEmptyActionCard(title: String, subtitle: String, action: String
 fun ActivityScreen(
   state: LagoonState,
   controller: LagoonController,
+  scrollBehavior: ScrollBehavior,
   onOpen: (String) -> Unit
 ) {
+  var refreshing by remember { mutableStateOf(false) }
+  val refreshScope = rememberCoroutineScope()
   val permissions = state.permissions
   val questions = state.questions
   val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
@@ -250,9 +253,11 @@ fun ActivityScreen(
     Triple(session, latest.time, phase?.let { TaskState(id, it, since = latest.time, finishedAt = latest.time) })
   }.sortedByDescending { it.second }.take(12)
 
+  PullToRefresh(isRefreshing = refreshing, onRefresh = { refreshing = true; refreshScope.launch { controller.reload().join(); refreshing = false } },
+    topAppBarScrollBehavior = scrollBehavior, refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "已刷新")) {
   LazyColumn(
     modifier = Modifier.fillMaxSize().overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 120.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp)
   ) {
     if (permissions.isEmpty() && questions.isEmpty() && running.isEmpty() && finished.isEmpty()) {
@@ -301,6 +306,7 @@ fun ActivityScreen(
       }
     }
   }
+  }
 }
 
 /** 待处理请求所属会话的轻量锚点：点按进入会话上下文。 */
@@ -342,190 +348,6 @@ private fun MiuixSessionAnchor(state: LagoonState, sessionId: String, onOpen: (S
   }
 }
 
-/* ---------------------------- 新建会话 ---------------------------- */
-
-/**
- * 新建会话底部弹层：Server → Project/Directory → Agent / Model → 首条 Prompt 一步完成。
- * 替代旧的“智能开工舱”概念与纯标题创建对话框。
- */
-@Composable
-fun NewSessionSheet(
-  state: LagoonState,
-  controller: LagoonController,
-  onDismiss: () -> Unit,
-  onServers: () -> Unit,
-  onStarted: (Session) -> Unit
-) {
-  var newAgent by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
-  var newProvider by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
-  var newModelId by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
-  val newModel = state.models.firstOrNull { it.providerId == newProvider && it.modelId == newModelId }
-  var prompt by rememberSaveable(state.serverId) { mutableStateOf("") }
-  var title by rememberSaveable(state.serverId) { mutableStateOf("") }
-  var agentExpanded by rememberSaveable(state.serverId) { mutableStateOf(false) }
-  var modelExpanded by rememberSaveable(state.serverId) { mutableStateOf(false) }
-
-  SuperBottomSheet(
-    title = "新建会话",
-    show = true,
-    onDismissRequest = onDismiss
-  ) {
-    Column(
-      Modifier
-        .fillMaxWidth()
-        .fillMaxHeight(0.82f)
-                .padding(horizontal = 16.dp)
-    ) {
-      Column(
-        Modifier.weight(1f).overScrollVertical().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-      ) {
-        // Server：全局上下文，可在此快速切换
-        Text("服务器", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          state.profiles.forEach { profile ->
-            val selected = profile.id == state.serverId
-            SelectChip(
-              label = profile.name,
-              selected = selected,
-              onClick = { if (!selected) controller.connect(profile.id) }
-            )
-          }
-          SelectChip(label = "管理服务器", selected = false, onClick = onServers)
-        }
-
-        // Project / Directory
-        Text("项目 / 目录", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        if (state.projects.isEmpty()) {
-          Text(
-            "服务器暂未返回项目，连接成功后可选。",
-            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          )
-        } else {
-          state.projects.forEach { project ->
-            val selected = project.id == state.projectId
-            Card(
-              modifier = Modifier.fillMaxWidth(),
-              pressFeedbackType = PressFeedbackType.Sink,
-              showIndication = true,
-              cornerRadius = 12.dp,
-              insideMargin = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-              colors = CardDefaults.defaultColors(
-                color = if (selected) MiuixColorTokens.PrimarySubtle else MiuixTheme.colorScheme.surfaceContainer
-              ),
-              onClick = { controller.selectProject(project.id) }
-            ) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                  Text(project.name, style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
-                  Text(
-                    project.directory,
-                    style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                  )
-                }
-                if (selected) {
-                  Icon(
-                    imageVector = MiuixIcons.Ok,
-                    contentDescription = null,
-                    tint = MiuixTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                  )
-                }
-              }
-            }
-          }
-        }
-
-        // Agent / Model：内联展开，避免弹层嵌套
-        Text("执行配置", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        SuperArrow(
-          title = "Agent",
-          summary = newAgent ?: "服务器默认",
-          onClick = { agentExpanded = !agentExpanded }
-        )
-        if (agentExpanded) {
-          OptionRow("服务器默认", newAgent == null) { newAgent = null; agentExpanded = false }
-          state.agents.forEach { agent ->
-            OptionRow(agent.name, newAgent == agent.name) { newAgent = agent.name; agentExpanded = false }
-          }
-        }
-        SuperArrow(
-          title = "模型",
-          summary = newModel?.label ?: "服务器默认",
-          onClick = { modelExpanded = !modelExpanded }
-        )
-        if (modelExpanded) {
-          OptionRow("服务器默认", newModel == null) { newProvider = null; newModelId = null; modelExpanded = false }
-          state.models.forEach { model ->
-            OptionRow("${model.providerId} · ${model.label}", newModel == model) {
-              newProvider = model.providerId; newModelId = model.modelId; modelExpanded = false
-            }
-          }
-        }
-
-        if (state.capabilities.titleOnCreate) {
-          Text("标题（可选）", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-          TextField(
-            value = title,
-            onValueChange = { text: String -> title = text },
-            useLabelAsPlaceholder = true,
-            label = "留空时由服务器按任务自动生成",
-            modifier = Modifier.fillMaxWidth()
-          )
-        }
-
-        Text("第一条任务", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        Card(
-          modifier = Modifier.fillMaxWidth(),
-          cornerRadius = 16.dp,
-          insideMargin = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-          colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest)
-        ) {
-          Box(Modifier.fillMaxWidth().heightIn(min = 72.dp, max = 160.dp)) {
-            if (prompt.isEmpty()) {
-              Text(
-                "例如：把登录页的错误提示改成中文，并补上单测",
-                style = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-              )
-            }
-            BasicTextField(
-              value = prompt,
-              onValueChange = { prompt = it },
-              modifier = Modifier.fillMaxWidth(),
-              textStyle = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurface),
-              cursorBrush = androidx.compose.ui.graphics.SolidColor(MiuixTheme.colorScheme.primary)
-            )
-          }
-        }
-      }
-
-      Spacer(Modifier.height(12.dp))
-      Button(
-        onClick = {
-          val promptText = prompt.trim()
-          controller.startSession(title.trim(), promptText, newAgent, newModel) { session -> onStarted(session) }
-        },
-        enabled = !state.pending("create") && state.connected && !state.cached && prompt.isNotBlank() && state.project != null,
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 18.dp,
-        colors = ButtonDefaults.buttonColorsPrimary()
-      ) {
-        Text(if (state.pending("create")) "正在创建…" else "开始任务")
-      }
-      if (!state.connected) {
-        Text(
-          "离线状态下无法创建会话。",
-          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixColorTokens.Warning),
-          modifier = Modifier.padding(top = 6.dp)
-        )
-      }
-      Spacer(Modifier.height(8.dp))
-    }
-  }
-}
-
 @Composable
 private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
   Card(
@@ -549,40 +371,6 @@ private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
   }
 }
 
-@Composable
-private fun OptionRow(label: String, selected: Boolean, onClick: () -> Unit) {
-  Card(
-    modifier = Modifier.fillMaxWidth(),
-    pressFeedbackType = PressFeedbackType.Sink,
-    showIndication = true,
-    cornerRadius = 10.dp,
-    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-    colors = CardDefaults.defaultColors(
-      color = if (selected) MiuixColorTokens.PrimarySubtle else Color.Transparent
-    ),
-    onClick = onClick
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Text(
-        label,
-        style = MiuixTheme.textStyles.body2.copy(
-          color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface
-        ),
-        modifier = Modifier.weight(1f),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis
-      )
-      if (selected) {
-        Icon(
-          imageVector = MiuixIcons.Ok,
-          contentDescription = null,
-          tint = MiuixTheme.colorScheme.primary,
-          modifier = Modifier.size(16.dp)
-        )
-      }
-    }
-  }
-}
 @Composable
 fun ServersModal(
   state: LagoonState,
@@ -878,7 +666,8 @@ fun SettingsScreen(
   previewBack: Boolean,
   onPreviewBack: (Boolean) -> Unit,
   onNotifications: () -> Unit,
-  onManageServers: () -> Unit
+  onManageServers: () -> Unit,
+  scrollBehavior: ScrollBehavior
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
   // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
@@ -905,7 +694,8 @@ fun SettingsScreen(
   LazyColumn(
     modifier = Modifier
       .fillMaxSize()
-      .overScrollVertical(),
+      .overScrollVertical()
+      .nestedScroll(scrollBehavior.nestedScrollConnection),
     contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 120.dp)
   ) {
     item {

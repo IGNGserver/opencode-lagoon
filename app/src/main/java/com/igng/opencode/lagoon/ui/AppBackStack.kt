@@ -32,6 +32,9 @@ internal data class SessionNavigation(val tab: RootTab = RootTab.SESSIONS, val s
   fun back() = if (sessions.isNotEmpty()) copy(sessions = sessions.dropLast(1)) else copy(tab = RootTab.SESSIONS)
 }
 
+/** Route id of the blank "新会话" page; it becomes the real session id after the first send. */
+internal const val DRAFT_SESSION = "\u0000draft"
+
 /** What the root AnimatedContent shows: a tab, or a chat at [depth] levels into that tab's stack. */
 internal data class NavRoute(val tab: RootTab, val session: String?, val depth: Int = if (session == null) 0 else 1)
 

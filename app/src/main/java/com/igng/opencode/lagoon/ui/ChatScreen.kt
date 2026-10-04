@@ -91,7 +91,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       state.tasks[session.id]?.takeIf { it.active }?.let { Spacer(Modifier.width(8.dp)); MiuixStatePill(it.phase) }
     }
     Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it })
-    ChatComposer(state, controller, interactive) { composerModal = it }
+    ChatComposer(state, controller, interactive, onModal = { composerModal = it })
   }
   sheet?.let { which ->
     val resource = when (which) { ChatSheet.TODO -> "todos"; ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children"; ChatSheet.AGENTS -> "agents" }
@@ -133,6 +133,38 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       DialogActions("取消", { delete = false }, if (state.pending("delete")) "删除中…" else "永久删除", !state.pending("delete"), danger = true) { controller.deleteSession { delete = false; onBack() } }
     }
   }
+}
+
+/**
+ * 新建会话：先进入空白页，发出第一条消息时才在服务器上创建会话（失败时正文和附件都保留）。
+ * 目标项目默认取首页范围里的项目，「全部」时取最近活跃的项目，可在输入框下方切换。
+ */
+@Composable
+fun DraftScreen(state: LagoonState, controller: LagoonController, onBack: () -> Unit, onModal: (Boolean) -> Unit, interactive: Boolean = true) {
+  var targetPicker by remember { mutableStateOf(false) }
+  var addProject by remember { mutableStateOf(false) }
+  var composerModal by remember { mutableStateOf(false) }
+  val modal = targetPicker || addProject || composerModal
+  DisposableEffect(modal) { onModal(modal); onDispose { onModal(false) } }
+  Column(Modifier.fillMaxSize()) {
+    SmallTopAppBar(title = "新会话", navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } })
+    Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("要做点什么？", style = MiuixTheme.textStyles.title3)
+        Spacer(Modifier.height(8.dp))
+        Text(state.project?.let { "会在「${it.name}」中新建，发出第一条消息后才会创建会话" } ?: "先在下方选择一个项目",
+          style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
+          textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+      }
+    }
+    ChatComposer(state, controller, interactive, { composerModal = it }, busy = state.pending("create"), actionKey = "create", ready = state.project != null,
+      // The created session inherits the text as its draft until the first send succeeds; each draft page
+      // gets a fresh saveable key from MainActivity, so nothing needs clearing here.
+      onSend = { text, _ -> controller.startSession("", text, state.agent.takeIf { state.agentChanged }, state.model.takeIf { state.modelChanged }) },
+      footer = { DraftTargetChip(state) { targetPicker = true } })
+  }
+  if (targetPicker) DraftTargetSheet(state, controller, { targetPicker = false }) { targetPicker = false; addProject = true }
+  if (addProject) DirectoryBrowserSheet(state, controller, { addProject = false }) { addProject = false }
 }
 
 /** MIUIX dialog footer: two equal-width buttons, the confirming one in the primary (or error) color. */
@@ -326,7 +358,12 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
  * Commands, Agent and server-file references no longer sit here; Agent lives in the ⋯ menu.
  */
 @Composable
-private fun ChatComposer(state: LagoonState, controller: LagoonController, interactive: Boolean, onModal: (Boolean) -> Unit) {
+private fun ChatComposer(
+  state: LagoonState, controller: LagoonController, interactive: Boolean, onModal: (Boolean) -> Unit,
+  busy: Boolean = state.pending("send"), actionKey: String = "send", ready: Boolean = true,
+  onSend: (String, () -> Unit) -> Unit = { text, clear -> controller.send(text, state.serverId, state.sessionId, clear) },
+  footer: (@Composable RowScope.() -> Unit)? = null
+) {
   var value by rememberSaveable(state.serverId, state.sessionId, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(state.draft)) }
   var picker by remember { mutableStateOf<String?>(null) }
   var attachMenu by remember { mutableStateOf(false) }
@@ -335,8 +372,8 @@ private fun ChatComposer(state: LagoonState, controller: LagoonController, inter
   LaunchedEffect(state.draft) { if (value.text != state.draft) value = TextFieldValue(state.draft, androidx.compose.ui.text.TextRange(state.draft.length)) }
   DisposableEffect(picker, attachMenu) { onModal(picker != null || attachMenu); onDispose { onModal(false) } }
   val task = state.tasks[state.sessionId]
-  val sending = state.pending("send")
-  val canSend = state.connected && !state.cached && task?.active != true && !sending &&
+  val sending = busy
+  val canSend = ready && state.connected && !state.cached && task?.active != true && !sending &&
     (value.text.isNotBlank() || state.references.isNotEmpty() || state.attachments.isNotEmpty())
   Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
     val hint = when {
@@ -381,11 +418,12 @@ private fun ChatComposer(state: LagoonState, controller: LagoonController, inter
           }
         } else RoundAction(MiuixIcons.Send, "发送", {
           val draft = value.text
-          controller.send(draft, state.serverId, state.sessionId) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue("") } }
+          onSend(draft) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue("") } }
         }, enabled = canSend)
       }
     }
-    ActionError(state, "send")
+    ActionError(state, actionKey)
+    footer?.let { Row(Modifier.fillMaxWidth().padding(top = 8.dp, start = 4.dp), verticalAlignment = Alignment.CenterVertically, content = it) }
   }
   when (picker) {
     "models" -> ModelPickerSheet(state, controller, { picker = null }) { picker = "manage" }

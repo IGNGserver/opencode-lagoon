@@ -364,6 +364,38 @@ class ControllerRegressionTest {
       assertEquals("build", org.json.JSONObject(requests.single { it.requestUrl!!.encodedPath.endsWith("prompt_async") }.body.readUtf8()).getString("agent"))
     }
   }
+  @Test fun draftFirstSendCreatesOnceAndCarriesPhoneAttachmentsIntoTheSession() = runBlocking {
+    MockWebServer().use { server ->
+      server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
+        "/global/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/session" -> MockResponse().setBody("""{"id":"created","directory":"/repo","title":"","time":{}}""")
+        "/session/created/prompt_async" -> MockResponse().setResponseCode(500)
+        else -> MockResponse().setBody("[]")
+      } }
+      val api = api(server); api.health()
+      val photo = LocalAttachment("a1", "photo.jpg", "image/jpeg", 10, "/nonexistent/a1")
+      val (controller, state) = controller(api, LagoonState(serverId="server", protocol=ServerProtocol.V1, connected=true,
+        projects=listOf(Project("project", "/repo", "Repo")), projectId="project", pendingAttachments=mapOf(attachmentKey(null) to listOf(photo))))
+      controller.startSession("", "", null, null).join()
+      withTimeout(3_000) { while (state.value.pending("send") || state.value.pending("create")) delay(10) }
+      assertEquals("created", state.value.sessionId)
+      assertEquals(listOf(photo), state.value.attachments)
+      assertFalse(attachmentKey(null) in state.value.pendingAttachments)
+      assertEquals(1, List(server.requestCount) { server.takeRequest() }.count { it.method == "POST" && it.requestUrl!!.encodedPath == "/session" })
+    }
+  }
+  @Test fun scopeIsAFilterThatSurvivesUnknownProjects() {
+    val (controller, state) = controller(OpenCodeApi(ServerProfile("server","Server","https://example.invalid"), "x"),
+      LagoonState(serverId="server", projects=listOf(Project("p", "/repo", "Repo")), projectId="p"))
+    controller.setScope("missing")
+    assertEquals(null, state.value.scopeProjectId)
+    controller.setScope("p")
+    assertEquals("p", state.value.scopeProjectId)
+    assertEquals("p", state.value.projectId)
+    controller.setScope(null)
+    assertEquals(null, state.value.scopeProjectId)
+    assertEquals("p", state.value.projectId)
+  }
   @Test fun rejectedDeleteKeepsSessionAndDoesNotNavigateAway() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setBody("""{"healthy":true}""")); server.enqueue(MockResponse().setResponseCode(500))

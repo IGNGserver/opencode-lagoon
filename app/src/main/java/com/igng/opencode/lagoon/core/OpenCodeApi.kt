@@ -666,6 +666,29 @@ class OpenCodeApi(
       .objects().map { item -> FileNode(item.str("path"), item.str("type")) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+  /** Where the server-side folder browser starts: the server's default location (V2) or home (V1). */
+  suspend fun browseRoot(): String = when (ensureProtocol()) {
+    ServerProtocol.V1 -> obj("path").let { it.str("home").ifBlank { it.str("directory") } }
+    ServerProtocol.V2 -> dataObject(obj("api/location")).str("directory")
+    ServerProtocol.UNKNOWN -> ""
+  }.ifBlank { "/" }
+
+  /**
+   * Child folders of an absolute server directory. Like the official V2 folder picker, the folder to
+   * list is the request location (`path` only accepts paths relative to it).
+   */
+  suspend fun listDirectories(absolute: String): List<String> {
+    val entries = when (ensureProtocol()) {
+      ServerProtocol.V1 -> arr("file", absolute, mapOf("path" to ".")).objects().map { it.str("path").ifBlank { it.str("name") } to it.str("type") }
+      ServerProtocol.V2 -> dataArray(obj("api/fs/list", query = locationQuery(absolute))).objects().map { it.str("path") to it.str("type") }
+      ServerProtocol.UNKNOWN -> emptyList()
+    }
+    return entries.filter { it.second == "directory" }
+      .map { it.first.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\') }
+      .filter { it.isNotBlank() && it != "." && it != ".." }
+      .distinct().sortedWith(compareBy<String> { it.startsWith('.') }.thenBy { it.lowercase() })
+  }
+
   suspend fun fileContent(directory: String, path: String): FileContent = when (ensureProtocol()) {
     ServerProtocol.V1 -> obj("file/content", directory, mapOf("path" to path)).toFileContent()
     ServerProtocol.V2 -> {

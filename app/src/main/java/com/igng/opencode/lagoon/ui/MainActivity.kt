@@ -72,8 +72,10 @@ class MainActivity : ComponentActivity() {
       var sessionStack by rememberSaveable { mutableStateOf(emptyList<String>()) }
       var navigationServer by rememberSaveable { mutableStateOf(state.serverId) }
       var showingServersSheet by remember { mutableStateOf(false) }
-      var showingNewSession by remember { mutableStateOf(false) }
       var showingProjects by remember { mutableStateOf(false) }
+      var showingAddProject by remember { mutableStateOf(false) }
+      // Each blank draft gets a fresh saveable scope so a sent draft never reappears.
+      var draftNonce by rememberSaveable { mutableIntStateOf(0) }
       var chatModal by remember { mutableStateOf(false) }
       var globalMessage by remember { mutableStateOf<String?>(null) }
       var globalMessageType by remember { mutableStateOf(MiuixToastType.INFO) }
@@ -101,6 +103,12 @@ class MainActivity : ComponentActivity() {
             if (controller.state.value.sessionId != id) controller.selectSession(id)
           }
         }
+      }
+      fun openDraft() {
+        focusManager.clearFocus()
+        controller.beginDraft()
+        draftNonce += 1
+        sessionStack = listOf(DRAFT_SESSION)
       }
       fun goBack() {
         focusManager.clearFocus()
@@ -143,7 +151,7 @@ class MainActivity : ComponentActivity() {
       val backProgress = remember { Animatable(0f) }
       var gestureActive by remember { mutableStateOf(false) }
       var gestureRoute by remember { mutableStateOf<NavRoute?>(null) }
-      PredictiveBackHandler(enabled = SessionNavigation(currentTab, sessionStack).canGoBack && !keyboardOpen && !chatModal && !showingServersSheet && !showingNewSession && !showingProjects) { progress ->
+      PredictiveBackHandler(enabled = SessionNavigation(currentTab, sessionStack).canGoBack && !keyboardOpen && !chatModal && !showingServersSheet && !showingProjects && !showingAddProject) { progress ->
         gestureActive = true; gestureRoute = route
         try {
           progress.collect { if (previewBack) backProgress.snapTo(it.progress.coerceIn(0f, 1f)) }
@@ -171,12 +179,17 @@ class MainActivity : ComponentActivity() {
               }
             }
             AnimatedContent(route, transitionSpec = {
-              // Direction comes from the route change itself: tabs to the right / deeper pages enter
-              // from the right, tabs to the left / going back enter from the left.
-              val direction = slideDirection(initialState, targetState)
-              val motion = tween<IntOffset>(300, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
-              (fadeIn(tween(220, delayMillis = 40)) + slideInHorizontally(motion) { it * direction / 4 }) togetherWith
-                (fadeOut(tween(160)) + slideOutHorizontally(motion) { -it * direction / 4 })
+              // The first send turns the draft into the real session in place, without a page change.
+              if (initialState.session == DRAFT_SESSION && targetState.depth == initialState.depth && targetState.session != DRAFT_SESSION) {
+                EnterTransition.None togetherWith ExitTransition.None
+              } else {
+                // Direction comes from the route change itself: tabs to the right / deeper pages enter
+                // from the right, tabs to the left / going back enter from the left.
+                val direction = slideDirection(initialState, targetState)
+                val motion = tween<IntOffset>(300, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
+                (fadeIn(tween(220, delayMillis = 40)) + slideInHorizontally(motion) { it * direction / 4 }) togetherWith
+                  (fadeOut(tween(160)) + slideOutHorizontally(motion) { -it * direction / 4 })
+              }
             }, label = "navigation") { target ->
               val active = target == route
               val displayed = if (target.session == state.sessionId) state else snapshots["${state.serverId}:${target.session}"] ?: state
@@ -184,15 +197,32 @@ class MainActivity : ComponentActivity() {
                 if (target == gestureRoute && gestureActive) { translationX = backProgress.value * size.width * 0.16f; scaleX = 1f - backProgress.value * 0.02f; scaleY = scaleX }
               }.then(if (active) Modifier else Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
                 .background(MiuixTheme.colorScheme.background)) {
-                if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
+                if (target.session == DRAFT_SESSION) holder.SaveableStateProvider("draft:${state.serverId}:$draftNonce") {
+                  DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
+                } else if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
                   ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { openSession(it, true) }, onModal = { if (active) chatModal = it }, interactive = active)
                 } else holder.SaveableStateProvider("root:${state.serverId}:${target.tab}") {
-                  Column(Modifier.fillMaxSize().then(if (target.tab == RootTab.SESSIONS)
-                    Modifier.windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)) else Modifier)) {
+                  // HyperOS large-title bars that collapse on scroll; refresh is pull-to-refresh.
+                  val scroll = MiuixScrollBehavior(rememberTopAppBarState())
+                  Column(Modifier.fillMaxSize()) {
                     when (target.tab) {
-                      RootTab.SESSIONS -> Unit
-                      RootTab.ACTIVITY -> SmallTopAppBar(title = "活动", actions = { IconButton(onClick = controller::reload) { Icon(MiuixIcons.Refresh, "刷新") } })
-                      RootTab.SETTINGS -> SmallTopAppBar(title = "设置")
+                      RootTab.SESSIONS -> SelectorTopBar(
+                        title = state.scopeProjectId?.let { id -> state.projects.firstOrNull { it.id == id }?.name } ?: "全部会话",
+                        onTitleClick = { showingProjects = true },
+                        scrollBehavior = scroll,
+                        navigation = {
+                          CapsuleSelector(state.server?.name ?: "选择服务器", { showingServersSheet = true }, maxTextWidth = 120.dp, leading = {
+                            StatusDot(when {
+                              state.connected && state.streamConnected -> MiuixColorTokens.Success
+                              state.connected || state.loading -> MiuixColorTokens.Warning
+                              else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                            })
+                          })
+                        },
+                        actions = { IconButton(onClick = { openDraft() }, enabled = state.connected) { Icon(MiuixIcons.Add, "新建会话") } }
+                      )
+                      RootTab.ACTIVITY -> TopAppBar(title = "活动", color = MiuixTheme.colorScheme.background, scrollBehavior = scroll)
+                      RootTab.SETTINGS -> TopAppBar(title = "设置", color = MiuixTheme.colorScheme.background, scrollBehavior = scroll)
                     }
                     Row(Modifier.weight(1f).fillMaxWidth()) {
                       if (wide) NavigationRail {
@@ -201,12 +231,12 @@ class MainActivity : ComponentActivity() {
                       }
                       Box(Modifier.weight(1f).fillMaxHeight()) {
                       when (target.tab) {
-                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { openSession(it) }, { showingServersSheet = true }, { showingNewSession = true }, { showingProjects = true })
-                        RootTab.ACTIVITY -> ActivityScreen(state, controller) { openSession(it) }
+                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { openSession(it) }, { showingServersSheet = true }, { openDraft() }, scroll)
+                        RootTab.ACTIVITY -> ActivityScreen(state, controller, scroll) { openSession(it) }
                         RootTab.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
                           if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                           else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-                        }, { showingServersSheet = true })
+                        }, { showingServersSheet = true }, scroll)
                       }
                       }
                     }
@@ -219,8 +249,8 @@ class MainActivity : ComponentActivity() {
             MiuixToastHost(globalMessage, globalMessageType, { globalMessage = null }, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp))
             // MIUIX popups must stay inside this Scaffold content's popup registry.
             if (showingServersSheet) ServersModal(state, controller, { showingServersSheet = false }, { showingServersSheet = false; currentTab = RootTab.SESSIONS })
-            if (showingNewSession) NewSessionSheet(state, controller, { showingNewSession = false }, { showingNewSession = false; showingServersSheet = true }) { session -> showingNewSession = false; openSession(session.id) }
-            if (showingProjects) ProjectPicker(state, controller) { showingProjects = false }
+            if (showingProjects) ProjectScopeSheet(state, controller, { showingProjects = false }) { showingProjects = false; showingAddProject = true }
+            if (showingAddProject) DirectoryBrowserSheet(state, controller, { showingAddProject = false }) { showingAddProject = false }
           }
         }
       }
@@ -232,29 +262,5 @@ class MainActivity : ComponentActivity() {
     if (uri.scheme != "opencode-lagoon" || uri.host != "server") return
     val parts = uri.pathSegments
     if (parts.size >= 3 && parts[1] == "session") deepLink = parts[0] to parts[2]
-  }
-}
-
-@Composable
-private fun ProjectPicker(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
-  var directory by rememberSaveable(state.serverId) { mutableStateOf("") }
-  var query by rememberSaveable(state.serverId) { mutableStateOf("") }
-  val projects = state.projects.filter { query.isBlank() || it.name.contains(query, true) || it.directory.contains(query, true) }
-  var error by remember { mutableStateOf<String?>(null) }
-  SuperBottomSheet(title = "切换项目 / 目录", show = true, onDismissRequest = onDismiss) {
-    androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(16.dp)) {
-      item { TextField(query, { query = it }, label = "搜索项目名称或目录", modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) }
-      items(projects.size) { index -> val project = projects[index]
-        Card(onClick = { controller.selectProject(project.id); onDismiss() }, insideMargin = PaddingValues(16.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-          Text(project.name, color = if (state.projectId == project.id) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface)
-          Text(project.directory, style = MiuixTheme.textStyles.footnote2)
-        }
-      }
-      item { TextField(directory, { directory = it }, label = "添加服务器上的绝对目录", modifier = Modifier.fillMaxWidth()); error?.let { Text(it, color = MiuixColorTokens.Error) }
-        TextButton(text = "添加并切换", enabled = directory.isNotBlank() && state.connected, onClick = {
-          runCatching { controller.addProjectDirectory(directory) }.onSuccess { directory = ""; onDismiss() }.onFailure { error = it.message }
-        })
-      }
-    }
   }
 }
