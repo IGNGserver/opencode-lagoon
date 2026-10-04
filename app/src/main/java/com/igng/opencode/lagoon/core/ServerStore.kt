@@ -143,6 +143,12 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     preferences.edit().putString("recentModels:$id", JSONArray(next).toString()).apply()
   }
 
+  /** Home list scope per server: a project id, or null for 全部会话 (the default). */
+  fun scope(id: String): String? = preferences.getString("scope:$id", null)?.takeIf(String::isNotBlank)
+  fun rememberScope(id: String, project: String?) {
+    preferences.edit().putString("scope:$id", project.orEmpty()).apply()
+  }
+
   fun knownDirectories(id: String): Set<String> = preferences.getStringSet("directories:$id", emptySet()).orEmpty().toSet()
   fun rememberDirectory(id: String, directory: String) {
     preferences.edit().putStringSet("directories:$id", knownDirectories(id) + directory).apply()
@@ -265,7 +271,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
     val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedProjects:$id")
-      .remove("modelVisibility:$id").remove("recentModels:$id")
+      .remove("modelVisibility:$id").remove("recentModels:$id").remove("scope:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
     editor.apply()

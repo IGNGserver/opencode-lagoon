@@ -44,6 +44,10 @@ data class LagoonState(
   /** Non-error feedback (e.g. a share link); kept separate so it is not rendered as a failure. */
   val message: String? = null,
   val projects: List<Project> = emptyList(), val projectId: String? = null,
+  /** Home list filter: null = 全部会话 (default), otherwise one project id. Not the execution target. */
+  val scopeProjectId: String? = null,
+  /** The server-side folder browser used to add a project; null when closed. */
+  val directoryListing: DirectoryListing? = null,
   val sessions: List<Session> = emptyList(), val sessionId: String? = null,
   val knownParents: Map<String, String> = emptyMap(),
   val messages: List<Message> = emptyList(), val tasks: Map<String, TaskState> = emptyMap(),
@@ -257,7 +261,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
-      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id),
+      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -425,6 +429,7 @@ class LagoonController private constructor(private val appContext: Context) {
         projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, notices = store.sessionNotices(serverId), collapsedProjects = store.collapsedProjects(serverId), sessionCursors = nextCursors, catalogComplete = nextCursors.isEmpty(),
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject(serverId))?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
+        scopeProjectId = previous.scopeProjectId?.takeIf { id -> projects.any { it.id == id } },
         sessionId = (previous.sessionId ?: store.selectedSession(serverId))?.takeIf { id -> nextSessions.any { it.id == id } }))
     }
     finishedRuns.forEach { (session, runSince) ->
@@ -458,10 +463,10 @@ class LagoonController private constructor(private val appContext: Context) {
     check(page.next != cursor) { "服务器返回了重复分页游标" }
     op.commit { it.copy(messages = (page.items + it.messages).distinctBy { m -> m.id }, messagesCursor = page.next, loadedOlderMessages = true) }
   }
-  fun reload() {
+  fun reload(): Job {
     val token = generation
     refresh?.cancel()
-    refresh = scope.launch {
+    return scope.launch {
       try {
         loadAll(token)
         // A refresh after an offline start must also (re)establish the live event stream, otherwise
@@ -470,7 +475,7 @@ class LagoonController private constructor(private val appContext: Context) {
       } catch (error: Exception) {
         if (token == generation) mutable.update { state -> state.copy(error = error.message) }
       }
-    }
+    }.also { refresh = it }
   }
 
   /** Live events need a visible app or the monitoring service; otherwise the socket would only go stale. */
@@ -965,14 +970,48 @@ class LagoonController private constructor(private val appContext: Context) {
     val current = state.value; val server = current.serverId ?: return; val session = current.sessionId ?: return
     operationScope.launch { referenceMutex.withLock { kotlinx.coroutines.withContext(Dispatchers.IO) { attempt { store.rememberReferences(server, session, current.references) } } } }
   }
+  /** Home list filter only; choosing a project also makes it the target for new sessions. */
+  fun setScope(projectId: String?) {
+    val server = state.value.serverId ?: return
+    val scope = projectId?.takeIf { id -> state.value.projects.any { it.id == id } }
+    store.rememberScope(server, scope)
+    mutable.update { it.copy(scopeProjectId = scope) }
+    if (scope != null && scope != state.value.projectId) selectProject(scope)
+  }
+  /** Leaves any open session for a blank draft that starts in the scope's (or latest) project. */
+  fun beginDraft() {
+    val current = state.value
+    val target = HomeScope.draftTarget(current.sessions, current.projects, current.scopeProjectId, current.projectId) ?: return
+    if (target != current.projectId || current.sessionId != null) selectProject(target)
+  }
+  /** Lists child folders of [path] (null = the server's default location) for the add-project browser. */
+  fun browseDirectories(path: String?): Job {
+    val home = state.value.directoryListing?.home
+    mutable.update { it.copy(directoryListing = DirectoryListing(path ?: it.directoryListing?.path ?: "", home = home)) }
+    return act { op ->
+      val root = if (path == null) op.client.browseRoot() else null
+      val target = path ?: root!!
+      val listing = try {
+        DirectoryListing(target, op.client.listDirectories(target), ResourceStatus(ResourceState.READY), home ?: root)
+      } catch (cancel: CancellationException) { throw cancel } catch (error: Exception) {
+        DirectoryListing(target, emptyList(), ResourceStatus(ResourceState.ERROR, error.message ?: "无法读取这个文件夹"), home ?: root)
+      }
+      op.commitConnection { current -> if (current.directoryListing == null) current else current.copy(directoryListing = listing) }
+    }
+  }
+  fun closeDirectoryBrowser() = mutable.update { it.copy(directoryListing = null) }
   fun addProjectDirectory(directory: String) {
     val server = state.value.serverId ?: return
     require(directory.isNotBlank() && !directory.contains('\u0000')) { "目录不能为空" }
     require(directory.trim().startsWith("/") || Regex("^[A-Za-z]:[/\\\\]").containsMatchIn(directory.trim())) { "请输入服务器上的绝对目录" }
     store.rememberDirectory(server, directory.trim())
-    val project = Project("directory:${directory.trim()}", directory.trim(), directory.trim().substringAfterLast('/'))
+    val existing = state.value.projects.firstOrNull { normalizedDirectory(it.directory) == normalizedDirectory(directory) }
+    val project = existing ?: Project("directory:${directory.trim()}", directory.trim(), directory.trim().trimEnd('/').substringAfterLast('/').ifBlank { directory.trim() })
     mutable.update { it.copy(projects = (it.projects + project).distinctBy { item -> normalizedDirectory(item.directory) }) }
-    selectProject(project.id); reload()
+    // An added project becomes the home scope right away, like choosing it in the picker.
+    setScope(project.id)
+    if (state.value.projectId != project.id) selectProject(project.id)
+    reload()
   }
   fun conversationVisible(server: String, session: String, visible: Boolean) {
     if (visible) visibleConversation = server to session
@@ -1045,13 +1084,16 @@ class LagoonController private constructor(private val appContext: Context) {
    * 首条消息复用 [send]，命令解析、任务计数与前台服务逻辑不重复实现。
    */
   fun startSession(title: String, prompt: String, agent: String? = null, model: ModelChoice? = null, onStarted: ((Session) -> Unit)? = null) = act("create", state.value.project?.directory) { op ->
-    check(prompt.isNotBlank()) { "请输入任务" }
+    // Files picked on the blank draft page move to the new session so a failed first send keeps them.
+    val draftFiles = op.snapshot.pendingAttachments[attachmentKey(null)].orEmpty()
+    check(prompt.isNotBlank() || draftFiles.isNotEmpty()) { "请输入任务" }
     val project = op.snapshot.project ?: error("先选择项目")
     val session = op.client.createSession(project.directory, title)
     op.commitConnection { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { s -> s.id }) }
     if (op.isCurrent(this)) {
       store.rememberDraft(op.serverId, session.id, prompt)
       store.rememberConfiguration(op.serverId, session.id, SessionConfiguration(agent, model, agent != null, model != null))
+      if (draftFiles.isNotEmpty()) mutable.update { it.copy(pendingAttachments = it.pendingAttachments - attachmentKey(null) + (session.id to draftFiles)) }
       selectSession(session.id)
       mutable.update { it.copy(agentChanged = agent != null, modelChanged = model != null, draft = prompt, previews = it.previews + (session.id to SessionPreview(SessionContent.EMPTY))) }
       onStarted?.invoke(session)
