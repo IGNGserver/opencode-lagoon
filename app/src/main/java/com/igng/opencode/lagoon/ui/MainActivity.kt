@@ -193,7 +193,10 @@ class MainActivity : ComponentActivity() {
                       Icon(MiuixIcons.Folder, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp))
                       Text(state.project?.name ?: "选择项目 / 目录", modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Text("切换", color = MiuixTheme.colorScheme.primary)
                     }
-                    MiuixTaskIsland(state.summary, { state.summaryTargetId?.let { openSession(it) } })
+                    MiuixTaskIsland(state.summary, onOpenSession = { sessionId ->
+                      backDirection = false
+                      openSession(sessionId)
+                    })
                     Row(Modifier.weight(1f).fillMaxWidth()) {
                       if (wide) NavigationRail {
                         val icons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)

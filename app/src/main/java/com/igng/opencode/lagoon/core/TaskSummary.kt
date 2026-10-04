@@ -1,19 +1,31 @@
 package com.igng.opencode.lagoon.core
 
 /**
- * 全服务器范围的任务计数，供灵动岛 / 超级岛 / 实时通知复用同一份口径。
+ * 灵动岛展示的单个具体任务条目（最多提取前 3 个）。
+ */
+data class TaskSummaryItem(
+  val sessionId: String,
+  val title: String,
+  val phase: TaskPhase,
+  val detail: String = ""
+)
+
+/**
+ * 全服务器范围的任务计数与明细，供灵动岛 / 超级岛 / 实时通知复用同一份口径。
  *
  * 计数规则（已确认）：
  * - [running]：正在执行（THINKING / TOOL / SUBAGENT / TESTING）。
  * - [completed]：已完成但用户尚未查看（“未读的已完成”），用户打开过对应会话后不再计入。
  * - [waiting]：需要用户处理，权限确认与问题回答合并显示为“待回复”。
  * - [failed]：执行失败，单独显示，不与已完成合并。
+ * - [items]：按重要度排序的具体任务列表（运行/等待 > 失败 > 未读已完成），最多取 3 条。
  */
 data class TaskSummary(
   val running: Int = 0,
   val completed: Int = 0,
   val waiting: Int = 0,
-  val failed: Int = 0
+  val failed: Int = 0,
+  val items: List<TaskSummaryItem> = emptyList()
 ) {
   val isEmpty: Boolean get() = running == 0 && completed == 0 && waiting == 0 && failed == 0
 
@@ -33,10 +45,14 @@ data class TaskSummary(
       }
     }
 
-  /** 状态栏 chip 用的极短文案，无等待/失败时退化为“n跑”。 */
+  /**
+   * 极短胶囊文案（未展开状态展示）：
+   * 必须同时展示运行中与已完成计数，例如：“0跑·1完”或“1跑·2完”；
+   * 存在待处理或失败时追加：“·1待”或“·1败”。
+   */
   val shortText: String
     get() = buildString {
-      append("${running}跑")
+      append("${running}跑·${completed}完")
       if (waiting > 0) append("·${waiting}待")
       if (failed > 0) append("·${failed}败")
     }
@@ -46,8 +62,14 @@ data class TaskSummary(
 
     /**
      * @param acknowledged 已被用户查看过、不再计入“未读已完成/失败”的会话 id。
+     * @param titles 会话标题映射表，用于生成 items。
      */
-    fun of(tasks: Map<String, TaskState>, acknowledged: Set<String> = emptySet(), parents: Map<String, String> = emptyMap()): TaskSummary {
+    fun of(
+      tasks: Map<String, TaskState>,
+      acknowledged: Set<String> = emptySet(),
+      parents: Map<String, String> = emptyMap(),
+      titles: Map<String, String> = emptyMap()
+    ): TaskSummary {
       val unreadOrActive = tasks.filterValues { it.phase !in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED) || it.sessionId !in acknowledged }
       val rootTasks = if (parents.isEmpty()) unreadOrActive else aggregate(unreadOrActive, parents)
       var running = 0
@@ -63,8 +85,30 @@ data class TaskSummary(
           else -> Unit
         }
       }
-      return TaskSummary(running = running, completed = completed, waiting = waiting, failed = failed)
+
+      val sortedTasks = rootTasks.values
+        .filter { it.phase in TaskState.RUNNING_PHASES || it.phase in TaskState.WAITING_PHASES || it.phase == TaskPhase.FAILED || it.phase == TaskPhase.COMPLETED }
+        .sortedWith(compareByDescending<TaskState> { priority(it) }.thenByDescending { it.since })
+        .take(3)
+        .map { task ->
+          val taskTitle = titles[task.sessionId]?.ifBlank { null } ?: "会话 ${task.sessionId.take(6)}"
+          TaskSummaryItem(
+            sessionId = task.sessionId,
+            title = taskTitle,
+            phase = task.phase,
+            detail = task.detail
+          )
+        }
+
+      return TaskSummary(
+        running = running,
+        completed = completed,
+        waiting = waiting,
+        failed = failed,
+        items = sortedTasks
+      )
     }
+
     fun aggregate(tasks: Map<String, TaskState>, parents: Map<String, String>): Map<String, TaskState> {
       fun root(id: String): String {
         var current = id
@@ -72,16 +116,17 @@ data class TaskSummary(
         while (seen.add(current)) current = parents[current] ?: return current
         return id
       }
-      fun priority(task: TaskState): Int = when (task.phase) {
-        in TaskState.WAITING_PHASES -> 5
-        in TaskState.RUNNING_PHASES -> 4
-        TaskPhase.FAILED -> 3
-        TaskPhase.COMPLETED -> 2
-        else -> 1
-      }
       return tasks.values.groupBy { root(it.sessionId) }.mapValues { (id, values) ->
         values.maxBy { priority(it) }.copy(sessionId = id)
       }
+    }
+
+    private fun priority(task: TaskState): Int = when (task.phase) {
+      in TaskState.WAITING_PHASES -> 5
+      in TaskState.RUNNING_PHASES -> 4
+      TaskPhase.FAILED -> 3
+      TaskPhase.COMPLETED -> 2
+      else -> 1
     }
   }
 }
