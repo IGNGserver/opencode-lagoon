@@ -331,6 +331,12 @@ class OpenCodeApi(
     val endpoint = capabilities().actions[SessionAction.RENAME] ?: unsupported("服务器未提供重命名")
     request(endpoint.method, endpoint.path(session), body = JSONObject().put("title", title))
   }
+  /** Archive (or, when the instance allows a null `time.archived`, restore) through the documented update body. */
+  suspend fun setArchived(session: Session, archived: Boolean, now: Long = System.currentTimeMillis()) {
+    val archive = capabilities().archive ?: unsupported("服务器未提供归档")
+    if (!archived && !archive.restorable) unsupported("服务器不支持取消归档")
+    request(archive.endpoint.method, archive.endpoint.path(session), body = JSONObject().put("time", JSONObject().put("archived", if (archived) now else JSONObject.NULL)))
+  }
   suspend fun deleteSession(session: Session) { request("DELETE", sessionPath(session.id)) }
   suspend fun forkSession(session: Session): Session = dataObject(requestObject("POST", sessionPath(session.id, "/fork"), JSONObject())).toSession()
   suspend fun abort(session: Session) { request("POST", sessionPath(session.id, "/interrupt")) }

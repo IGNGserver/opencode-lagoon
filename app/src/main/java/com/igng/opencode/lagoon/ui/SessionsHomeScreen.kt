@@ -78,6 +78,7 @@ internal fun HomeScreen(
               }, title = "分组方式"),
               MenuSection(listOf(
                 MenuAction("搜索", MiuixIcons.Search) { searching = true },
+                MenuAction("已归档", ARCHIVE_ICON) { onPage(RootPage.ARCHIVED) },
                 MenuAction("设置", MiuixIcons.Settings) { onPage(RootPage.SETTINGS) }
               ))
             ))
@@ -230,10 +231,13 @@ private fun SessionList(
           SectionHeader(section.title, collapsed) { controller.toggleSection(section.key) }
         }
         if (!collapsed) items(section.sessions, key = { "session:${section.key}:${it.id}" }, contentType = { "session" }) { session ->
-          HomeSessionRow(session, statuses[session.id] ?: SessionStatus.NONE, session.id in unseen, session.id in state.pinned,
-            canRename = state.capabilities.supports(SessionAction.RENAME), connected = state.connected,
-            onClick = { onOpen(session.id) }, onPin = { controller.togglePin(session.id) },
-            onRename = { onRename(session) }, onDelete = { onDelete(session) })
+          val pinned = session.id in state.pinned
+          HomeSessionRow(session, statuses[session.id] ?: SessionStatus.NONE, session.id in unseen, onClick = { onOpen(session.id) }, actions = buildList {
+            add(MenuAction(if (pinned) "取消置顶" else "置顶", if (pinned) MiuixIcons.Unpin else MiuixIcons.Pin) { controller.togglePin(session.id) })
+            if (state.connected && state.capabilities.supports(SessionAction.RENAME)) add(MenuAction("重命名", MiuixIcons.Rename) { onRename(session) })
+            if (state.connected && state.capabilities.archive != null) add(MenuAction("归档", ARCHIVE_ICON) { controller.setArchived(session.id, true) })
+            if (state.connected) add(MenuAction("删除", MiuixIcons.Delete, danger = true) { onDelete(session) })
+          })
         }
       }
       if (sections.isEmpty()) item(key = "empty") {
@@ -268,21 +272,24 @@ private fun SectionHeader(title: String, collapsed: Boolean, onToggle: () -> Uni
   }
 }
 
+/** MIUIX icons have no archive glyph: putting away is the tray with a down arrow, restoring the arrow out. */
+internal val ARCHIVE_ICON get() = MiuixIcons.Download
+internal val UNARCHIVE_ICON get() = MiuixIcons.Import
+
 /**
  * One session: a 24dp state glyph and the title. Running spins, waiting for a reply shows the warning
  * mark, an unread result is a primary (or error) dot with a medium title; everything else is a quiet dot.
- * Long press opens 置顶 / 重命名 / 删除.
+ * Long press opens [actions] (置顶 / 重命名 / 归档 / 删除 on the home list).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun HomeSessionRow(session: Session, status: SessionStatus, unseen: Boolean, pinned: Boolean, canRename: Boolean, connected: Boolean,
-  onClick: () -> Unit, onPin: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
+internal fun HomeSessionRow(session: Session, status: SessionStatus, unseen: Boolean, onClick: () -> Unit, actions: List<MenuAction>) {
   var menu by remember { mutableStateOf(false) }
   val haptics = LocalHapticFeedback.current
   val highlighted = unseen || status in setOf(SessionStatus.WAITING_PERMISSION, SessionStatus.WAITING_QUESTION)
   Box {
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-      .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); menu = true })
+      .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = if (actions.isEmpty()) null else { { haptics.performHapticFeedback(HapticFeedbackType.LongPress); menu = true } })
       .padding(start = 20.dp, end = 24.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
       Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { StatusGlyph(status, unseen) }
       Spacer(Modifier.width(12.dp))
@@ -293,11 +300,7 @@ private fun HomeSessionRow(session: Session, status: SessionStatus, unseen: Bool
         Text(status.label, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixColorTokens.Warning))
       }
     }
-    MenuPopup(menu, { menu = false }, listOf(MenuSection(buildList {
-      add(MenuAction(if (pinned) "取消置顶" else "置顶", if (pinned) MiuixIcons.Unpin else MiuixIcons.Pin, onClick = onPin))
-      if (canRename && connected) add(MenuAction("重命名", MiuixIcons.Rename, onClick = onRename))
-      if (connected) add(MenuAction("删除", MiuixIcons.Delete, danger = true, onClick = onDelete))
-    })))
+    MenuPopup(menu, { menu = false }, listOf(MenuSection(actions)))
   }
 }
 

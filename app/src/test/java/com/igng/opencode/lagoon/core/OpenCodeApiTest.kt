@@ -204,6 +204,23 @@ class OpenCodeApiTest {
     }
   }
 
+  @Test fun archivingWritesTimeArchivedAndRestoringSendsNull() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}":{"patch":{"requestBody":{"content":{"application/json":{"schema":
+        {"type":"object","properties":{"time":{"type":"object","properties":{"archived":{"type":["number","null"]}}}}}}}}}}}}"""))
+      repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
+      val api = api(server)
+      api.discoverCapabilities(); server.takeRequest()
+      val session = Session("ses_1", "/repo", "Old", 0)
+      api.setArchived(session, true, now = 42)
+      val archive = server.takeRequest()
+      assertEquals("PATCH", archive.method); assertEquals("/api/session/ses_1", archive.requestUrl?.encodedPath)
+      assertEquals(42L, JSONObject(archive.body.readUtf8()).getJSONObject("time").getLong("archived"))
+      api.setArchived(session, false)
+      assertTrue(JSONObject(server.takeRequest().body.readUtf8()).getJSONObject("time").isNull("archived"))
+    }
+  }
+
   @Test fun anUnreadableDocumentFallsBackToTheCurrentContract() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setResponseCode(404))
