@@ -21,12 +21,19 @@ class KeyboardScrollRegressionTest {
     assertTrue("键盘打开时应调用 scrollBottom()", text.contains("scrollBottom()"))
   }
 
-  /** 首屏停在最新消息，只有用户主动上滑才加载更早历史（曾经首屏 atTop 会一路加载到最顶）。 */
+  /** 首屏停在最新消息；历史分页每次到顶只拉一页，必须离开顶部后才重新武装（防止连续加载到最顶）。 */
   @Test fun openingASessionStaysAtTheNewestMessage() {
     val text = source("TranscriptView.kt")
     assertTrue("首次进入应默认跟随最新消息", text.contains("mutableStateOf(true)"))
     assertTrue("回底前应等列表布局到预期条目数", text.contains("totalItemsCount }.first { it >= expectedItems"))
-    assertTrue("自动加载更早消息必须以用户上滑（!follow）为前提", text.contains("atTop && !follow"))
+    assertTrue("自动加载更早消息必须以用户上滑（!follow）为前提", text.contains("firstVisibleIndex == 0 && olderArmed && !follow"))
+    assertTrue("离开顶部后才重新武装", text.contains("if (firstVisibleIndex > 0) olderArmed = true"))
+  }
+
+  /** 混排的工具调用与思考在两段文字之间只折叠成一个组。 */
+  @Test fun toolsAndReasoningBetweenTextsCollapseIntoOneGroup() {
+    val text = source("TranscriptView.kt")
+    assertTrue("分组行仍走半屏明细", text.contains("\"tool-group\" -> Column"))
   }
 
   /** 运行中的会话在底部常驻“运行中”指示，且时间每秒刷新。 */
