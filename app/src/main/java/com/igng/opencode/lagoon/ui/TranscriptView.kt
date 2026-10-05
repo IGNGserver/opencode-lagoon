@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.*
@@ -39,6 +40,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Copy
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val markdownCache = object : LinkedHashMap<String, Pair<String, List<MarkdownBlock>>>(32, 0.75f, true) {
@@ -103,12 +106,20 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
       Text(row.text, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
     "user" -> UserMessageRow(row, onFile)
-    // One selection container per reply so a long press can select across paragraphs; no copy buttons.
+    // One selection container per reply so a long press can select across paragraphs; the turn's final
+    // answer is also copyable as a whole from the meta row below it.
     "text" -> SelectionContainer { Column { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
     "reasoning" -> SelectionContainer { Column(Modifier.padding(start = 10.dp)) {
       parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) }
     } }
     "meta" -> Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+      row.copyText?.let { text ->
+        val clipboard = LocalClipboardManager.current
+        IconButton(onClick = { clipboard.setText(AnnotatedString(text)) }, minWidth = 32.dp, minHeight = 32.dp) {
+          Icon(MiuixIcons.Copy, "复制回复", Modifier.size(18.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        }
+        Spacer(Modifier.width(6.dp))
+      }
       if (row.meta.isNotBlank()) Text(row.meta, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
     "divider" -> DividerRow(row.text)

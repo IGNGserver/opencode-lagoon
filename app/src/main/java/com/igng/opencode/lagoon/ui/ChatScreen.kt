@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -37,7 +39,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.miuixCapsuleShape
 import top.yukonga.miuix.kmp.theme.miuixShape
 
-private enum class ChatSheet { CHANGES, FILES, CHILDREN, AGENTS }
+private enum class ChatSheet { CHANGES, FILES, CHILDREN }
 
 @Composable
 fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> Unit, onOpenChild: (String) -> Unit, onModal: (Boolean) -> Unit, interactive: Boolean = true) {
@@ -61,7 +63,6 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       add(MenuAction("子任务（${state.children.size}）", MiuixIcons.Layers) { sheet = ChatSheet.CHILDREN })
       if (state.capabilities.diff) add(MenuAction("改动（${state.changes.size}）", MiuixIcons.Merge) { sheet = ChatSheet.CHANGES })
       add(MenuAction("文件", MiuixIcons.Folder) { sheet = ChatSheet.FILES; controller.listFiles() })
-      add(MenuAction("Agent：${state.agent ?: "默认"}", MiuixIcons.ContactsCircle) { sheet = ChatSheet.AGENTS })
     }),
     MenuSection(buildList {
       add(MenuAction(if (session.id in state.pinned) "取消置顶" else "置顶", if (session.id in state.pinned) MiuixIcons.Unpin else MiuixIcons.Pin) { controller.togglePin(session.id) })
@@ -77,12 +78,12 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       }
     }
     Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it }, onOpenChild)
-    ChatComposer(state, controller, interactive, onModal = { composerModal = it })
+    ChatComposer(state, controller, interactive, onModal = { composerModal = it }, onServerFile = { sheet = ChatSheet.FILES; controller.listFiles() })
   }
   sheet?.let { which ->
-    val resource = when (which) { ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children"; ChatSheet.AGENTS -> "agents" }
-    SuperBottomSheet(title = when (which) { ChatSheet.CHANGES -> "代码改动"; ChatSheet.FILES -> "文件"; ChatSheet.CHILDREN -> "子任务"; ChatSheet.AGENTS -> "选择 Agent" }, show = true, onDismissRequest = { sheet = null }) {
-      Column(Modifier.fillMaxWidth().fillMaxHeight(if (which == ChatSheet.AGENTS) 0.6f else 0.72f).padding(vertical = 8.dp)) {
+    val resource = when (which) { ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children" }
+    SuperBottomSheet(title = when (which) { ChatSheet.CHANGES -> "代码改动"; ChatSheet.FILES -> "文件"; ChatSheet.CHILDREN -> "子任务" }, show = true, onDismissRequest = { sheet = null }) {
+      Column(Modifier.fillMaxWidth().fillMaxHeight(0.72f).padding(vertical = 8.dp)) {
         if (which != ChatSheet.FILES) ResourceHint(state.resource(resource), "暂无记录", retry = controller::reload)
         when (which) {
           // Server lists may repeat an entry; LazyColumn crashes on a duplicate key, so keys never come from data alone.
@@ -97,13 +98,6 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
               Text(state.title(child)); state.tasks[child.id]?.takeIf { it.active }?.let { MiuixStatePill(it.phase) }
             }
           } }
-          ChatSheet.AGENTS -> LazyColumn {
-            item { Card(Modifier.fillMaxWidth()) { ChoiceRow("跟随会话", "使用会话当前的 Agent", !state.agentChanged) { controller.chooseAgent(null); sheet = null } } }
-            item { Spacer(Modifier.height(12.dp)) }
-            item { Card(Modifier.fillMaxWidth()) { state.agents.forEach { agent ->
-              ChoiceRow(agent.name, agent.description.takeIf(String::isNotBlank), state.agentChanged && state.agent == agent.name) { controller.chooseAgent(agent.name); sheet = null }
-            } } }
-          }
         }
       }
     }
@@ -358,19 +352,21 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
 
 
 /**
- * One rounded input box like the desktop composer: attachment tray, text, then ＋ / model / send.
- * Commands, Agent and server-file references no longer sit here; Agent lives in the ⋯ menu.
+ * Qoder-style composer. At rest it is one pill — ＋, Agent, “描述你的任务…”, send — and while focused or
+ * holding a draft it grows into a card: the text on top, then ＋ / Agent / model / send. The text field
+ * keeps its place in both states, so focus and the IME survive the change.
  */
 @Composable
 private fun ChatComposer(
   state: LagoonState, controller: LagoonController, interactive: Boolean, onModal: (Boolean) -> Unit,
   busy: Boolean = state.pending("send"), actionKey: String = "send", ready: Boolean = true,
   onSend: (String, () -> Unit) -> Unit = { text, clear -> controller.send(text, state.serverId, state.sessionId, clear) },
-  footer: (@Composable RowScope.() -> Unit)? = null
+  onServerFile: (() -> Unit)? = null
 ) {
   var value by rememberSaveable(state.serverId, state.sessionId, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(state.draft)) }
   var picker by remember { mutableStateOf<String?>(null) }
   var attachMenu by remember { mutableStateOf(false) }
+  var focused by remember { mutableStateOf(false) }
   val images = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(6)) { controller.addLocalAttachments(it) }
   val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { controller.addLocalAttachments(it) }
   LaunchedEffect(state.draft) { if (value.text != state.draft) value = TextFieldValue(state.draft, androidx.compose.ui.text.TextRange(state.draft.length)) }
@@ -378,61 +374,82 @@ private fun ChatComposer(
   val task = state.tasks[state.sessionId]
   val sending = busy
   val hasContent = value.text.isNotBlank() || state.references.isNotEmpty() || state.attachments.isNotEmpty()
+  val expanded = focused || value.text.isNotEmpty() || state.attachments.isNotEmpty() || state.references.isNotEmpty()
   // Like the official composer, a prompt typed while the agent works steers the running turn.
   val canSend = ready && state.connected && !state.cached && !sending && hasContent
-  Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
-    val hint = when {
-      !state.connected -> "离线 · 草稿保留，恢复连接后可发送"
-      state.cached -> "消息未同步，刷新后可发送"
-      sending -> "正在发送…"
-      state.attachments.any { it.image } && state.modelCatalog.firstOrNull { it.choice.modelId == state.model?.modelId && it.choice.providerId == state.model?.providerId }?.imageInput == false -> "当前模型不支持图片，发送前请换一个模型"
-      else -> null
+  val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
+  val hint = when {
+    !state.connected -> "离线 · 草稿保留，恢复连接后可发送"
+    state.cached -> "消息未同步，刷新后可发送"
+    sending -> "正在发送…"
+    state.attachments.any { it.image } && state.modelCatalog.firstOrNull { it.choice.modelId == state.model?.modelId && it.choice.providerId == state.model?.providerId }?.imageInput == false -> "当前模型不支持图片，发送前请换一个模型"
+    else -> null
+  }
+  val attach: @Composable () -> Unit = {
+    Box {
+      IconButton(onClick = { attachMenu = true }, enabled = !sending && interactive) { Icon(MiuixIcons.Add, "添加图片或文件", Modifier.size(24.dp), tint = MiuixTheme.colorScheme.onSurface) }
+      MenuPopup(attachMenu, { attachMenu = false }, listOf(MenuSection(listOfNotNull(
+        MenuAction("图片", MiuixIcons.Image) { images.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+        MenuAction("手机文件", MiuixIcons.File) { documents.launch(arrayOf("*/*")) },
+        onServerFile?.let { MenuAction("服务器文件", MiuixIcons.Folder, onClick = it) }
+      ))), alignment = PopupPositionProvider.Align.Start)
     }
-    hint?.let { Text(it, Modifier.padding(start = 8.dp, bottom = 4.dp), color = if (sending) MiuixTheme.colorScheme.onSurfaceVariantSummary else MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2) }
-    Column(Modifier.fillMaxWidth().clip(miuixShape(20.dp)).background(MiuixTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 8.dp)) {
-      if (state.attachments.isNotEmpty() || state.references.isNotEmpty()) AttachmentTray(state, controller)
-      Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 160.dp).padding(horizontal = 4.dp, vertical = 8.dp)) {
-        if (value.text.isEmpty()) Text("输入任务…", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-        BasicTextField(value, { next -> value = next; controller.updateDraft(next.text, state.serverId, state.sessionId) }, Modifier.fillMaxWidth(),
-          textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface), cursorBrush = SolidColor(MiuixTheme.colorScheme.primary), maxLines = 6, readOnly = !interactive)
+  }
+  val sendOrStop: @Composable () -> Unit = {
+    if (task?.phase in TaskState.RUNNING_PHASES && !hasContent) {
+      RoundAction(null, "停止", { controller.abort() }, enabled = !state.pending("abort"), container = MiuixTheme.colorScheme.error) {
+        Box(Modifier.size(12.dp).background(MiuixTheme.colorScheme.onError, miuixShape(3.dp)))
       }
+    } else RoundAction(MiuixIcons.Send, "发送", {
+      val draft = value.text
+      onSend(draft) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue("") } }
+    }, enabled = canSend)
+  }
+  Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
+    Column(Modifier.fillMaxWidth().clip(miuixShape(if (expanded) 24.dp else 28.dp)).background(MiuixTheme.colorScheme.secondaryContainer)
+      .animateContentSize().padding(6.dp)) {
+      hint?.let { Text(it, Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp), color = if (sending) muted else MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2) }
+      if (state.attachments.isNotEmpty() || state.references.isNotEmpty()) Box(Modifier.padding(start = 6.dp, end = 6.dp, top = 6.dp)) { AttachmentTray(state, controller) }
       Row(verticalAlignment = Alignment.CenterVertically) {
-        Box {
-          RoundAction(MiuixIcons.Add, "添加图片或文件", { attachMenu = true }, enabled = !sending && interactive,
-            container = MiuixTheme.colorScheme.secondaryContainer, content = MiuixTheme.colorScheme.onSecondaryContainer)
-          SuperListPopup(show = attachMenu, onDismissRequest = { attachMenu = false }) {
-            ListPopupColumn {
-              val options = listOf("图片", "文件")
-              options.forEachIndexed { index, label ->
-                DropdownImpl(text = label, optionSize = options.size, isSelected = false, index = index, onSelectedIndexChange = {
-                  attachMenu = false
-                  if (index == 0) images.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                  else documents.launch(arrayOf("*/*"))
-                })
-              }
-            }
-          }
+        if (!expanded) { attach(); AgentButton(state, enabled = !sending && interactive) { picker = "agents" } }
+        Box(Modifier.weight(1f).heightIn(min = 44.dp, max = 168.dp).padding(horizontal = if (expanded) 10.dp else 2.dp, vertical = 11.dp),
+          contentAlignment = Alignment.CenterStart) {
+          if (value.text.isEmpty()) Text("描述你的任务…", color = muted, style = MiuixTheme.textStyles.body1, maxLines = 1)
+          BasicTextField(value, { next -> value = next; controller.updateDraft(next.text, state.serverId, state.sessionId) },
+            Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+            textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface), cursorBrush = SolidColor(MiuixTheme.colorScheme.primary), maxLines = 6, readOnly = !interactive)
         }
-        Spacer(Modifier.width(8.dp))
-        CapsuleSelector(state.model?.label ?: "默认模型", { picker = "models" }, Modifier.weight(1f, fill = false), enabled = !sending && interactive)
-        Spacer(Modifier.weight(1f))
-        Spacer(Modifier.width(8.dp))
-        if (task?.phase in TaskState.RUNNING_PHASES && !hasContent) {
-          RoundAction(null, "停止", { controller.abort() }, enabled = !state.pending("abort"), container = MiuixTheme.colorScheme.error) {
-            Box(Modifier.size(12.dp).background(MiuixTheme.colorScheme.onError, miuixShape(3.dp)))
-          }
-        } else RoundAction(MiuixIcons.Send, "发送", {
-          val draft = value.text
-          onSend(draft) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue("") } }
-        }, enabled = canSend)
+        if (!expanded) { sendOrStop(); Spacer(Modifier.width(2.dp)) }
+      }
+      if (expanded) Row(verticalAlignment = Alignment.CenterVertically) {
+        attach()
+        // Agent names are short; the model label takes whatever is left, and send stays at the end.
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+          CapsuleSelector(state.agent ?: "默认", { picker = "agents" }, enabled = !sending && interactive, maxTextWidth = 72.dp,
+            leading = { Icon(MiuixIcons.ContactsCircle, null, Modifier.size(16.dp), tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else muted) })
+          Spacer(Modifier.width(6.dp))
+          CapsuleSelector(state.model?.label ?: "默认模型", { picker = "models" }, Modifier.weight(1f, fill = false), enabled = !sending && interactive)
+        }
+        Spacer(Modifier.width(6.dp))
+        sendOrStop()
+        Spacer(Modifier.width(2.dp))
       }
     }
     ActionError(state, actionKey)
-    footer?.let { Row(Modifier.fillMaxWidth().padding(top = 8.dp, start = 4.dp), verticalAlignment = Alignment.CenterVertically, content = it) }
   }
   when (picker) {
+    "agents" -> AgentPickerSheet(state, controller) { picker = null }
     "models" -> ModelPickerSheet(state, controller, { picker = null }) { picker = "manage" }
     "manage" -> ManageModelsSheet(state, controller) { picker = null }
+  }
+}
+
+/** The pill's Agent glyph; primary while this session overrides the agent. */
+@Composable
+private fun AgentButton(state: LagoonState, enabled: Boolean, onClick: () -> Unit) {
+  IconButton(onClick = onClick, enabled = enabled) {
+    Icon(MiuixIcons.ContactsCircle, "Agent：${state.agent ?: "默认"}", Modifier.size(22.dp),
+      tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary)
   }
 }
 
