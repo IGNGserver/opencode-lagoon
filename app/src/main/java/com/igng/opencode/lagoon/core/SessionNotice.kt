@@ -7,11 +7,11 @@ package com.igng.opencode.lagoon.core
  */
 data class SessionNotice(val id: String, val sessionId: String, val time: Long, val error: Boolean, val viewed: Boolean = false)
 
-/** Live-event source, as in the official client: `session.idle` / `session.error` (and V2 execution results). */
+/** Live-event source, as in the official client: a root session's `session.execution.succeeded` / `failed`. */
 internal fun ServerEvent.resultNotice(session: Session, now: Long = System.currentTimeMillis()): SessionNotice? {
   if (session.parentId != null) return null
-  val failure = type in setOf("session.error", "session.execution.failed")
-  if (!failure && type !in setOf("session.idle", "session.execution.succeeded")) return null
+  val failure = type == "session.execution.failed"
+  if (!failure && type != "session.execution.succeeded") return null
   // Local clock, like the official `Date.now()`: run bookkeeping (`since`) is local too.
   return SessionNotice(id.ifBlank { "$type:${session.id}:$now" }, session.id, now, failure)
 }

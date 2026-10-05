@@ -7,7 +7,6 @@ import com.igng.opencode.lagoon.core.Diagnostics
 import com.igng.opencode.lagoon.core.LagoonController
 import com.igng.opencode.lagoon.core.LiveUpdateStage
 import com.igng.opencode.lagoon.core.OpenCodeApi
-import com.igng.opencode.lagoon.core.PermissionRequest
 import com.igng.opencode.lagoon.core.ServerStore
 import com.igng.opencode.lagoon.core.Session
 import kotlinx.coroutines.CoroutineScope
@@ -74,8 +73,9 @@ class NotificationActionReceiver : BroadcastReceiver() {
       when (action) {
         "abort" -> client.abort(Session(sessionId, directory, "", 0))
         "reject", "once" -> {
-          val request = PermissionRequest(permissionId ?: error("缺少权限 ID"), sessionId, permissionDirectory, "", "")
-          val pendingRequest = client.permissions(permissionDirectory).firstOrNull { it.id == request.id && it.sessionId == sessionId } ?: return false
+          val requestId = permissionId ?: error("缺少权限 ID")
+          // Re-read the request from its session so a stale notification can never answer a different one.
+          val pendingRequest = client.sessionPermissions(Session(sessionId, permissionDirectory, "", 0)).firstOrNull { it.id == requestId } ?: return false
           client.replyPermission(pendingRequest, action)
         }
         else -> return false

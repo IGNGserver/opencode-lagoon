@@ -34,37 +34,14 @@ class AttachmentPolicyTest {
     assertEquals("image/webp", AttachmentPolicy.wireMime(AttachmentPolicy.Kind.IMAGE, "image/webp"))
   }
 
-  @Test fun v1SendsInlineFilesAsFileParts() = runBlocking {
+  @Test fun inlineFilesTravelInPromptFilesAsDataUris() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1.0"}"""))
       server.enqueue(MockResponse().setResponseCode(204))
       val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
-      api.send(Session("s", "/repo", "Task", 0), "看图", null, null, inline = listOf(InlineFile("a.jpg", "image/jpeg", "data:image/jpeg;base64,AAA=")))
-      server.takeRequest()
-      val parts = JSONObject(server.takeRequest().body.readUtf8()).getJSONArray("parts")
-      assertEquals("看图", parts.getJSONObject(0).getString("text"))
-      val file = parts.getJSONObject(1)
-      assertEquals("file", file.getString("type"))
-      assertEquals("data:image/jpeg;base64,AAA=", file.getString("url"))
-      assertEquals("a.jpg", file.getString("filename"))
-      assertEquals("image/jpeg", file.getString("mime"))
-    }
-  }
-
-  @Test fun v2SendsInlineFilesInPromptFilesUsingTheDocumentedUriField() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}/prompt":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"prompt":{"type":"object","properties":{"text":{"type":"string"},"files":{"type":"array","items":{"type":"object","properties":{"uri":{"type":"string"},"name":{"type":"string"}}}}}}}}}}}}}}}"""))
-      server.enqueue(MockResponse().setResponseCode(204))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.discoverCapabilities()
       api.send(Session("s", "/repo", "Task", 0), "", null, null, inline = listOf(InlineFile("notes.txt", "text/plain", "data:text/plain;base64,SGk=")))
-      repeat(3) { server.takeRequest() }
       val prompt = server.takeRequest()
       assertEquals("/api/session/s/prompt", prompt.requestUrl?.encodedPath)
-      val file = JSONObject(prompt.body.readUtf8()).getJSONObject("prompt").getJSONArray("files").getJSONObject(0)
+      val file = JSONObject(prompt.body.readUtf8()).getJSONArray("files").getJSONObject(0)
       assertEquals("data:text/plain;base64,SGk=", file.getString("uri"))
       assertEquals("notes.txt", file.getString("name"))
     }
@@ -72,16 +49,12 @@ class AttachmentPolicyTest {
 
   @Test fun v2CatalogDropsDisabledModelsAndToleratesMissingProviderRoute() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"a","providerID":"newapi","name":"A","time":{"released":0},"status":"active","enabled":true},{"id":"b","providerID":"newapi","name":"B","enabled":false}]}"""))
       server.enqueue(MockResponse().setResponseCode(404))
       val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
       val catalog = api.modelCatalog("/repo")
       assertEquals(listOf("a"), catalog.map { it.choice.modelId })
       assertEquals("newapi", catalog.single().providerName)
-      repeat(2) { server.takeRequest() }
       assertEquals("/repo", server.takeRequest().requestUrl?.queryParameter("location[directory]"))
       assertEquals("/api/provider", server.takeRequest().requestUrl?.encodedPath)
     }

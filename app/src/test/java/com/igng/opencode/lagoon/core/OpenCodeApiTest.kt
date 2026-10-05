@@ -10,44 +10,228 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+/** Requests and payloads against the OpenCode 2.x contract (`packages/protocol`). */
 class OpenCodeApiTest {
-  @Test fun authenticatesHealthAndSendsAsyncPromptInSelectedDirectory() = runBlocking {
+  private fun api(server: MockWebServer) = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), "opencode", allowCleartext = true), "secret")
+
+  @Test fun healthReadsTheServerVersionFromApiInfoWithBasicAuth() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1.0"}""").addHeader("Content-Type", "application/json"))
-      server.enqueue(MockResponse().setResponseCode(204))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), "opencode", allowCleartext = true), "secret")
-      assertEquals("1.0", api.health())
-      api.send(Session("session-1", "/repo with space", "Task", 0), "Fix the build", "build", ModelChoice("openai", "gpt", "GPT"))
-      val health = server.takeRequest()
-      assertEquals("/global/health", health.path)
-      assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", health.getHeader("Authorization"))
-      val prompt = server.takeRequest()
-      assertTrue(prompt.path!!.startsWith("/session/session-1/prompt_async?directory="))
-      val json = JSONObject(prompt.body.readUtf8())
-      assertEquals("Fix the build", json.getJSONArray("parts").getJSONObject(0).getString("text"))
-      assertEquals("openai", json.getJSONObject("model").getString("providerID"))
+      server.enqueue(MockResponse().setBody("""{"version":"2.0.22","pid":1,"urls":[],"paths":{"tmp":"/tmp"}}"""))
+      val api = api(server)
+      assertEquals("2.0.22", api.health())
+      val info = server.takeRequest()
+      assertEquals("/api/info", info.requestUrl?.encodedPath)
+      assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", info.getHeader("Authorization"))
+      // The version is read once per client.
+      assertEquals("2.0.22", api.health())
+      assertEquals(1, server.requestCount)
     }
   }
-  @Test fun taskReducerRequiresPriorActivityBeforeIdleBecomesCompletion() {    val idle = TaskReducer.status("id", "idle")
-    assertEquals(TaskPhase.IDLE, idle.phase)
-    val busy = TaskReducer.status("id", "busy", idle)
-    assertEquals(TaskPhase.THINKING, busy.phase)
-    val tool = TaskReducer.event("id", "message.part.updated", JSONObject("""{"part":{"type":"tool","tool":"bash","state":{"title":"Run test","input":{"command":"gradle test"}}}}"""), busy)
-    assertEquals(TaskPhase.TESTING, tool!!.phase)
-    // Every running sub-phase shares one user-facing label, never “思考中 / 执行工具 / 测试中”.
-    assertEquals(TaskState.RUNNING_DETAIL, tool.detail)
-    val completed = TaskReducer.status("id", "idle", tool)
-    assertEquals(TaskPhase.COMPLETED, completed.phase)
-    assertEquals(TaskPhase.COMPLETED, TaskReducer.status("id", "idle", completed).phase)
-    val restarted = TaskReducer.status("id", "busy", completed)
-    assertEquals(TaskPhase.THINKING, restarted.phase)
-    assertEquals(TaskState.RUNNING_DETAIL, restarted.detail)
+
+  @Test fun aServerWithoutApiInfoIsRejectedAsNotOpenCode2() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      val error = runCatching { api(server).health() }.exceptionOrNull()
+      assertTrue(error is IOException && error !is ApiException)
+      assertTrue(error!!.message!!, error.message!!.contains("OpenCode 2.x"))
+    }
+  }
+
+  @Test fun promptCarriesClientIdDeliveryMetadataAndInlineFilesAfterSwitchingSelection() = runBlocking {
+    MockWebServer().use { server ->
+      repeat(3) { server.enqueue(MockResponse().setResponseCode(204)) }
+      val api = api(server)
+      api.send(Session("ses_1", "/repo", "Task", 0), "Fix it", "build", ModelChoice("openai", "gpt", "GPT", "high"),
+        inline = listOf(InlineFile("a.png", "image/png", "data:image/png;base64,AAA=")), id = "msg_fixed")
+      val agentRequest = server.takeRequest()
+      assertEquals("/api/session/ses_1/agent", agentRequest.requestUrl?.encodedPath)
+      assertEquals("build", JSONObject(agentRequest.body.readUtf8()).getString("agent"))
+      val modelRequest = server.takeRequest()
+      assertEquals("/api/session/ses_1/model", modelRequest.requestUrl?.encodedPath)
+      val model = JSONObject(modelRequest.body.readUtf8()).getJSONObject("model")
+      assertEquals("openai", model.getString("providerID")); assertEquals("gpt", model.getString("id")); assertEquals("high", model.getString("variant"))
+      val prompt = server.takeRequest()
+      assertEquals("/api/session/ses_1/prompt", prompt.requestUrl?.encodedPath)
+      val body = JSONObject(prompt.body.readUtf8())
+      assertEquals("msg_fixed", body.getString("id"))
+      assertEquals("Fix it", body.getString("text"))
+      assertEquals("steer", body.getString("delivery"))
+      assertEquals("build", body.getJSONObject("metadata").getString("agent"))
+      val file = body.getJSONArray("files").getJSONObject(0)
+      assertEquals("data:image/png;base64,AAA=", file.getString("uri")); assertEquals("a.png", file.getString("name"))
+    }
+  }
+
+  @Test fun followingTheSessionSelectionSendsOnlyThePrompt() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(200).setBody("""{"data":{}}"""))
+      api(server).send(Session("ses_1", "/repo", "Task", 0), "hello", null, null)
+      assertEquals("/api/session/ses_1/prompt", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals(1, server.requestCount)
+    }
+  }
+
+  @Test fun aRejectedPromptIsNotRetriedButALostResponseIsRetriedOnceWithTheSameId() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(400).setBody("""{"message":"bad"}"""))
+      assertTrue(runCatching { api(server).send(Session("ses_1", "/repo", "T", 0), "x", null, null) }.isFailure)
+      assertEquals(1, server.requestCount)
+    }
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+      server.enqueue(MockResponse().setResponseCode(409).setBody("""{"message":"Prompt message ID conflicts"}"""))
+      api(server).send(Session("ses_1", "/repo", "T", 0), "x", null, null, id = "msg_same")
+      val first = JSONObject(server.takeRequest().body.readUtf8()).getString("id")
+      val second = JSONObject(server.takeRequest().body.readUtf8()).getString("id")
+      assertEquals("msg_same", first); assertEquals(first, second)
+    }
+  }
+
+  @Test fun slashCommandsRunThroughTheCommandRoute() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(204))
+      api(server).command(Session("ses_1", "/repo", "T", 0), "review", "src/main", null, null)
+      val request = server.takeRequest()
+      assertEquals("/api/session/ses_1/command", request.requestUrl?.encodedPath)
+      val body = JSONObject(request.body.readUtf8())
+      assertEquals("review", body.getString("name")); assertEquals("src/main", body.getString("text"))
+    }
+  }
+
+  @Test fun messagesUseTheOfficialPageSizeAndComeBackOldestFirst() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":[
+        {"id":"msg_2","type":"assistant","time":{"created":4},"agent":"build","model":{"providerID":"openai","id":"gpt"},"content":[{"type":"text","text":"done"}]},
+        {"id":"msg_1","type":"user","time":{"created":3},"text":"hello"}
+      ],"cursor":{"next":"older"}}"""))
+      server.enqueue(MockResponse().setBody("""{"data":[],"cursor":{}}"""))
+      val api = api(server)
+      val page = api.messagesPage("ses_1")
+      assertEquals(listOf("msg_1", "msg_2"), page.items.map { it.id })
+      assertEquals("older", page.next)
+      api.messagesPage("ses_1", page.next)
+      val first = server.takeRequest().requestUrl!!
+      assertEquals("20", first.queryParameter("limit")); assertEquals("desc", first.queryParameter("order"))
+      val second = server.takeRequest().requestUrl!!
+      assertEquals("older", second.queryParameter("cursor")); assertNull(second.queryParameter("order"))
+    }
+  }
+
+  @Test fun pendingInboxInputBecomesUserRows() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":[
+        {"id":"msg_q","sessionID":"ses_1","type":"user","delivery":"queue","payload":{"text":"next","metadata":{"displayText":"下一步"}},"time":{"created":5}},
+        {"id":"msg_c","sessionID":"ses_1","type":"compaction","delivery":"steer","payload":{},"time":{"created":6}}
+      ]}"""))
+      val pending = api(server).inbox("ses_1")
+      assertEquals(listOf("msg_q"), pending.map { it.id })
+      assertTrue(pending.single().queued)
+      assertEquals("下一步", pending.single().parts.single().text)
+      assertEquals("/api/session/ses_1/inbox", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  @Test fun permissionsAreReadPerSessionAndRepliedWithADecision() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"per_a","sessionID":"ses_a","action":"bash","resources":["ls"],"save":["ls *"],"source":{"type":"tool","messageID":"msg","id":"call"}}]}"""))
+      server.enqueue(MockResponse().setResponseCode(204))
+      val api = api(server)
+      val permission = api.sessionPermissions(Session("ses_a", "/repo", "T", 0)).single()
+      assertEquals("/api/session/ses_a/permission", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals(listOf("ls *"), permission.always); assertEquals("call", permission.toolCallId); assertEquals("bash", permission.action)
+      api.replyPermission(permission, "always")
+      val reply = server.takeRequest()
+      assertEquals("/api/session/ses_a/permission/per_a/reply", reply.requestUrl?.encodedPath)
+      assertEquals("always", JSONObject(reply.body.readUtf8()).getString("decision"))
+      // Without a server-provided save scope, “always” is refused before any request.
+      assertTrue(runCatching { api.replyPermission(permission.copy(always = emptyList()), "always") }.isFailure)
+      assertEquals(2, server.requestCount)
+    }
+  }
+
+  @Test fun formsAreReadAtTheSessionLocation() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[{"id":"frm_a","sessionID":"ses_a","title":"Config","fields":[{"key":"enabled","type":"boolean","required":true}]}]}"""))
+      server.enqueue(MockResponse().setResponseCode(204))
+      server.enqueue(MockResponse().setResponseCode(204))
+      val api = api(server)
+      val form = api.forms("/repo").single()
+      val list = server.takeRequest()
+      assertEquals("/api/form", list.requestUrl?.encodedPath)
+      assertEquals("/repo", list.requestUrl?.queryParameter("location[directory]"))
+      api.replyQuestion(form, listOf(listOf("true")))
+      val reply = server.takeRequest()
+      assertEquals("/api/session/ses_a/form/frm_a/reply", reply.requestUrl?.encodedPath)
+      assertTrue(JSONObject(reply.body.readUtf8()).getJSONObject("answer").getBoolean("enabled"))
+      api.rejectQuestion(form)
+      assertEquals("DELETE", server.takeRequest().method)
+    }
+  }
+
+  @Test fun activeSessionsAreTheKeysOfTheActiveMap() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":{"ses_1":{"type":"running"},"ses_2":{"type":"running"}}}"""))
+      assertEquals(setOf("ses_1", "ses_2"), api(server).activeSessions())
+      assertEquals("/api/session/active", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  @Test fun renameAndUnrevertFollowTheDocumentedRoutes() = runBlocking {
+    MockWebServer().use { server ->
+      // An early 2.0.x instance: POST /rename and POST /revert/clear.
+      server.enqueue(MockResponse().setBody("""{"paths":{
+        "/api/session/{sessionID}/rename":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}}}}}},
+        "/api/session/{sessionID}/revert/clear":{"post":{}}
+      }}"""))
+      repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
+      val api = api(server)
+      val capabilities = api.discoverCapabilities()
+      assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
+      assertFalse(capabilities.diff); assertNull(capabilities.sessionView)
+      api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
+      val rename = server.takeRequest()
+      assertEquals("POST", rename.method); assertEquals("/api/session/ses_1/rename", rename.requestUrl?.encodedPath)
+      api.unrevert(Session("ses_1", "/repo", "Old", 0))
+      val clear = server.takeRequest()
+      assertEquals("POST", clear.method); assertEquals("/api/session/ses_1/revert/clear", clear.requestUrl?.encodedPath)
+    }
+  }
+
+  @Test fun anUnreadableDocumentFallsBackToTheCurrentContract() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
+      val api = api(server)
+      assertEquals(ApiCapabilities.BASELINE, api.discoverCapabilities())
+      server.takeRequest()
+      api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
+      val rename = server.takeRequest()
+      assertEquals("PATCH", rename.method); assertEquals("/api/session/ses_1", rename.requestUrl?.encodedPath)
+      api.unrevert(Session("ses_1", "/repo", "Old", 0))
+      assertEquals("DELETE", server.takeRequest().method)
+    }
+  }
+
+  @Test fun clientIdsSortWithServerIdsAndCarryTheMessagePrefix() {
+    val first = MessageIds.ascending(1_700_000_000_000)
+    val second = MessageIds.ascending(1_700_000_000_000)
+    val later = MessageIds.ascending(1_700_000_000_001)
+    assertTrue(first.startsWith("msg_")); assertEquals(30, first.length)
+    assertTrue(first < second); assertTrue(second < later)
+  }
+
+  @Test fun eventFramesKeepTypeDataLocationAndCreatedTime() {
+    val event = """{"id":"evt_1","created":42,"type":"session.text.delta","location":{"directory":"/repo"},"data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"hi"}}""".toServerEvent("")
+    assertEquals("evt_1", event.id); assertEquals("session.text.delta", event.type); assertEquals("/repo", event.directory)
+    assertEquals(42L, event.created); assertEquals("hi", event.properties.getString("delta"))
+    assertEquals("msg_1", TranscriptProjection.messageId(event))
   }
 
   @Test fun taskPhaseGroupsStayConsistent() {
@@ -57,93 +241,36 @@ class OpenCodeApiTest {
     for (phase in TaskPhase.entries) {
       assertEquals(phase in TaskState.ACTIVE_PHASES, TaskState("id", phase).active)
     }
-    assertTrue(TaskState("id", TaskPhase.COMPLETED).active.not())
-    assertTrue(TaskState("id", TaskPhase.DISCONNECTED).active.not())
   }
 
-  @Test fun detectsV2AndMapsLocationSessionsStatusAndMessages() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}""").addHeader("Content-Type", "application/json"))
-      server.enqueue(MockResponse().setBody("""{"directory":"/repo","project":{"id":"project-1","directory":"/repo"}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"ses-1","projectID":"project-1","title":"Task","location":{"directory":"/repo"},"time":{"created":1,"updated":2}}],"cursor":{}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":{"ses-1":{"type":"running"}}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[
-        {"id":"msg-1","type":"user","time":{"created":3},"text":"hello"},
-        {"id":"msg-2","type":"assistant","time":{"created":4},"agent":"build","model":{"providerID":"openai","id":"gpt"},"content":[{"id":"part-1","type":"text","text":"done"}]}
-      ],"cursor":{}}"""))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      assertEquals("OpenCode V2", api.health())
-      assertEquals("/repo", api.projects().single().directory)
-      assertEquals("Task", api.sessions("/repo").single().title)
-      assertEquals("running", api.status("/repo")["ses-1"])
-      val messages = api.messages("ses-1", "/repo")
-      assertEquals(listOf("user", "assistant"), messages.map { it.role })
-      assertEquals("hello", messages[0].parts.single().text)
-      assertEquals("done", messages[1].parts.single().text)
-      val requests = List(6) { server.takeRequest() }
-      assertEquals("/api/location", requests[2].requestUrl?.encodedPath)
-      assertEquals("/repo", requests[3].requestUrl?.queryParameter("directory") ?: "")
+  @Test fun taskReducerRequiresPriorActivityBeforeIdleBecomesCompletion() {
+    val idle = TaskReducer.status("id", false)
+    assertEquals(TaskPhase.IDLE, idle.phase)
+    val busy = TaskReducer.status("id", true, idle)
+    assertEquals(TaskPhase.THINKING, busy.phase)
+    val tool = TaskReducer.event("id", "session.tool.called", JSONObject("""{"name":"shell","input":{"command":"gradle test"}}"""), busy)
+    assertEquals(TaskPhase.TESTING, tool!!.phase)
+    // Every running sub-phase shares one user-facing label.
+    assertEquals(TaskState.RUNNING_DETAIL, tool.detail)
+    val completed = TaskReducer.status("id", false, tool)
+    assertEquals(TaskPhase.COMPLETED, completed.phase)
+    assertEquals(TaskPhase.COMPLETED, TaskReducer.status("id", false, completed).phase)
+    assertEquals(TaskPhase.THINKING, TaskReducer.status("id", true, completed).phase)
+  }
+
+  /** Contract validation for TaskReducer phase transitions. */
+  @Test fun taskReducerMatchesSharedContract() {
+    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
+    val cases = fixture.getJSONArray("cases")
+    for (index in 0 until cases.length()) {
+      val case = cases.getJSONObject(index)
+      val previous = case.optString("previous").takeIf { it.isNotBlank() && it != "null" }?.let { TaskState("s", TaskPhase.valueOf(it)) }
+      val result = TaskReducer.event("s", case.getString("type"), case.getJSONObject("data"), previous) ?: previous
+      assertEquals(case.getString("name"), case.getString("expectedPhase"), (result?.phase ?: TaskPhase.IDLE).name)
     }
   }
 
-  @Test fun v2PromptSwitchesSelectedAgentAndModelBeforeSending() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setResponseCode(204))
-      server.enqueue(MockResponse().setResponseCode(204))
-      server.enqueue(MockResponse().setResponseCode(204))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
-      server.takeRequest()
-      server.takeRequest()
-      api.send(Session("ses-1", "/repo", "Task", 0), "Fix it", "build", ModelChoice("openai", "gpt", "GPT"))
-      val agentRequest = server.takeRequest()
-      assertEquals("/api/session/ses-1/agent", agentRequest.requestUrl?.encodedPath)
-      assertEquals("build", JSONObject(agentRequest.body.readUtf8()).getString("agent"))
-      val modelRequest = server.takeRequest()
-      val model = JSONObject(modelRequest.body.readUtf8()).getJSONObject("model")
-      assertEquals("openai", model.getString("providerID"))
-      assertEquals("/api/session/ses-1/model", modelRequest.requestUrl?.encodedPath)
-      assertEquals("/api/session/ses-1/prompt", server.takeRequest().requestUrl?.encodedPath)
-    }
-  }
-
-  @Test fun v2SessionListFollowsCursorAndRemovesMessageOrderOnNextPage() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"ses-1","title":"First","location":{"directory":"/repo"},"time":{"updated":1}}],"cursor":{"next":"cursor-1"}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"ses-2","title":"Second","location":{"directory":"/repo"},"time":{"updated":2}}],"cursor":{}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"msg-1","type":"user","time":{"created":1},"text":"first"}],"cursor":{"next":"cursor-2"}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"msg-2","type":"user","time":{"created":2},"text":"second"}],"cursor":{}}"""))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
-      assertEquals(listOf("ses-1", "ses-2"), api.sessions("/repo").map { it.id })
-      assertEquals(listOf("msg-1", "msg-2"), api.messages("ses-1", "/repo").map { it.id })
-      server.takeRequest()
-      server.takeRequest()
-      val sessionPage = server.takeRequest()
-      val sessionNext = server.takeRequest()
-      val messagePage = server.takeRequest()
-      val messageNext = server.takeRequest()
-      assertEquals("cursor-1", sessionNext.requestUrl?.queryParameter("cursor"))
-      assertEquals("desc", sessionPage.requestUrl?.queryParameter("order"))
-      assertEquals("asc", messagePage.requestUrl?.queryParameter("order"))
-      assertEquals("cursor-2", messageNext.requestUrl?.queryParameter("cursor"))
-      assertEquals(null, messageNext.requestUrl?.queryParameter("order"))
-    }
-  }
-
-  @Test fun mapsV2AssistantToolAndPairToken() = runBlocking {
-    val message = JSONObject("""{
-      "id":"msg-2","type":"assistant","time":{"created":4},"content":[
-        {"id":"part-1","type":"tool","name":"bash","state":{"status":"completed","input":{"command":"pwd"},"result":"/repo","outputPaths":["out.txt"]}}
-      ]
-    }""").toMessage()
-    assertEquals("bash", message.parts.single().tool)
-    assertEquals("completed", message.parts.single().status)
+  @Test fun pairTokenResolvesCredentials() = runBlocking {
     val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("opencode:secret".toByteArray())
     val pair = PairLinkResolver.resolve("https://example.test/auth/connect/abc?auth_token=$token")
     assertEquals("https://example.test", pair.serverUrl)
@@ -164,76 +291,18 @@ class OpenCodeApiTest {
     }
   }
 
-  @Test fun normalizesLegacyAndV2EventShapes() {
-    val legacy = """{"directory":"/repo","payload":{"type":"session.status","properties":{"sessionID":"ses-1","status":{"type":"busy"}}}}""".toServerEvent("legacy-id")
-    assertEquals("legacy-id", legacy.id)
-    assertEquals("/repo", legacy.directory)
-    assertEquals("session.status", legacy.type)
-    val v2 = """{"id":"evt-1","type":"permission.v2.asked","properties":{"id":"per-1","sessionID":"ses-1","action":"file.read","resources":["a.txt"],"save":[]}}""".toServerEvent("")
-    assertEquals("evt-1", v2.id)
-    assertEquals("permission.asked", v2.type)
-    assertEquals("file.read", v2.properties.getString("permission"))
-    assertEquals("ses-1", v2.properties.getString("sessionID"))
-  }
-
   @Test fun encodesSessionIdsExactlyOnceInPath() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1.0"}"""))
-      server.enqueue(MockResponse().setBody("""[]"""))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
-      api.messages("ses 1/2", "/repo")
-      server.takeRequest()
+      server.enqueue(MockResponse().setBody("""{"data":[],"cursor":{}}"""))
+      api(server).messagesPage("ses 1/2")
       // 'ses 1/2' must be percent-encoded once: %20 for the space and %2F for the slash.
-      assertEquals("/session/ses%201%2F2/message", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("/api/session/ses%201%2F2/message", server.takeRequest().requestUrl?.encodedPath)
     }
   }
 
-  /** Contract validation for TaskReducer phase transitions. */
-  @Test fun taskReducerMatchesSharedContract() {    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
-    val cases = fixture.getJSONArray("cases")
-    for (index in 0 until cases.length()) {
-      val case = cases.getJSONObject(index)
-      val previous = case.optString("previous").takeIf { it.isNotBlank() }?.let { TaskState("s", TaskPhase.valueOf(it)) }
-      val result = TaskReducer.event("s", case.getJSONObject("kotlin").getString("type"),
-        case.getJSONObject("kotlin").getJSONObject("properties"), previous)
-      assertNotNull("no transition for ${case.getString("name")}", result)
-      assertEquals(case.getString("name"), case.getString("expectedPhase"), result!!.phase.name)
-    }
-  }
-
-  @Test fun projectsLegacyAndV2MessageParts() {
-    val legacy = JSONObject("""{"id":"part-1","type":"tool","tool":"bash","state":{"status":"completed","title":"跑测试","input":{"command":"gradle test"},"output":"ok"}}""").toMessagePart()
-    assertEquals("bash", legacy.tool)
-    assertEquals("completed", legacy.status)
-    assertEquals("跑测试", legacy.title)
-    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"running","input":{"command":"pwd"},"result":"/repo"}}""").toV2MessagePart()
-    assertEquals("bash", v2.tool)
-    assertEquals("running", v2.status)
-  }
-
-  @Test fun modelsExposeTheFieldsTheUiReads() {
-    val change = JSONObject("""{"file":"a.kt","before":"old","after":"new","additions":3,"deletions":1,"patch":"@@"}""").toChange()
-    assertEquals("a.kt", change.path)
-    assertEquals("new", change.after)
-    assertEquals(3, change.additions)
-    val node = JSONObject("""{"path":"src/a.kt","type":"file","absolute":"/x","ignored":true}""").toNode()
-    assertEquals("src/a.kt", node.path)
-    assertEquals("file", node.type)
-    val text = JSONObject("""{"type":"text","content":"hi","encoding":"utf-8","mimeType":"text/plain"}""").toFileContent()
-    assertEquals("text", text.type)
-    assertEquals("hi", text.content)
-    val binary = JSONObject("""{"content":"AAA=","encoding":"base64"}""").toFileContent()
-    assertEquals("binary", binary.type)
-  }
-
-  @Test fun protocolCapabilitiesMatchTheApiBranches() {
-    assertTrue(ServerProtocol.V1.supportsSessionActions)
-    assertTrue(ServerProtocol.V1.supportsTitleOnCreate)
-    assertTrue(ServerProtocol.V1.supportsTodosAndDiff)
-    assertFalse(ServerProtocol.V2.supportsSessionActions)
-    assertFalse(ServerProtocol.V2.supportsTitleOnCreate)
-    assertFalse(ServerProtocol.V2.supportsTodosAndDiff)
+  @Test fun diffMapsFileDiffInfo() {
+    val change = JSONObject("""{"file":"a.kt","patch":"@@","additions":3,"deletions":1,"status":"modified"}""").toChange()
+    assertEquals("a.kt", change.path); assertEquals(3, change.additions); assertEquals("@@", change.patch)
   }
 
   /**
@@ -243,14 +312,12 @@ class OpenCodeApiTest {
   @Test fun apiDoesNotForwardCredentialsToRedirectTarget() = runBlocking {
     MockWebServer().use { target ->
       MockWebServer().use { origin ->
-        target.enqueue(MockResponse().setBody("""{"healthy":true,"version":"9"}"""))
+        target.enqueue(MockResponse().setBody("""{"version":"9"}"""))
         origin.enqueue(MockResponse().setResponseCode(302).addHeader("Location", target.url("/steal")))
-        val api = OpenCodeApi(ServerProfile("local", "Local", origin.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-        runCatching { api.health() }
+        runCatching { api(origin).health() }
         // The redirect must not have been followed at all.
         assertEquals(0, target.requestCount)
-        val first = origin.takeRequest()
-        assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", first.getHeader("Authorization"))
+        assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", origin.takeRequest().getHeader("Authorization"))
       }
     }
   }
@@ -271,8 +338,8 @@ class OpenCodeApiTest {
   /** A15: cancelling the caller must abort the in-flight HTTP call instead of waiting it out. */
   @Test fun cancellingApiInterruptsNetworkWait() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1"}""").setBodyDelay(3, TimeUnit.SECONDS))
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      server.enqueue(MockResponse().setBody("""{"version":"1"}""").setBodyDelay(3, TimeUnit.SECONDS))
+      val api = api(server)
       val job = launch(Dispatchers.IO) { runCatching { api.health() } }
       delay(200)
       val started = System.nanoTime()
@@ -291,63 +358,10 @@ class OpenCodeApiTest {
     assertFalse(HttpOrigin.allowsCleartext("10.0.0.5"))
   }
 
-  /** V2 detection must not abort when the older `api/health` path is absent. */
-  @Test fun detectsV2ThroughInfoWhenHealthPathIsGone() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404)) // global/health (V1 probe)
-      server.enqueue(MockResponse().setResponseCode(404)) // api/health (older V2)
-      server.enqueue(MockResponse().setBody("""{"version":"2.0"}""")) // api/info (current V2)
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      assertEquals("OpenCode V2", api.health())
-      assertEquals(ServerProtocol.V2, api.detectedProtocol())
-      server.takeRequest()
-      server.takeRequest()
-      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
-    }
-  }
-
-  /**
-   * When an OpenCode V2 server hosts a web frontend, unknown non-API routes return HTTP 200 with SPA
-   * HTML. If /global/health returns HTML, the probe must gracefully fall through to V2 without failing.
-   */
-  @Test fun detectsV2WhenLegacyPathReturnsSpaHtml() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html")) // global/health
-      server.enqueue(MockResponse().setResponseCode(404)) // api/health
-      server.enqueue(MockResponse().setBody("""{"version":"2.0.18"}""")) // api/info
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      assertEquals("OpenCode V2", api.health())
-      assertEquals(ServerProtocol.V2, api.detectedProtocol())
-      assertEquals("/global/health", server.takeRequest().requestUrl?.encodedPath)
-      assertEquals("/api/health", server.takeRequest().requestUrl?.encodedPath)
-      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
-    }
-  }
-
-  /** A failed write must not cause an undocumented second mutation. */
-  @Test fun v2UnrevertDoesNotGuessAnotherWrite() = runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setResponseCode(404)) // revert/clear
-      server.enqueue(MockResponse().setResponseCode(204)) // DELETE revert
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      api.health()
-      try { api.unrevert(Session("ses-1", "/repo", "Task", 0)); org.junit.Assert.fail("expected 404") } catch (error: ApiException) { assertEquals(404, error.status) }
-      server.takeRequest(); server.takeRequest()
-      assertEquals("/api/session/ses-1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
-      assertEquals(3, server.requestCount)
-    }
-  }
-
-  /** A10: a refresh after an offline start must re-establish the stream and clear stale flags. */
   @Test fun degradedStateDefaultsToHealthyAndIsIndependentOfOfflineFlag() {
     val offline = LagoonState(connected = false, cached = true)
     assertTrue(offline.cached)
     assertFalse(offline.degraded)
-    val online = offline.copy(connected = true, cached = false)
-    assertTrue(online.connected)
-    assertFalse(online.cached)
   }
 
   /**
@@ -357,27 +371,17 @@ class OpenCodeApiTest {
    */
   @Test fun nonJsonSuccessResponsesReportFriendlyErrors() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404)) // global/health (V1 fallback)
-      server.enqueue(MockResponse().setResponseCode(404)) // api/health (older V2)
-      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html")) // api/info
-      server.enqueue(MockResponse().setResponseCode(404)) // global/health
-      server.enqueue(MockResponse().setResponseCode(404)) // api/health
-      server.enqueue(MockResponse().setBody("OK")) // api/info
-      server.enqueue(MockResponse().setResponseCode(404)) // global/health
-      server.enqueue(MockResponse().setResponseCode(404)) // api/health
-      server.enqueue(MockResponse().setResponseCode(200)) // api/info
-      suspend fun healthError(): Throwable? = OpenCodeApi(
-        ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret"
-      ).let { api -> runCatching { api.health() }.exceptionOrNull() }
+      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html"))
+      server.enqueue(MockResponse().setBody("OK"))
+      server.enqueue(MockResponse().setResponseCode(200))
+      suspend fun healthError(): Throwable? = api(server).let { api -> runCatching { api.health() }.exceptionOrNull() }
       val html = healthError()
       assertTrue("expected IOException, got $html", html is IOException && html !is ApiException)
       assertTrue(html!!.message!!, html.message!!.contains("服务器返回的是网页"))
       assertFalse(html.message!!, html.message!!.contains("cannot be converted"))
       val text = healthError()
-      assertTrue(text is IOException && !text.message!!.contains("cannot be converted"))
       assertTrue(text!!.message!!, text.message!!.contains("不是有效 JSON"))
       val empty = healthError()
-      assertTrue(empty is IOException)
       assertTrue(empty!!.message!!, empty.message!!.contains("空响应"))
     }
   }

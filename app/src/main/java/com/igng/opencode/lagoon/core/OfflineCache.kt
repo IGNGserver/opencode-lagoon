@@ -140,18 +140,23 @@ class OfflineCache internal constructor(
   fun saveMessages(serverId: String, sessionId: String, messages: List<Message>, complete: Boolean = true) {
     write("messages:$serverId:$sessionId") {
       val clipped = messages.size > 100 || messages.any { message -> message.parts.any { part ->
-        part.text.length > 20_000 || part.input.length > 4_000 || part.output.length > 4_000 || part.error.length > 4_000 || part.patch.length > 20_000
+        part.text.length > 20_000 || part.input.length > 4_000 || part.output.length > 4_000 || part.error.length > 4_000 || part.patch.length > 20_000 ||
+          part.path.startsWith("data:") || part.attachments.any { it.url.startsWith("data:") }
       } }
+      // Inline `data:` payloads (screenshots, phone files) are never persisted: they can be megabytes each.
+      fun url(value: String) = value.takeUnless { it.startsWith("data:") }.orEmpty()
       val items = JSONArray().apply { messages.takeLast(100).forEach { message ->
-        put(JSONObject().put("id", message.id).put("role", message.role).put("created", message.created).put("error", message.error)
-          .put("completedAt", message.completedAt).put("finish", message.finish).put("agent", message.agent)
-          .put("model", message.model?.let { model -> JSONObject().put("providerID", model.providerId).put("modelID", model.modelId).put("name", model.label) })
+        put(JSONObject().put("id", message.id).put("role", message.role).put("type", message.type).put("created", message.created).put("error", message.error)
+          .put("errorType", message.errorType).put("completedAt", message.completedAt).put("finish", message.finish).put("agent", message.agent)
+          .put("model", message.model?.let { model -> JSONObject().put("providerID", model.providerId).put("id", model.modelId).put("name", model.label) })
+          .put("notice", message.notice?.let { notice -> JSONObject().put("label", notice.label).put("detail", notice.detail).put("items", JSONArray(notice.items))
+            .put("target", notice.target).put("error", notice.error) })
           .put("parts", JSONArray().apply { message.parts.forEach { part ->
             put(JSONObject().put("id", part.id).put("type", part.type).put("text", part.text.take(20_000))
               .put("tool", part.tool).put("title", part.title).put("status", part.status).put("input", part.input.take(4_000))
-              .put("output", part.output.take(4_000)).put("path", part.path).put("error", part.error.take(4_000))
-              .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)).put("mime", part.mime)
-              .put("attachments", JSONArray().apply { part.attachments.forEach { put(JSONObject().put("uri", it.url).put("mime", it.mime).put("name", it.name)) } }))
+              .put("output", part.output.take(4_000)).put("path", url(part.path)).put("error", part.error.take(4_000))
+              .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)).put("mime", part.mime).put("target", part.target)
+              .put("attachments", JSONArray().apply { part.attachments.filterNot { it.url.startsWith("data:") }.forEach { put(JSONObject().put("uri", it.url).put("mime", it.mime).put("name", it.name)) } }))
           } }))
       } }
       JSONObject().put("messages", items).put("complete", complete && !clipped).toString()
@@ -162,11 +167,15 @@ class OfflineCache internal constructor(
     return try {
     val items = if (raw.trimStart().startsWith("[")) JSONArray(raw) else JSONObject(raw).arr("messages")
     items.objects().map { item ->
-      Message(item.str("id"), item.str("role"), item.optLong("created"), item.arr("parts").objects().map { part ->
+      val notice = item.optJSONObject("notice")?.let { Notice(it.str("label"), it.str("detail"), it.arr("items").strings(), it.str("target").ifBlank { null }, it.optBoolean("error")) }
+      val role = item.str("role")
+      Message(item.str("id"), role, item.optLong("created"), item.arr("parts").objects().map { part ->
         MessagePart(part.str("id"), part.str("type"), part.str("text"), part.str("tool"), part.str("title"), part.str("status"), part.str("input"), part.str("output"), part.str("path"), part.str("error"), part.str("patch"),
-          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) }, part.str("mime"), part.arr("attachments").toAttachments())
+          part.arr("files").strings(), part.str("mime"), part.arr("attachments").toAttachments(), part.str("target").ifBlank { null })
       }, item.str("error").ifBlank { null }, item.str("agent").ifBlank { null }, item.obj("model").toModelChoice(),
-        item.optLong("completedAt").takeIf { it > 0 }, item.str("finish").ifBlank { null })    }
+        item.optLong("completedAt").takeIf { it > 0 }, item.str("finish").ifBlank { null }, item.str("errorType").ifBlank { null },
+        notice = notice, type = item.str("type").ifBlank { role })
+    }
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "messages 解析失败", error)
     emptyList()

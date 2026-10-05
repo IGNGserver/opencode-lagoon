@@ -83,39 +83,8 @@ class BoundaryRegressionTest {
     release.countDown();cache.awaitWrites();assertEquals("new",cache.messages("s","t").single().id)
   }
   private fun api(s:MockWebServer)=OpenCodeApi(profile(s.url("/").toString()),"fixture")
-  private suspend fun currentApi(s:MockWebServer):OpenCodeApi {
-    s.enqueue(MockResponse().setResponseCode(404));s.enqueue(MockResponse().setResponseCode(404));s.enqueue(MockResponse().setBody("{}"))
-    return api(s).also{it.health();repeat(3){s.takeRequest()}}
-  }
-  @Test fun currentV2UsesTextDecisionAndFormContractsWithoutWriteRetry()=runBlocking {
-    MockWebServer().use { s ->
-      val api=currentApi(s)
-      s.enqueue(MockResponse().setBody("{}"));api.send(Session("ses_a","/repo","T",0),"hello",null,null)
-      assertEquals("hello",JSONObject(s.takeRequest().body.readUtf8()).getString("text"))
-      s.enqueue(MockResponse().setBody("""{"data":[{"id":"per_a","sessionID":"ses_a","action":"bash","resources":["ls"],"save":["ls *"],"source":{"type":"tool","messageID":"msg","id":"call"}}]}"""))
-      val permission=api.permissions("/repo").single();s.takeRequest()
-      assertEquals(listOf("ls *"),permission.always);assertEquals("call",permission.toolCallId)
-      s.enqueue(MockResponse().setResponseCode(204));api.replyPermission(permission,"always")
-      assertEquals("always",JSONObject(s.takeRequest().body.readUtf8()).getString("decision"))
-      s.enqueue(MockResponse().setBody("""{"data":[{"id":"frm_a","sessionID":"ses_a","title":"Config","fields":[{"key":"enabled","type":"boolean","required":true}]}]}"""))
-      val form=api.questions("/repo").single();assertTrue(form.form);assertEquals("/api/form",s.takeRequest().requestUrl!!.encodedPath)
-      s.enqueue(MockResponse().setResponseCode(204));api.replyQuestion(form,listOf(listOf("true")))
-      val reply=s.takeRequest();assertEquals("/api/session/ses_a/form/frm_a/reply",reply.requestUrl!!.encodedPath)
-      assertTrue(JSONObject(reply.body.readUtf8()).getJSONObject("answer").getBoolean("enabled"))
-      s.enqueue(MockResponse().setResponseCode(204));api.rejectQuestion(form);assertEquals("DELETE",s.takeRequest().method)
-      s.enqueue(MockResponse().setResponseCode(400));assertTrue(runCatching{api.send(Session("ses_a","/repo","T",0),"bad",null,null)}.isFailure)
-      s.takeRequest();assertNull(s.takeRequest(100,TimeUnit.MILLISECONDS))
-    }
-  }
-  @Test fun legacyPermissionsCannotSaveAnUnverifiedScope()=runBlocking {
-    MockWebServer().use { s ->
-      s.enqueue(MockResponse().setBody("""{"healthy":true}"""));val api=api(s);api.health();s.takeRequest()
-      assertTrue(runCatching{api.replyPermission(PermissionRequest("p","s","/repo","bash","ls",listOf("*")),"always")}.isFailure)
-      assertNull(s.takeRequest(100,TimeUnit.MILLISECONDS))
-    }
-  }
   @Test fun missingPermissionEndpointIsAnErrorNotAuthoritativeEmpty()=runBlocking {
-    MockWebServer().use { s -> val api=currentApi(s);s.enqueue(MockResponse().setResponseCode(404));assertTrue(runCatching{api.permissions("/repo")}.isFailure) }
+    MockWebServer().use { s -> s.enqueue(MockResponse().setResponseCode(404));assertTrue(runCatching{api(s).sessionPermissions(Session("ses_a","/repo","T",0))}.isFailure) }
   }
   @Test fun formValuesPreserveOptionValuesTypesAndVisibility() {
     val form=JSONObject("""{"id":"frm","sessionID":"s","fields":[{"key":"mode","type":"string","options":[{"value":"fast","label":"快速"}]},{"key":"count","type":"integer","minimum":1,"maximum":3,"required":true},{"key":"hidden","type":"string","required":true,"when":[{"key":"mode","op":"eq","value":"slow"}]}]}""").toForm("/repo")
@@ -144,15 +113,14 @@ class BoundaryRegressionTest {
   }
   @Test fun repeatedCursorFailsInsteadOfReturningPartialAuthoritativeData()=runBlocking {
     MockWebServer().use { s ->
-      val api=currentApi(s);repeat(2){s.enqueue(MockResponse().setBody("""{"data":[],"cursor":{"next":"same"}}"""))}
-      assertTrue(runCatching{api.sessions("/repo")}.exceptionOrNull() is IOException)
+      repeat(2){s.enqueue(MockResponse().setBody("""{"data":[],"cursor":{"next":"same"}}"""))}
+      assertTrue(runCatching{api(s).children(Session("p","/repo","P",0))}.exceptionOrNull() is IOException)
     }
   }
   @Test fun sseOverflowTriggersObservableFailure()=runBlocking {
     MockWebServer().use { s ->
-      s.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      s.enqueue(MockResponse().addHeader("Content-Type","text/event-stream").setBody(buildString{repeat(201){append("id: $it\ndata: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"s\",\"status\":{\"type\":\"busy\"}}}\n\n")}}))
-      val api=api(s);api.health();val failure=runCatching{withTimeout(5000){api.events().collect{delay(10)}}}.exceptionOrNull()
+      s.enqueue(MockResponse().addHeader("Content-Type","text/event-stream").setBody(buildString{repeat(201){append("id: evt_$it\ndata: {\"id\":\"evt_$it\",\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"s\",\"assistantMessageID\":\"msg_a\",\"ordinal\":0,\"delta\":\"x\"}}\n\n")}}))
+      val failure=runCatching{withTimeout(5000){api(s).events().collect{delay(10)}}}.exceptionOrNull()
       assertTrue(failure is IOException)
     }
   }

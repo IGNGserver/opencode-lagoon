@@ -72,36 +72,9 @@ internal fun JSONObject.toV2ModelInfo(providerNames: Map<String, String>): Model
   )
 }
 
-/** V1 `config/providers` model entry (models.dev shape). */
-internal fun JSONObject.toV1ModelInfo(providerId: String, providerName: String, key: String): ModelInfo {
-  val inputs = obj("modalities").arr("input")
-  return ModelInfo(
-    ModelChoice(providerId, key, str("name").ifBlank { key }),
-    providerName = providerName.ifBlank { providerId },
-    family = str("family").ifBlank { null },
-    released = parseReleaseDate(str("release_date")),
-    imageInput = when {
-      obj("modalities").has("input") -> (0 until inputs.length()).any { inputs.optString(it) == "image" }
-      has("attachment") -> optBoolean("attachment")
-      else -> null
-    },
-    deprecated = str("status") == "deprecated"
-  )
-}
-
 /** Accepts epoch seconds or milliseconds; anything non-positive means "no release date". */
 internal fun epochMillis(value: Double): Long = when {
   value.isNaN() || value <= 0 -> 0
   value < 100_000_000_000.0 -> (value * 1000).toLong()
   else -> value.toLong()
-}
-
-/** `YYYY-MM-DD` or `YYYY-MM` from models.dev; invalid or missing dates count as unknown. */
-internal fun parseReleaseDate(value: String): Long {
-  val match = Regex("^(\\d{4})-(\\d{2})(?:-(\\d{2}))?").find(value.trim()) ?: return 0
-  val (year, month, day) = match.destructured
-  return runCatching {
-    java.time.LocalDate.of(year.toInt(), month.toInt(), day.ifBlank { "1" }.toInt())
-      .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-  }.getOrDefault(0)
 }

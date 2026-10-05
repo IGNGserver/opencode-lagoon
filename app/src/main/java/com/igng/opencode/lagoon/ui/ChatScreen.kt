@@ -37,7 +37,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.miuixCapsuleShape
 import top.yukonga.miuix.kmp.theme.miuixShape
 
-private enum class ChatSheet { TODO, CHANGES, FILES, CHILDREN, AGENTS }
+private enum class ChatSheet { CHANGES, FILES, CHILDREN, AGENTS }
 
 /** One entry of the session's ⋯ menu; [danger] items render in the error color. */
 private data class MenuEntry(val label: String, val danger: Boolean = false, val action: () -> Unit)
@@ -63,11 +63,10 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   val entries = buildList {
     add(MenuEntry("子任务（${state.children.size}）") { sheet = ChatSheet.CHILDREN })
     add(MenuEntry("文件") { sheet = ChatSheet.FILES; controller.listFiles() })
-    if (state.capabilities.todos) add(MenuEntry("待办（${state.todos.size}）") { sheet = ChatSheet.TODO })
     if (state.capabilities.diff) add(MenuEntry("改动（${state.changes.size}）") { sheet = ChatSheet.CHANGES })
     add(MenuEntry("Agent：${state.agent ?: "默认"}") { sheet = ChatSheet.AGENTS })
     if (state.capabilities.supports(SessionAction.RENAME)) add(MenuEntry("重命名") { title = state.title(session); rename = true })
-    if (state.capabilities.supports(SessionAction.DELETE)) add(MenuEntry("删除会话", danger = true) { delete = true })
+    add(MenuEntry("删除会话", danger = true) { delete = true })
   }
   Column(Modifier.fillMaxSize()) {
     SmallTopAppBar(title = state.title(session), navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } }, actions = {
@@ -90,16 +89,15 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
         style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
       state.tasks[session.id]?.takeIf { it.active }?.let { Spacer(Modifier.width(8.dp)); MiuixStatePill(it.phase) }
     }
-    Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it })
+    Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it }, onOpenChild)
     ChatComposer(state, controller, interactive, onModal = { composerModal = it })
   }
   sheet?.let { which ->
-    val resource = when (which) { ChatSheet.TODO -> "todos"; ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children"; ChatSheet.AGENTS -> "agents" }
-    SuperBottomSheet(title = when (which) { ChatSheet.TODO -> "待办"; ChatSheet.CHANGES -> "代码改动"; ChatSheet.FILES -> "文件"; ChatSheet.CHILDREN -> "子任务"; ChatSheet.AGENTS -> "选择 Agent" }, show = true, onDismissRequest = { sheet = null }) {
+    val resource = when (which) { ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children"; ChatSheet.AGENTS -> "agents" }
+    SuperBottomSheet(title = when (which) { ChatSheet.CHANGES -> "代码改动"; ChatSheet.FILES -> "文件"; ChatSheet.CHILDREN -> "子任务"; ChatSheet.AGENTS -> "选择 Agent" }, show = true, onDismissRequest = { sheet = null }) {
       Column(Modifier.fillMaxWidth().fillMaxHeight(if (which == ChatSheet.AGENTS) 0.6f else 0.72f).padding(vertical = 8.dp)) {
         if (which != ChatSheet.FILES) ResourceHint(state.resource(resource), "暂无记录", retry = controller::reload)
         when (which) {
-          ChatSheet.TODO -> LazyColumn { items(state.todos) { todo -> Text("${if (todo.status == "completed") "✓" else "○"} ${todo.content}", modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) } }
           // Server lists may repeat an entry; LazyColumn crashes on a duplicate key, so keys never come from data alone.
           ChatSheet.CHANGES -> LazyColumn { itemsIndexed(state.changes, key = { index, change -> "$index:${change.path}" }) { _, change ->
             var expanded by rememberSaveable(change.path) { mutableStateOf(false) }
@@ -373,8 +371,9 @@ private fun ChatComposer(
   DisposableEffect(picker, attachMenu) { onModal(picker != null || attachMenu); onDispose { onModal(false) } }
   val task = state.tasks[state.sessionId]
   val sending = busy
-  val canSend = ready && state.connected && !state.cached && task?.active != true && !sending &&
-    (value.text.isNotBlank() || state.references.isNotEmpty() || state.attachments.isNotEmpty())
+  val hasContent = value.text.isNotBlank() || state.references.isNotEmpty() || state.attachments.isNotEmpty()
+  // Like the official composer, a prompt typed while the agent works steers the running turn.
+  val canSend = ready && state.connected && !state.cached && !sending && hasContent
   Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
     val hint = when {
       !state.connected -> "离线 · 草稿保留，恢复连接后可发送"
@@ -412,7 +411,7 @@ private fun ChatComposer(
         CapsuleSelector(state.model?.label ?: "默认模型", { picker = "models" }, Modifier.weight(1f, fill = false), enabled = !sending && interactive)
         Spacer(Modifier.weight(1f))
         Spacer(Modifier.width(8.dp))
-        if (task?.phase in TaskState.RUNNING_PHASES) {
+        if (task?.phase in TaskState.RUNNING_PHASES && !hasContent) {
           RoundAction(null, "停止", { controller.abort() }, enabled = !state.pending("abort"), container = MiuixTheme.colorScheme.error) {
             Box(Modifier.size(12.dp).background(MiuixTheme.colorScheme.onError, miuixShape(3.dp)))
           }

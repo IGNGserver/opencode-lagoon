@@ -59,15 +59,13 @@ class ModelVisibilityTest {
     assertNull(custom.imageInput)
   }
 
-  @Test fun parsesV1CatalogEntriesAndDates() {
-    val info = JSONObject("""{"name":"Claude","family":"claude-sonnet","release_date":"2026-05-14","modalities":{"input":["text"]},"status":"deprecated"}""")
-      .toV1ModelInfo("anthropic", "Anthropic", "claude-x")
+  @Test fun parsesV2CatalogDatesAndDeprecation() {
+    val info = JSONObject("""{"id":"claude-x","providerID":"anthropic","name":"Claude","family":"claude-sonnet","time":{"released":1767225600},"capabilities":{"input":["text"]},"status":"deprecated"}""")
+      .toV2ModelInfo(mapOf("anthropic" to "Anthropic"))!!
     assertEquals("claude-x", info.choice.modelId)
     assertEquals(false, info.imageInput)
     assertTrue(info.deprecated)
-    assertEquals(parseReleaseDate("2026-05-14"), info.released)
-    assertEquals(0L, parseReleaseDate("unknown"))
-    assertEquals(parseReleaseDate("2026-05-01"), parseReleaseDate("2026-05"))
+    assertEquals(1_767_225_600_000L, info.released)
     assertEquals(1_767_225_600_000L, epochMillis(1_767_225_600.0))
     assertEquals(0L, epochMillis(0.0))
     assertFalse(ModelVisibility.latest(listOf(info), info.released + day).isEmpty())

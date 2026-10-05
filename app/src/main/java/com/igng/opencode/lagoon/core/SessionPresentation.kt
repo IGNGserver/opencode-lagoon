@@ -69,21 +69,24 @@ fun groupSessions(sessions: List<Session>, projects: List<Project>): List<Sessio
     .sortedWith(compareByDescending<SessionGroup> { it.latest }.thenBy { it.key })
 
 fun List<Message>.sessionPreview(): SessionPreview {
-  val visible = filter { it.isDisplayable }
+  val visible = filter { it.isDisplayable && it.role != "notice" }
   val firstPrompt = visible.firstOrNull { it.role == "user" }?.parts
-    ?.firstOrNull { it.type == "text" || it.type == "user" }?.text.orEmpty()
+    ?.firstOrNull { it.type == "text" }?.text.orEmpty()
   return SessionPreview(if (visible.isEmpty()) SessionContent.EMPTY else SessionContent.CONTENT, firstPrompt.take(300))
 }
 
 val MessagePart.isDisplayable: Boolean get() = when (type) {
-  "text", "user", "system", "synthetic", "reasoning" -> text.isNotBlank()
+  "text", "reasoning" -> text.isNotBlank()
   "tool" -> tool.isNotBlank() || input.isNotBlank() || output.isNotBlank() || error.isNotBlank()
   "file" -> path.isNotBlank()
-  "patch", "diff" -> patch.isNotBlank() || files.isNotEmpty()
-  "subtask" -> text.isNotBlank() || title.isNotBlank()
-  else -> text.isNotBlank() || attachments.isNotEmpty()
+  else -> false
 }
-val Message.isDisplayable: Boolean get() = error?.isNotBlank() == true || parts.any { it.isDisplayable }
+/** Official visibility: notices and shell turns always render; `hidden` records never do. */
+val Message.isDisplayable: Boolean get() = when (role) {
+  "hidden" -> false
+  "notice", "shell" -> true
+  else -> error?.isNotBlank() == true || retry != null || parts.any { it.isDisplayable }
+}
 
 enum class ResourceState { NOT_LOADED, LOADING, READY, EMPTY, ERROR, UNSUPPORTED, STALE }
 data class ResourceStatus(val state: ResourceState = ResourceState.NOT_LOADED, val error: String? = null)
