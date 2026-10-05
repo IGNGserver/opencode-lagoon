@@ -51,4 +51,12 @@ class IslandRegistryTest {
     // 传输未被 extend 调用时不应有副作用。
     assertEquals(null, published)
   }
+
+  @Test fun settingsShowTheSingleEffectiveChannel() {
+    fun support(vendor: String, supported: Boolean) = IslandSupport(vendor, vendor, supported, false, "")
+    // 优先取支持的通道；都不支持时回退标准通道（此时只是普通通知）。
+    assertEquals("vivo", IslandRegistry.currentOf(listOf(support("android", false), support("vivo", true), support("honor", false))).vendor)
+    assertEquals("android", IslandRegistry.currentOf(listOf(support("android", false), support("vivo", false))).vendor)
+    assertEquals("android", IslandRegistry.currentOf(listOf(support("android", true), support("vivo", true))).vendor)
+  }
 }

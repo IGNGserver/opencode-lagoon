@@ -328,16 +328,18 @@ fun SettingsScreen(
   onTheme: (ThemeMode) -> Unit,
   previewBack: Boolean,
   onPreviewBack: (Boolean) -> Unit,
+  refreshMode: RefreshMode,
+  onRefreshMode: (RefreshMode) -> Unit,
   onNotifications: () -> Unit,
   onEditServer: (ServerProfile?) -> Unit,
   onBack: () -> Unit
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
-  // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
-  var islandSupport by remember { mutableStateOf<List<IslandSupport>?>(null) }
+  // 当前设备实际生效的实时更新通道（只展示这一条，不再罗列每个品牌）。检测放到 IO 线程执行。
+  var islandCurrent by remember { mutableStateOf<IslandSupport?>(null) }
   val lifecycleOwner = LocalLifecycleOwner.current
   val scope = rememberCoroutineScope()
-  fun refreshSupport() { scope.launch { islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context, state.server) } } }
+  fun refreshSupport() { scope.launch { islandCurrent = withContext(Dispatchers.IO) { IslandRegistry.current(context, state.server) } } }
   DisposableEffect(lifecycleOwner, state.serverId) {
     val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refreshSupport() }
     lifecycleOwner.lifecycle.addObserver(observer); refreshSupport()
@@ -350,8 +352,6 @@ fun SettingsScreen(
 
 
   var showModels by remember { mutableStateOf(false) }
-  var showSaved by remember { mutableStateOf(false) }
-  val permissionProject = state.session?.let { resolveSessionProject(it, state.projects) } ?: state.project
 
   // MIUIX settings: white cards on the grey page surface.
   Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
@@ -393,23 +393,27 @@ fun SettingsScreen(
           checked = previewBack,
           onCheckedChange = onPreviewBack
         )
+        SuperDropdown(
+          title = "自动刷新",
+          items = RefreshMode.entries.map { it.label },
+          selectedIndex = RefreshMode.entries.indexOf(refreshMode),
+          onSelectedIndexChange = { onRefreshMode(RefreshMode.entries[it]) }
+        )
       }
     }
 
     item {
-      SmallTitle("模型与权限")
+      SmallTitle("模型")
       Card(Modifier.fillMaxWidth()) {
         SuperArrow(
           title = "管理模型",
-          summary = if (state.modelCatalog.isEmpty()) "连接服务器后可选择显示哪些模型" else "显示 ${state.visibleModels.size} / ${state.modelCatalog.size} 个模型",
-          enabled = state.modelCatalog.isNotEmpty(),
+          summary = when {
+            !state.connected -> "连接服务器后可选择显示哪些模型"
+            state.modelCatalog.isEmpty() -> "正在读取服务器模型…"
+            else -> "显示 ${state.visibleModels.size} / ${state.modelCatalog.size} 个模型"
+          },
+          enabled = state.connected,
           onClick = { showModels = true }
-        )
-        if (state.supportsSavedPermissions) SuperArrow(
-          title = "已保存的项目权限",
-          summary = permissionProject?.let { "当前项目：${it.name}" } ?: "先在会话页选择项目",
-          enabled = permissionProject != null && state.connected,
-          onClick = { showSaved = true; controller.loadSavedPermissions() }
         )
       }
     }
@@ -418,42 +422,40 @@ fun SettingsScreen(
       SmallTitle("超级岛与通知")
       Card(Modifier.fillMaxWidth()) {
         SuperArrow(
-          title = "通知权限",
-          summary = "有任务运行或等你处理时，以系统「实时更新」显示运行中 / 已完成 / 待回复 / 失败计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云），外观与配色由系统决定",
+          title = "通知中心入口",
+          summary = "有任务运行或等你处理时，以系统「实时更新」显示运行中 / 待回复计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云），外观与配色由系统决定",
           onClick = onNotifications
         )
-        val list = islandSupport
-        if (list == null) {
-          BasicComponent(title = "实时更新通道", summary = "正在检测本机实时更新能力…")
+        val item = islandCurrent
+        if (item == null) {
+          BasicComponent(title = "当前模式", summary = "正在检测本机实时更新能力…")
         } else {
-          list.forEach { item ->
-            BasicComponent(
-              title = item.label,
-              summary = item.note,
-              endActions = {
-                Text(
-                  when {
-                    !item.supported -> "不支持"
-                    item.granted -> "已就绪"
-                    else -> "待授权"
-                  },
-                  style = MiuixTheme.textStyles.footnote1.copy(
-                    color = when {
-                      !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                      item.granted -> MiuixColorTokens.Success
-                      else -> MiuixColorTokens.Warning
-                    }
-                  )
+          // 只显示当前生效的模式，不再把每个品牌都列一遍。
+          BasicComponent(
+            title = "当前模式：${item.label}",
+            summary = item.note,
+            endActions = {
+              Text(
+                when {
+                  !item.supported -> "普通通知"
+                  item.granted -> "已就绪"
+                  else -> "待授权"
+                },
+                style = MiuixTheme.textStyles.footnote1.copy(
+                  color = when {
+                    !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    item.granted -> MiuixColorTokens.Success
+                    else -> MiuixColorTokens.Warning
+                  }
                 )
-              }
-            )
-          }
-          if (list.any { it.vendor == "android" && it.supported && !it.granted }) SuperArrow(
+              )
+            }
+          )
+          if (item.vendor == "android" && item.supported && !item.granted) SuperArrow(
             title = "开启实时更新权限",
             summary = "Android 16 实时更新需要单独授权",
             onClick = { TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } } }
           )
-          BasicComponent(summary = "荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。")
         }
       }
     }
@@ -483,18 +485,4 @@ fun SettingsScreen(
 
   }
   if (showModels) ManageModelsSheet(state, controller) { showModels = false }
-  if (showSaved) SuperBottomSheet(title = "已保存的项目权限", show = true, onDismissRequest = { showSaved = false; controller.closeSavedPermissions() }) {
-    Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(bottom = 16.dp)) {
-      permissionProject?.let { Text("项目：${it.name}", Modifier.padding(bottom = 8.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)) }
-      ResourceHint(state.resource("saved"), "没有已保存的权限规则", retry = { controller.loadSavedPermissions() })
-      LazyColumn {
-        items(state.savedPermissions.orEmpty().distinctBy { it.id }, key = { it.id }) { rule ->
-          BasicComponent(title = rule.action, summary = rule.resource, endActions = {
-            TextButton(text = "撤销", enabled = !state.pending("revoke:${rule.id}"), onClick = { controller.revokeSavedPermission(rule) },
-              colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
-          })
-        }
-      }
-    }
-  }
 }

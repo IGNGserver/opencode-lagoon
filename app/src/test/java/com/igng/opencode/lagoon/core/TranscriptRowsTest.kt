@@ -282,4 +282,32 @@ class TranscriptRowsTest {
     val summary = rows.single { it.kind == "diff-summary" }
     assertEquals("本轮改动 1 个文件", summary.title)
   }
+
+  @Test fun halfSheetDetailsReturnTheGroupChildren() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, tool("t1", "bash", input = """{"command":"ls -la"}""", output = "file.txt")))
+    val row = TranscriptRows.build(messages).single { it.kind == "tool" }
+    val details = TranscriptRows.details(messages, row.key)
+    assertTrue(details.isNotEmpty())
+    assertTrue(details.all { it.detailOf == row.key })
+    assertTrue(details.any { it.kind == "tool-body" && it.text.contains("ls -la") })
+  }
+
+  @Test fun halfSheetDetailsForContextGroupReturnItems() {
+    val parts = listOf(tool("t1", "read", input = """{"filePath":"a.kt"}"""), tool("t2", "read", input = """{"filePath":"b.kt"}"""))
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
+    val group = TranscriptRows.build(messages).single { it.kind == "context-group" }
+    val details = TranscriptRows.details(messages, group.key)
+    assertEquals(2, details.count { it.kind == "context-item" })
+    assertTrue(details.all { it.detailOf == group.key })
+  }
+
+  @Test fun halfSheetDetailsForDiffSummaryReturnFiles() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500,
+      tool("t1", "edit", input = """{"filePath":"a.kt"}""", patch = "@@ -1 +1 @@\n-old\n+new")))
+    val summary = TranscriptRows.build(messages).single { it.kind == "diff-summary" }
+    val details = TranscriptRows.details(messages, summary.key)
+    assertTrue(details.any { it.kind == "diff-file" && it.title == "a.kt" })
+    assertTrue(details.any { it.kind == "tool-body" })
+    assertTrue(details.all { it.detailOf == summary.key })
+  }
 }

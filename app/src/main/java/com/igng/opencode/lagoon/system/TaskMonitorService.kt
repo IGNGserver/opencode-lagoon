@@ -17,7 +17,6 @@ import kotlinx.coroutines.launch
 
 class TaskMonitorService : Service() {
   companion object {
-    private const val FOREGROUND_ID = 1001
     fun start(context: Context, serverId: String, sessionId: String) {
       val intent = Intent(context, TaskMonitorService::class.java).putExtra("serverId", serverId).putExtra("sessionId", sessionId)
       androidx.core.content.ContextCompat.startForegroundService(context, intent)
@@ -34,11 +33,13 @@ class TaskMonitorService : Service() {
     val notifications = TaskNotifications(this)
     tracked += serverId to sessionId
     val controller = LagoonController.get(this)
-    // A dedicated monitoring notification whose text mirrors the island summary; kept separate from
-    // per-session results so stopping the foreground state never cancels a real completion/failure
-    // notification, and so the foreground placeholder is not left behind under a session-specific id.
-    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(controller.state.value.summary), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    else startForeground(FOREGROUND_ID, notifications.buildMonitoring(controller.state.value.summary))
+    // 前台服务复用「服务器总览」通知（灵动岛）本身，不再发第二条“任务监控中”常驻通知。
+    // 通知 id 与控制器发布总览时相同，二者更新的是同一条通知。
+    val foregroundId = TaskNotifications.summaryId(serverId)
+    val summary = controller.state.value.summary
+    val target = controller.state.value.summaryTargetId
+    if (Build.VERSION.SDK_INT >= 29) startForeground(foregroundId, notifications.buildSummary(profile, summary, target), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    else startForeground(foregroundId, notifications.buildSummary(profile, summary, target))
     if (controller.state.value.serverId != serverId || !profile.notifications) {
       tracked.remove(serverId to sessionId)
       if (tracked.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }

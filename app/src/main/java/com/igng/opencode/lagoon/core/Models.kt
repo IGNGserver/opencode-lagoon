@@ -83,7 +83,6 @@ data class PermissionRequest(
   val toolMessageId: String = "",
   val toolCallId: String = ""
 )
-data class SavedPermission(val id: String, val projectId: String, val action: String, val resource: String)
 data class QuestionOption(val label: String, val description: String, val value: String = label)
 data class QuestionPrompt(
   val title: String,

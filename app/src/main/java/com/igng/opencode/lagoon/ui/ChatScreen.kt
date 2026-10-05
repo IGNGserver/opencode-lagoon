@@ -181,7 +181,7 @@ internal fun DialogActions(cancel: String, onCancel: () -> Unit, confirm: String
 private fun ActionError(state: LagoonState, action: String) { state.resource("action:$action").takeIf { it.state == ResourceState.ERROR }?.error?.let { Text(it, color = MiuixColorTokens.Error) } }
 
 @Composable
-fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController, canSave: Boolean, onModal: (Boolean) -> Unit = {}) {
+fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController, onModal: (Boolean) -> Unit = {}) {
   val state by controller.state.collectAsState()
   val pending = state.pending("permission:${request.id}")
   var confirmSave by rememberSaveable(request.id) { mutableStateOf(false) }
@@ -194,7 +194,7 @@ fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController
     ) {
       Column(Modifier.padding(top = 8.dp)) {
         Text(
-          "规则将保存在服务器项目中，适用于后续任务，可在「设置 › 已保存的项目权限」中撤销。\n" + request.always.joinToString("\n"),
+          "规则将保存在服务器项目中，适用于后续任务。\n" + request.always.joinToString("\n"),
           style = MiuixTheme.textStyles.body2
         )
         DialogActions("取消", { confirmSave = false }, if (pending) "正在提交…" else "保存并允许", !pending) {
@@ -250,7 +250,7 @@ fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController
       TextButton(text = "允许一次", onClick = { controller.replyPermission(request, "once") }, enabled = !pending, modifier = Modifier.weight(1f),
         colors = ButtonDefaults.textButtonColorsPrimary())
     }
-    if (canSave && request.always.isNotEmpty()) {
+    if (request.always.isNotEmpty()) {
       TextButton(text = "始终允许", enabled = !pending, onClick = { confirmSave = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
     }
   }
@@ -555,7 +555,7 @@ private fun FilesPanel(state: LagoonState, controller: LagoonController, onRefer
     Row(verticalAlignment = Alignment.CenterVertically) { TextButton(text = "上一级", onClick = { controller.listFiles(state.filePath.substringBeforeLast('/', ".")) }); Spacer(Modifier.width(8.dp)); Text(state.filePath, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2) }
     ResourceHint(state.resource(if (query.length >= 2) "search" else "files"), "此目录没有文件", retry = { if (query.length >= 2) controller.searchFiles(query) else controller.listFiles() })
     if (state.fileBinary) { Text("当前无法预览此二进制文件"); TextButton(text = "引用到消息", enabled = !state.pending("send"), onClick = { onReference(state.filePath) }) }
-    state.fileText?.let { text -> TextButton(text = "引用到消息", onClick = { onReference(state.filePath) }); VirtualText(text, Modifier.weight(1f)) }
+    state.fileText?.let { text -> TextButton(text = "引用到消息", onClick = { onReference(state.filePath) }); VirtualText(text, Modifier.weight(1f), highlight = false) }
       ?: LazyColumn { items((if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files).distinctBy { it.path }, key = { it.path }) { node ->
         BasicComponent(title = node.path.substringAfterLast('/').ifBlank { node.path }, summary = if (node.type == "directory") "文件夹" else node.path,
           onClick = { if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path) })
