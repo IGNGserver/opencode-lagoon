@@ -42,6 +42,13 @@ class HomeSectionsTest {
     assertEquals(listOf("done", "fail"), sections[2].sessions.map { it.id })
   }
 
+  @Test fun backgroundRunningRanksWithRunning() {
+    val sessions = listOf(session("bg", at(5, 8)), session("run", at(5, 7)))
+    val sections = HomeSections.byStatus(sessions, mapOf("bg" to SessionStatus.BACKGROUND_RUNNING, "run" to SessionStatus.RUNNING))
+    assertEquals(listOf("运行中"), sections.map { it.title })
+    assertEquals(listOf("bg", "run"), sections.single().sessions.map { it.id })
+  }
+
   @Test fun pinnedSessionsLeadAndLeaveTheirSection() {
     val sessions = listOf(session("a", at(5, 8)), session("b", at(3, 8)))
     val sections = HomeSections.build(HomeGrouping.DATE, sessions, emptyList(), emptyMap(), pinned = setOf("b"), now = now, zone = zone)

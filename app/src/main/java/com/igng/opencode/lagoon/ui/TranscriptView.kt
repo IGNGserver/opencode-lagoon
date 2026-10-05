@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.*
@@ -93,6 +94,11 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
     if (state.pending("send")) follow = true
     if (follow) { scrollBottom(); newContent = false } else if (state.messages.isNotEmpty()) newContent = true
   }
+  // 键盘弹出时列表视口变矮，最后几条会落到键盘后面；这一刻自动回到底部（等布局收敛后再滚）。
+  val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+  LaunchedEffect(imeBottom > 0) {
+    if (imeBottom > 0) { follow = true; delay(120); scrollBottom() }
+  }
   // Reaching the top pulls the previous page automatically; a spinner shows until it lands.
   val loadingOlder = state.pending("messages-more")
   val atTop by remember { derivedStateOf {
@@ -110,6 +116,9 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   Box(modifier) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       if (state.cached) item { Text(if (state.cacheComplete) if (state.connected) "会话缓存 · 消息待同步" else "离线缓存 · 恢复连接后更新" else "离线缓存已截断，部分历史与长输出未保留", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1) }
+      if (state.sessionId in state.backgroundRunning) item(key = "background-running") {
+        Text("任务正在后台运行中", color = MiuixTheme.colorScheme.primary, style = MiuixTheme.textStyles.footnote1)
+      }
       if (state.messagesCursor != null) item(key = "older-loader") {
         Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
           if (loadingOlder) InfiniteProgressIndicator(size = 20.dp, strokeWidth = 2.dp)

@@ -39,14 +39,14 @@ fun Session.displayTitle(): String {
  * exist only while unread — a session that finished long ago, or that was already opened, shows nothing.
  */
 enum class SessionStatus(val label: String) {
-  WAITING_PERMISSION("等待授权"), WAITING_QUESTION("等待回答"), RUNNING("运行中"),
+  WAITING_PERMISSION("等待授权"), WAITING_QUESTION("等待回答"), RUNNING("运行中"), BACKGROUND_RUNNING("后台运行中"),
   FAILED("失败"), COMPLETED("已完成"), NONE("")
 }
 
-fun sessionStatus(activeFamily: TaskState?, unseen: List<SessionNotice>): SessionStatus = when {
+fun sessionStatus(activeFamily: TaskState?, unseen: List<SessionNotice>, background: Boolean = false): SessionStatus = when {
   activeFamily?.phase == TaskPhase.WAITING_PERMISSION -> SessionStatus.WAITING_PERMISSION
   activeFamily?.phase == TaskPhase.WAITING_QUESTION -> SessionStatus.WAITING_QUESTION
-  activeFamily?.phase in TaskState.RUNNING_PHASES -> SessionStatus.RUNNING
+  activeFamily?.phase in TaskState.RUNNING_PHASES -> if (background) SessionStatus.BACKGROUND_RUNNING else SessionStatus.RUNNING
   unseen.any { it.error } -> SessionStatus.FAILED
   unseen.isNotEmpty() -> SessionStatus.COMPLETED
   else -> SessionStatus.NONE

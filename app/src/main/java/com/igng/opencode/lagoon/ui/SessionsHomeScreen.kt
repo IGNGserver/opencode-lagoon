@@ -207,7 +207,7 @@ private fun SessionList(
   val list = rememberLazyListState()
   val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(60_000); value = System.currentTimeMillis() } }
   val active = remember(state.tasks, state.parents) { state.activeRootTasks }
-  val statuses = remember(state.sessions, state.notices, active) { state.sessions.associate { it.id to state.sessionStatus(it, active) } }
+  val statuses = remember(state.sessions, state.notices, active, state.backgroundRunning) { state.sessions.associate { it.id to state.sessionStatus(it, active) } }
   val unseen = remember(state.notices) { state.notices.filterNot { it.viewed }.map { it.sessionId }.toSet() }
   val roots = HomeScope.roots(state.sessions, state.projects, state.scopeProjectId).filter { session ->
     query.isBlank() || session.displayTitle().contains(query, true) ||
@@ -295,7 +295,10 @@ internal fun HomeSessionRow(session: Session, status: SessionStatus, unseen: Boo
       Spacer(Modifier.width(12.dp))
       Text(session.displayTitle(), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
         style = MiuixTheme.textStyles.body1.copy(fontWeight = if (highlighted) FontWeight.Medium else FontWeight.Normal, color = MiuixTheme.colorScheme.onSurface))
-      if (status == SessionStatus.WAITING_PERMISSION || status == SessionStatus.WAITING_QUESTION) {
+      if (status == SessionStatus.BACKGROUND_RUNNING) {
+        Spacer(Modifier.width(8.dp))
+        Text(status.label, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.primary))
+      } else if (status == SessionStatus.WAITING_PERMISSION || status == SessionStatus.WAITING_QUESTION) {
         Spacer(Modifier.width(8.dp))
         Text(status.label, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixColorTokens.Warning))
       }
@@ -310,6 +313,8 @@ private fun StatusGlyph(status: SessionStatus, unseen: Boolean) {
   when {
     status == SessionStatus.RUNNING ->
       InfiniteProgressIndicator(color = MiuixTheme.colorScheme.primary, size = 16.dp, strokeWidth = 2.dp, orbitingDotSize = 2.dp)
+    status == SessionStatus.BACKGROUND_RUNNING ->
+      Icon(MiuixIcons.Info, status.label, Modifier.size(20.dp), tint = MiuixTheme.colorScheme.primary)
     status == SessionStatus.WAITING_PERMISSION || status == SessionStatus.WAITING_QUESTION ->
       Icon(MiuixIcons.Info, status.label, Modifier.size(20.dp), tint = MiuixColorTokens.Warning)
     status == SessionStatus.FAILED -> Box(Modifier.size(8.dp).background(MiuixColorTokens.Error, CircleShape))

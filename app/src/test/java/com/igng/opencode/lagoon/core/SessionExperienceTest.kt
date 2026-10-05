@@ -46,6 +46,14 @@ class SessionExperienceTest {
     val resumed = TaskReducer.status("s", true, TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10))
     assertEquals(10L, resumed.since)
   }
+
+  @Test fun anActiveReadNeverDowngradesAPendingPrompt() {
+    // 服务器仍在执行时应保留“等待输入”，否则权限/表单枚举的瞬时抖动会让会话在等待/运行之间跳。
+    val permission = TaskState("s", TaskPhase.WAITING_PERMISSION, "等待权限确认", 10)
+    assertEquals(permission, TaskReducer.status("s", true, permission))
+    val question = TaskState("s", TaskPhase.WAITING_QUESTION, "等待你的回答", 10)
+    assertEquals(question, TaskReducer.status("s", true, question))
+  }
   @Test fun parentAndThreeRunningChildrenCountAsOneMainTask() {
     val tasks = mapOf("p" to TaskState("p", TaskPhase.SUBAGENT)) + (1..3).associate { "c$it" to TaskState("c$it", TaskPhase.THINKING) }
     assertEquals(1, TaskSummary.of(tasks, parents = (1..3).associate { "c$it" to "p" }).running)

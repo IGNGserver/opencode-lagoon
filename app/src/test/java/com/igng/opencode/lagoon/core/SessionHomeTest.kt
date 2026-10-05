@@ -61,6 +61,15 @@ class SessionHomeTest {
     assertEquals(SessionStatus.NONE, idle.copy(notices = unseen.notices.map { it.copy(viewed = true) }).sessionStatus(root))
   }
 
+  @Test fun runningWhileTheAppWasAwayShowsAsBackgroundRunningAndAttentionStillWins() {
+    val root = Session("root", "/repo", "Root", 1)
+    val away = LagoonState(sessions = listOf(root), tasks = mapOf("root" to TaskState("root", TaskPhase.THINKING)), backgroundRunning = setOf("root"))
+    assertEquals(SessionStatus.BACKGROUND_RUNNING, away.sessionStatus(root))
+    // 需要处理优先于“后台运行中”。
+    val waiting = away.copy(tasks = mapOf("root" to TaskState("root", TaskPhase.WAITING_QUESTION)))
+    assertEquals(SessionStatus.WAITING_QUESTION, waiting.sessionStatus(root))
+  }
+
   @Test fun modernEventsRetainExecutionTimestampAndInterruptedRunsCreateNoUnreadResult() {
     val event = """{"id":"event","type":"session.execution.failed","created":200,"data":{"sessionID":"root","error":{"message":"failed"}}}""".toServerEvent("")
     val root = Session("root", "/repo", "Root", 1)

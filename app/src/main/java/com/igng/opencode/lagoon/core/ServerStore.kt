@@ -123,6 +123,11 @@ class ServerStore internal constructor(private val preferences: SharedPreference
   fun rememberPinnedSessions(server: String, ids: Set<String>) {
     preferences.edit().putStringSet("pinned:$server", ids.toSet()).apply()
   }
+  /** 曾在应用处于后台时仍在运行的根会话；回到前台后保留到该轮结束。 */
+  fun backgroundRunning(server: String): Set<String> = preferences.getStringSet("backgroundRunning:$server", emptySet()).orEmpty().toSet()
+  fun rememberBackgroundRunning(server: String, ids: Set<String>) {
+    preferences.edit().putStringSet("backgroundRunning:$server", ids.toSet()).apply()
+  }
 
   /** 自动刷新频率（标准 / 更快）；缺省「更快」。 */
   fun refreshMode(): RefreshMode = runCatching {
@@ -281,6 +286,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
     val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedSections:$id").remove("collapsedProjects:$id").remove("pinned:$id")
+      .remove("backgroundRunning:$id")
       .remove("modelVisibility:$id").remove("recentModels:$id").remove("scope:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)

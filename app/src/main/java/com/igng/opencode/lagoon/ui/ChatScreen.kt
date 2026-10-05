@@ -161,6 +161,8 @@ private fun SessionSubtitle(state: LagoonState, session: Session) {
     SessionStatus.RUNNING -> { InfiniteProgressIndicator(color = MiuixTheme.colorScheme.primary, size = 12.dp, strokeWidth = 1.5.dp, orbitingDotSize = 1.5.dp); Spacer(Modifier.width(6.dp)) }
     SessionStatus.WAITING_PERMISSION, SessionStatus.WAITING_QUESTION, SessionStatus.FAILED ->
       Text("${status.label} · ", style = MiuixTheme.textStyles.footnote1.copy(color = if (status == SessionStatus.FAILED) MiuixColorTokens.Error else MiuixColorTokens.Warning))
+    SessionStatus.BACKGROUND_RUNNING ->
+      Text("${status.label} · ", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.primary))
     else -> {}
   }
   Text(listOfNotNull(state.server?.name, resolveSessionProject(session, state.projects)?.name).joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis,
