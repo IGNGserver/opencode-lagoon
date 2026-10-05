@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
       val systemDark = isSystemInDarkTheme()
       val dark = themeMode == ThemeMode.DARK || themeMode == ThemeMode.SYSTEM && systemDark
       var previewBack by remember { mutableStateOf(preferences.getBoolean("previewBack", true)) }
+      var refreshMode by remember { mutableStateOf(controller.currentRefreshMode()) }
       var currentPage by rememberSaveable { mutableStateOf(RootPage.HOME) }
       var sessionStack by rememberSaveable { mutableStateOf(emptyList<String>()) }
       var navigationServer by rememberSaveable { mutableStateOf(state.serverId) }
@@ -155,13 +156,19 @@ class MainActivity : ComponentActivity() {
       val backProgress = remember { Animatable(0f) }
       var gestureActive by remember { mutableStateOf(false) }
       var gestureRoute by remember { mutableStateOf<NavRoute?>(null) }
+      // 手势方向：页面朝手指来向移动（左边缘 +1 / 右边缘 -1）。
+      var backDirection by remember { mutableStateOf(1) }
       // The real page a back gesture returns to, drawn under the outgoing one while the finger moves.
       var peekRoute by remember { mutableStateOf<NavRoute?>(null) }
+      val screenWidthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
       PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects) { progress ->
         gestureActive = true; gestureRoute = route
         peekRoute = navigation.back().route.takeIf { previewBack && it.session == null }
         try {
-          progress.collect { if (previewBack) backProgress.snapTo(it.progress.coerceIn(0f, 1f)) }
+          progress.collect { event ->
+            backDirection = backSwipeDirection(event.swipeEdge, event.touchX, screenWidthPx)
+            if (previewBack) backProgress.snapTo(event.progress.coerceIn(0f, 1f))
+          }
           peekRoute = null
           goBack()
           // Leave the outgoing surface at its gesture position until its exit transition finishes.
@@ -178,7 +185,7 @@ class MainActivity : ComponentActivity() {
           topBar = {},
           bottomBar = {}
         ) { insets ->
-          Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background)) {
+          Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
             @Composable
             fun Page(target: NavRoute, active: Boolean) {
               val displayed = if (target.session == state.sessionId) state else snapshots["${state.serverId}:${target.session}"] ?: state
@@ -186,7 +193,7 @@ class MainActivity : ComponentActivity() {
                 target.session == DRAFT_SESSION -> DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
                 target.session != null -> ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
                 target.page == RootPage.ARCHIVED -> ArchivedScreen(state, controller, onOpen = { openSession(it) }, onBack = { goBack() })
-                target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
+                target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, refreshMode, { refreshMode = it; controller.setRefreshMode(it) }, {
                   if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                   else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
                 }, ::editServer, onBack = { goBack() })
@@ -196,7 +203,9 @@ class MainActivity : ComponentActivity() {
               }
             }
             peekRoute?.let { peek ->
-              Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } }) { Page(peek, active = false) }
+              Box(Modifier.fillMaxSize().graphicsLayer {
+                if (gestureActive) translationX = -backDirection * (1f - backProgress.value) * size.width * 0.25f
+              }.pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } }) { Page(peek, active = false) }
             }
             AnimatedContent(route, transitionSpec = {
               // The first send turns the draft into the real session in place, without a page change.
@@ -212,9 +221,13 @@ class MainActivity : ComponentActivity() {
             }, label = "navigation") { target ->
               val active = target == route
               Box(Modifier.fillMaxSize().graphicsLayer {
-                if (target == gestureRoute && gestureActive) { translationX = backProgress.value * size.width * 0.16f; scaleX = 1f - backProgress.value * 0.02f; scaleY = scaleX }
+                if (target == gestureRoute && gestureActive) {
+                  translationX = backDirection * backProgress.value * size.width * 0.28f
+                  scaleX = 1f - backProgress.value * 0.04f; scaleY = scaleX
+                  alpha = 1f - backProgress.value * 0.12f
+                }
               }.then(if (active) Modifier else Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
-                .background(MiuixTheme.colorScheme.background)) {
+                .background(MiuixTheme.colorScheme.surface)) {
                 val key = when {
                   target.session == DRAFT_SESSION -> "draft:${state.serverId}:$draftNonce"
                   target.session != null -> "chat:${state.serverId}:${target.session}"

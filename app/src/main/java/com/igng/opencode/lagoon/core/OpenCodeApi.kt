@@ -88,7 +88,6 @@ class OpenCodeApi(
   @Volatile private var version: String? = null
   @Volatile private var discoveredCapabilities: ApiCapabilities? = null
   fun capabilities(): ApiCapabilities = discoveredCapabilities ?: ApiCapabilities.BASELINE
-  fun supportsSavedPermissions() = capabilities().savedPermissions
 
   /** Reads the instance's own OpenAPI document once; routes that moved between 2.0.x releases are taken from it. */
   suspend fun discoverCapabilities(): ApiCapabilities {
@@ -430,13 +429,6 @@ class OpenCodeApi(
     request("POST", sessionPath(request.sessionId, "/form/${segment(request.id)}/reply"), body = JSONObject().put("answer", formAnswer(request, answers)))
   }
   suspend fun rejectQuestion(request: QuestionRequest) { request("DELETE", sessionPath(request.sessionId, "/form/${segment(request.id)}")) }
-  suspend fun savedPermissions(projectId: String): List<SavedPermission> {
-    check(capabilities().savedPermissions) { "此版本不支持已保存权限管理" }
-    return dataArray(obj("api/permission/saved", mapOf("projectID" to projectId))).objects().map {
-      SavedPermission(it.str("id"), it.str("projectID"), it.str("action"), it.str("resource"))
-    }
-  }
-  suspend fun revokePermission(id: String) { check(capabilities().savedPermissions); request("DELETE", "api/permission/saved/${segment(id)}") }
   suspend fun children(session: Session): List<Session> = dataObjects("api/session", mapOf("parentID" to session.id)).map { it.toSession() }
   suspend fun diff(session: Session): List<FileChange> =
     if (capabilities().diff) dataArray(obj(sessionPath(session.id, "/diff"))).objects().map { it.toChange() } else unsupported("服务器不提供改动记录")

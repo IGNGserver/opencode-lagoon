@@ -124,6 +124,14 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     preferences.edit().putStringSet("pinned:$server", ids.toSet()).apply()
   }
 
+  /** 自动刷新频率（标准 / 更快）；缺省「更快」。 */
+  fun refreshMode(): RefreshMode = runCatching {
+    RefreshMode.valueOf(preferences.getString("refreshMode", RefreshMode.FAST.name)!!)
+  }.getOrDefault(RefreshMode.FAST)
+  fun rememberRefreshMode(mode: RefreshMode) {
+    preferences.edit().putString("refreshMode", mode.name).apply()
+  }
+
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(id: String? = selectedId()): String? = id?.let { preferences.getString("location:$it:project", null)
     ?: preferences.getString("selectedProject", null).takeIf { selectedId() == id } }

@@ -23,4 +23,13 @@ class SlideDirectionTest {
   @Test fun replacingAChatAtTheSameDepthEntersFromTheRight() {
     assertEquals(1, slideDirection(SessionNavigation().open("a").route, SessionNavigation().open("b").route))
   }
+
+  @Test fun backSwipeFollowsTheEdgeTheFingerCameFrom() {
+    // 左边缘滑入 → 内容向右；右边缘滑入 → 内容向左。
+    assertEquals(1, backSwipeDirection(0, 0f, 1000))
+    assertEquals(-1, backSwipeDirection(1, 1000f, 1000))
+    // 无法判定边缘时按触点相对屏幕中点兜底。
+    assertEquals(1, backSwipeDirection(-1, 100f, 1000))
+    assertEquals(-1, backSwipeDirection(-1, 900f, 1000))
+  }
 }

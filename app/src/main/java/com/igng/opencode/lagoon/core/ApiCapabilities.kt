@@ -14,7 +14,7 @@ data class ArchiveEndpoint(val endpoint: ActionEndpoint, val restorable: Boolean
  * directly; only what moved or was added later is resolved here:
  * - rename: `POST /rename` (2.0.0–2.0.x) → `PATCH /api/session/{id}` with `title`;
  * - unrevert: `POST /revert/clear` → `DELETE /revert`;
- * - diff, view and saved permissions only exist on newer releases;
+ * - diff and view only exist on newer releases;
  * - archiving is not part of the published 2.x contract. It is offered only when the instance documents
  *   `time.archived` on its session update body ([ArchiveEndpoint]); otherwise archived sessions are only
  *   listed, never written.
@@ -22,7 +22,6 @@ data class ArchiveEndpoint(val endpoint: ActionEndpoint, val restorable: Boolean
 data class ApiCapabilities(
   val actions: Map<SessionAction, ActionEndpoint> = emptyMap(),
   val diff: Boolean = false,
-  val savedPermissions: Boolean = false,
   val sessionView: ActionEndpoint? = null,
   val archive: ArchiveEndpoint? = null,
   /** True when [fromDocument] read the instance's own OpenAPI document. */
@@ -36,7 +35,7 @@ data class ApiCapabilities(
         SessionAction.RENAME to ActionEndpoint("PATCH", "api/session/{id}"),
         SessionAction.UNREVERT to ActionEndpoint("DELETE", "api/session/{id}/revert")
       ),
-      diff = true, savedPermissions = true, sessionView = ActionEndpoint("POST", "api/session/{id}/view")
+      diff = true, sessionView = ActionEndpoint("POST", "api/session/{id}/view")
     )
 
     fun fromDocument(document: JSONObject): ApiCapabilities {
@@ -77,7 +76,7 @@ data class ApiCapabilities(
           raw.optJSONArray("type")?.let { types -> (0 until types.length()).any { types.optString(it) == "null" } } == true
         ArchiveEndpoint(ActionEndpoint("PATCH", path.removePrefix("/")), restorable)
       }
-      return ApiCapabilities(actions, endpoint("/diff", "GET") != null, paths.obj("/api/permission/saved").has("get"),
+      return ApiCapabilities(actions, endpoint("/diff", "GET") != null,
         endpoint("/view", "POST", setOf("idle")), archive, documented = true)
     }
   }

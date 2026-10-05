@@ -28,7 +28,12 @@ data class TranscriptRow(
   val meta: String = "",
   val copyText: String? = null,
   /** A child session this row links to (subagent tool or result notice). */
-  val target: String? = null
+  val target: String? = null,
+  /**
+   * 该行是某个分组行的明细，取值即分组行的 key；null 表示主时间线行。主时间线不渲染明细，
+   * 点击分组行时由 [TranscriptRows.details] 取同一批行在半屏窗口里滚动查看。
+   */
+  val detailOf: String? = null
 )
 
 object TranscriptRows {
@@ -78,6 +83,21 @@ object TranscriptRows {
       rows += turnRows(turn, "turn:${turn.id}", expanded, working && index == turns.lastIndex)
     }
     return rows.withUniqueKeys()
+  }
+
+  /** 分组行的 kind（点击后弹半屏窗口看明细的入口）。 */
+  private val GROUP_KINDS = setOf("tool", "context-group", "tool-summary", "diff-summary")
+
+  /**
+   * 点击分组行时，半屏窗口要展示的明细。与主时间线共用同一套投影：把该分组（以及它直接包含的
+   * 下一级分组）标记为展开后重建，再取出带 [TranscriptRow.detailOf] 的行，顺序与官方时间线一致。
+   */
+  fun details(messages: List<Message>, key: String, working: Boolean = false, revertMessageId: String? = null): List<TranscriptRow> {
+    if (key.isBlank()) return emptyList()
+    val first = build(messages, setOf(key), working, revertMessageId)
+    val childGroups = first.filter { it.detailOf == key && it.kind in GROUP_KINDS }.map { it.key }.toSet()
+    val rows = if (childGroups.isEmpty()) first else build(messages, setOf(key) + childGroups, working, revertMessageId)
+    return rows.filter { it.detailOf != null }
   }
 
   /**
@@ -142,7 +162,7 @@ object TranscriptRows {
       if (run.size >= SUMMARY_THRESHOLD) {
         val key = "$turnKey:summary:${run.first().first}"
         body += TranscriptRow(key, "tool-summary", title = "已处理 ${run.size} 个操作")
-        if (key in expanded) body += folded
+        if (key in expanded) body += folded.map { it.copy(detailOf = key) }
       } else body += folded
       run.clear()
     }
@@ -199,10 +219,10 @@ object TranscriptRows {
         if (key in expanded) edits.take(MAX_DIFF_FILES).forEach { (ref, edit) ->
           val path = edit.files.joinToString("、").ifBlank { inputString(edit, "path") }.ifBlank { "改动" }
           val patch = edit.patch.ifBlank { edit.output }
-          rows += TranscriptRow("$key:$ref", "diff-file", title = path)
+          rows += TranscriptRow("$key:$ref", "diff-file", title = path, detailOf = key)
           MarkdownBlocks.chunks(patch).forEachIndexed { index, chunk ->
             rows += TranscriptRow("$key:$ref:$index", "tool-body", title = if (index == 0) "改动" else "", text = chunk,
-              copyText = patch.takeIf { index == 0 })
+              copyText = patch.takeIf { index == 0 }, detailOf = key)
           }
         }
       }
@@ -242,7 +262,7 @@ object TranscriptRows {
     return listOf(TranscriptRow(key, "context-group", title = "已收集上下文", subtitle = summary, status = parts.last().status)) +
       if (key !in expanded) emptyList() else refs.map { (ref, part) ->
         val (title, subtitle) = toolInfo(part)
-        TranscriptRow("$key:$ref", "context-item", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status)
+        TranscriptRow("$key:$ref", "context-item", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status, detailOf = key)
       }
   }
 
@@ -254,7 +274,7 @@ object TranscriptRows {
     return listOf(row) + if (key !in expanded) emptyList() else toolSections(part).flatMap { section ->
       MarkdownBlocks.chunks(section.text).mapIndexed { index, chunk ->
         TranscriptRow("$key:${section.label}:$index", "tool-body", title = if (index == 0) section.label else "", text = chunk,
-          copyText = section.copyText?.takeIf { index == 0 })
+          copyText = section.copyText?.takeIf { index == 0 }, detailOf = key)
       }
     }
   }

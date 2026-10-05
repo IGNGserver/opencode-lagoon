@@ -108,21 +108,12 @@ class TaskNotifications(private val context: Context) {
     if (permission.always.isNotEmpty()) append("\n记住规则：").append(permission.always.joinToString(", ").take(200))
   }
 
-  /** Minimal, persistent notification for the monitoring foreground service (A09). It is separate
-   *  from the per-session result notifications so removing the foreground state never removes a
-   *  real task result. Its text mirrors the server-wide island summary when available. */
-  fun buildMonitoring(summary: TaskSummary? = null): Notification = NotificationCompat.Builder(context, RUNNING)
-    .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
-    .setContentTitle("OpenCode 任务监控中")
-    .setContentText(summary?.text ?: "仅跟踪当前服务器；切换后结束本地监控")
-    .setOngoing(true).setShowWhen(false).setCategory(NotificationCompat.CATEGORY_SERVICE)
-    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-    .build()
-
   fun show(profile: ServerProfile, session: Session, state: TaskState, permission: PermissionRequest? = null) {
     if (!allowed()) return
     if (!profile.notifications) return
     if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
+    // 只有「需要处理」与终态结果发普通通知；运行中一律交给灵动岛总览，避免通知中心堆积。
+    if (state.phase in TaskState.RUNNING_PHASES) return
     val store = ServerStore(context)
     val previous = store.taskStates(profile.id)[session.id]
     val next = store.rememberTask(profile.id, if (previous != null && previous.phase == state.phase) state.copy(since = previous.since) else state, session.parentId)
@@ -174,9 +165,15 @@ class TaskNotifications(private val context: Context) {
 
   fun showSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?) {
     val stage = LiveUpdateContent.stageOf(summary)
+    // 只有进行中的任务上岛。全部结束后不再保留任何总览通知：结果交给每会话的完成/失败通知，
+    // 这样通知中心在空闲时不会留一条“N 已完成”的汇总。
+    if (stage != LiveUpdateStage.ACTIVE) {
+      SummaryDismissals.clear(context, profile.id)
+      manager.cancel(summaryId(profile.id))
+      return
+    }
     val dismissed = SummaryDismissals.stage(context, profile.id)
-    // Any stage change ends the user's dismissal, so a new run or a final result shows again.
-    if (dismissed != null && dismissed != stage) SummaryDismissals.clear(context, profile.id)
+    // 用户划掉后，只要阶段没变就不重发；阶段一变（例如此轮结束又重新开始）再展示。
     if (!allowed() || !profile.notifications || !LiveUpdateContent.shouldPost(stage, dismissed)) {
       manager.cancel(summaryId(profile.id))
       return

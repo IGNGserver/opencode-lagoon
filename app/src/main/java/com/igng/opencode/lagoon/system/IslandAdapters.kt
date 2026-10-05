@@ -68,6 +68,17 @@ internal object IslandRegistry {
       .getOrElse { IslandSupport(adapter.vendor, "检测失败", false, false, it.message.orEmpty()) }
   }
 
+  /**
+   * 当前设备实际生效的唯一通道：按能力取第一个支持的通道（Android 16 标准实时更新 / vivo 原子岛），
+   * 都不支持时回退到标准通道（此时只是普通通知）。设置页只展示这一条，不再罗列每个品牌。
+   */
+  fun current(context: Context, profile: ServerProfile?): IslandSupport =
+    currentOf(diagnostics(context, profile))
+
+  /** [current] 的纯选择逻辑，便于单测。 */
+  internal fun currentOf(support: List<IslandSupport>): IslandSupport =
+    support.firstOrNull { it.supported } ?: support.first()
+
   /** 测试用：已注册通道的 vendor 列表。 */
   internal fun registeredVendorsForTest(): List<String> = adapters.map { it.vendor }
 }

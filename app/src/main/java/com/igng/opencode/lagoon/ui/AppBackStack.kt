@@ -40,3 +40,14 @@ internal data class NavRoute(val page: RootPage, val session: String?, val depth
  * (menu, back gesture, notification).
  */
 internal fun slideDirection(from: NavRoute, to: NavRoute): Int = if (to.depth < from.depth) -1 else 1
+
+/**
+ * 预测式返回时页面跟随手指的方向：+1 表示内容向右移动（从左侧边缘滑入的返回手势），
+ * -1 表示内容向左移动（从右侧边缘滑入）。[edge] 取 `BackEventCompat.EDGE_LEFT`(0) /
+ * `EDGE_RIGHT`(1)；无法判定方向时用 [touchX] 相对屏幕中点兜底。
+ */
+internal fun backSwipeDirection(edge: Int, touchX: Float, width: Int): Int = when (edge) {
+  1 -> -1
+  0 -> 1
+  else -> if (width > 0 && touchX > width / 2f) -1 else 1
+}

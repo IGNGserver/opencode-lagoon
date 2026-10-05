@@ -16,7 +16,7 @@ class ApiCapabilitiesTest {
     val caps = ApiCapabilities.fromDocument(document)
     assertEquals(ActionEndpoint("PATCH", "api/session/{sessionID}"), caps.actions[SessionAction.RENAME])
     assertEquals(ActionEndpoint("DELETE", "api/session/{sessionID}/revert"), caps.actions[SessionAction.UNREVERT])
-    assertTrue(caps.diff); assertTrue(caps.savedPermissions); assertNotNull(caps.sessionView); assertTrue(caps.documented)
+    assertTrue(caps.diff); assertNotNull(caps.sessionView); assertTrue(caps.documented)
   }
   @Test fun unknownRequiredWriteFieldsKeepTheActionUnavailable() {
     val doc = JSONObject("""{"paths":{"/api/session/{id}/rename":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title","unknown"]}}}}}}}}""")
