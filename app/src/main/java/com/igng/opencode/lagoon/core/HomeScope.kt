@@ -50,6 +50,3 @@ object HomeScope {
 
   fun child(path: String, name: String): String = path.trimEnd('/') + "/" + name
 }
-
-/** One folder listing from the server-side project browser. */
-data class DirectoryListing(val path: String, val directories: List<String> = emptyList(), val status: ResourceStatus = ResourceStatus(ResourceState.LOADING), val home: String? = null)

@@ -121,9 +121,8 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
 @Composable
 fun DraftScreen(state: LagoonState, controller: LagoonController, onBack: () -> Unit, onModal: (Boolean) -> Unit, interactive: Boolean = true) {
   var targetPicker by remember { mutableStateOf(false) }
-  var addProject by remember { mutableStateOf(false) }
   var composerModal by remember { mutableStateOf(false) }
-  val modal = targetPicker || addProject || composerModal
+  val modal = targetPicker || composerModal
   DisposableEffect(modal) { onModal(modal); onDispose { onModal(false) } }
   Column(Modifier.fillMaxSize()) {
     PageTopBar("新会话", onBack, subtitle = {
@@ -150,8 +149,7 @@ fun DraftScreen(state: LagoonState, controller: LagoonController, onBack: () -> 
       // gets a fresh saveable key from MainActivity, so nothing needs clearing here.
       onSend = { text, _ -> controller.startSession("", text, state.agent.takeIf { state.agentChanged }, state.model.takeIf { state.modelChanged }) })
   }
-  if (targetPicker) DraftTargetSheet(state, controller, { targetPicker = false }) { targetPicker = false; addProject = true }
-  if (addProject) DirectoryBrowserSheet(state, controller, { addProject = false }) { addProject = false }
+  if (targetPicker) DraftTargetSheet(state, controller) { targetPicker = false }
 }
 
 /** “服务器 · 项目” under a chat title, led by the session's live state (running spinner / waiting / failed). */
@@ -272,6 +270,30 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
   val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
   val answerRows = answers.mapIndexed { index, list -> custom[index].trim().takeIf { it.isNotEmpty() }?.let { if (request.questions[index].multiple) list + it else listOf(it) } ?: list }
   val fieldValues = if (request.form) request.questions.mapIndexed { i, q -> org.json.JSONObject(q.field).str("key") to answerRows[i] }.toMap() else emptyMap()
+  // Form fields with a `when` condition can vanish as earlier answers change, so page over what is visible now.
+  fun questionField(index: Int) = request.questions[index].field.takeIf { it.isNotBlank() }?.let { org.json.JSONObject(it) }
+  val visibleIndices = request.questions.indices.filter { index ->
+    val field = questionField(index)
+    field == null || formVisible(field, fieldValues)
+  }
+  val lastPage = visibleIndices.lastIndex.coerceAtLeast(0)
+  var page by rememberSaveable(request.id, request.questions.hashCode()) { mutableIntStateOf(0) }
+  val currentPage = page.coerceIn(0, lastPage)
+  fun answered(index: Int): Boolean {
+    val question = request.questions[index]
+    val field = questionField(index)
+    if (field?.str("type") == "external") return true
+    val chosen = answers.getOrElse(index) { emptyList() }.isNotEmpty()
+    val text = custom.getOrElse(index) { "" }.trim().isNotEmpty()
+    val type = field?.str("type")
+    val customAllowed = question.custom || type == "string" || type == "number" || type == "integer"
+    return chosen || (customAllowed && text)
+  }
+  fun required(index: Int): Boolean = if (request.form) questionField(index)?.optBoolean("required") == true else true
+  val currentIndex = visibleIndices.getOrNull(currentPage)
+  val currentReady = currentIndex == null || !required(currentIndex) || answered(currentIndex)
+  val submitEnabled = !pending && (if (request.form) runCatching { formAnswer(request, answerRows) }.isSuccess
+    else answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) })
 
   Card(
     modifier = Modifier.fillMaxWidth(),
@@ -279,76 +301,95 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
     colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer)
   ) {
     MiuixStatePill(TaskPhase.WAITING_QUESTION, "需要你的回答")
-    request.questions.forEachIndexed { index, question ->
-      val field = question.field.takeIf { it.isNotBlank() }?.let { org.json.JSONObject(it) }
-      if (field != null && !formVisible(field, fieldValues)) return@forEachIndexed
+    if (visibleIndices.size > 1) {
+      Spacer(Modifier.height(10.dp))
+      Text("第 ${currentPage + 1}/${visibleIndices.size} 项", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+    }
+    val index = currentIndex
+    if (index == null) {
+      Spacer(Modifier.height(10.dp))
+      Text("这个表单暂无可填写的字段。", style = MiuixTheme.textStyles.body2)
+    } else {
+      val question = request.questions[index]
+      val field = questionField(index)
+      Spacer(Modifier.height(10.dp))
+      Text(question.title, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
       if (field?.str("type") == "external") {
-        Text(question.title, style = MiuixTheme.textStyles.headline2)
         val url = field.str("url")
         if (url.startsWith("https://")) {
           TextButton(text = "打开外部表单页面", onClick = { uriHandler.openUri(url) })
         } else {
           Text("外部页面仅支持 HTTPS，请在服务器确认此项", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixColorTokens.Warning))
         }
-        return@forEachIndexed
-      }
-      Spacer(Modifier.height(10.dp))
-      Text(question.title, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-      question.options.forEach { option ->
-        Row(
-          modifier = Modifier
-            .fillMaxWidth()
-            .clickable {
-              answers = answers.toMutableList().also { list ->
-                list[index] = if (question.multiple) {
-                  if (option.value in list[index]) list[index] - option.value else list[index] + option.value
-                } else listOf(option.value)
+      } else {
+        question.options.forEach { option ->
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clickable {
+                answers = answers.toMutableList().also { list ->
+                  list[index] = if (question.multiple) {
+                    if (option.value in list[index]) list[index] - option.value else list[index] + option.value
+                  } else listOf(option.value)
+                }
+                if (!question.multiple) custom = custom.toMutableList().also { it[index] = "" }
               }
-              if (!question.multiple) custom = custom.toMutableList().also { it[index] = "" }
+              .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            if (question.multiple) {
+              Checkbox(checked = option.value in answers[index], onCheckedChange = { isChecked ->
+                answers = answers.toMutableList().also { list ->
+                  list[index] = if (isChecked) list[index] + option.value else list[index] - option.value
+                }
+              })
+            } else {
+              RadioButton(selected = option.value in answers[index], onClick = {
+                answers = answers.toMutableList().also { list ->
+                  list[index] = listOf(option.value)
+                }
+                custom = custom.toMutableList().also { it[index] = "" }
+              })
             }
-            .padding(vertical = 6.dp),
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          if (question.multiple) {
-            Checkbox(checked = option.value in answers[index], onCheckedChange = { isChecked ->
-              answers = answers.toMutableList().also { list ->
-                list[index] = if (isChecked) list[index] + option.value else list[index] - option.value
+            Spacer(Modifier.width(10.dp))
+            Column {
+              Text(option.label, style = MiuixTheme.textStyles.body2)
+              if (option.description.isNotBlank()) {
+                Text(option.description, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
               }
-            })
-          } else {
-            RadioButton(selected = option.value in answers[index], onClick = {
-              answers = answers.toMutableList().also { list ->
-                list[index] = listOf(option.value)
-              }
-              custom = custom.toMutableList().also { it[index] = "" }
-            })
-          }
-          Spacer(Modifier.width(10.dp))
-          Column {
-            Text(option.label, style = MiuixTheme.textStyles.body2)
-            if (option.description.isNotBlank()) {
-              Text(option.description, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
             }
           }
         }
-      }
-      if (question.custom) {
-        Spacer(Modifier.height(6.dp))
-        TextField(
-          value = custom[index],
-          onValueChange = { value: String -> custom = custom.toMutableList().also { it[index] = value } },
-          useLabelAsPlaceholder = true,
-          label = "输入自定义回答…",
-          modifier = Modifier.fillMaxWidth()
-        )
+        if (question.custom) {
+          Spacer(Modifier.height(6.dp))
+          TextField(
+            value = custom[index],
+            onValueChange = { value: String -> custom = custom.toMutableList().also { it[index] = value } },
+            useLabelAsPlaceholder = true,
+            label = "输入自定义回答…",
+            modifier = Modifier.fillMaxWidth()
+          )
+        }
       }
     }
-    DialogActions("取消", { if (!pending) controller.rejectQuestion(request) }, if (pending) "正在提交…" else "提交回答",
-      enabled = !pending && (if (request.form) runCatching { formAnswer(request, answerRows) }.isSuccess else answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) })) {
-      controller.replyQuestion(request, answers.mapIndexed { index, list ->
-        val value = custom[index].trim()
-        if (value.isBlank()) list else if (request.questions[index].multiple) list + value else listOf(value)
-      })
+    Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+      TextButton(text = "取消", enabled = !pending, onClick = { if (!pending) controller.rejectQuestion(request) }, modifier = Modifier.weight(1f))
+      if (currentPage > 0) {
+        TextButton(text = "上一页", enabled = !pending, onClick = { page = currentPage - 1 }, modifier = Modifier.weight(1f))
+      }
+      if (currentPage < lastPage) {
+        TextButton(text = "下一页", enabled = !pending && currentReady, onClick = { page = currentPage + 1 }, modifier = Modifier.weight(1f),
+          colors = ButtonDefaults.textButtonColorsPrimary())
+      } else {
+        TextButton(text = if (pending) "正在提交…" else "提交回答", enabled = submitEnabled,
+          onClick = {
+            controller.replyQuestion(request, answers.mapIndexed { idx, list ->
+              val value = custom[idx].trim()
+              if (value.isBlank()) list else if (request.questions[idx].multiple) list + value else listOf(value)
+            })
+          },
+          modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
+      }
     }
   }
 }

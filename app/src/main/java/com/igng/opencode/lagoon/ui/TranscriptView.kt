@@ -23,6 +23,8 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -41,8 +43,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.Copy
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.miuixCapsuleShape
 
 private val markdownCache = object : LinkedHashMap<String, Pair<String, List<MarkdownBlock>>>(32, 0.75f, true) {
   override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, List<MarkdownBlock>>>?) = size > 32
@@ -78,23 +82,56 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
     val count = list.layoutInfo.totalItemsCount
     if (count > 0) { autoScroll = true; list.scrollToItem(count - 1); list.scrollBy(list.layoutInfo.viewportEndOffset.toFloat()); autoScroll = false }
   }
-  LaunchedEffect(contentKey, rows.size, state.pending("send")) {
+  // Only a new message or a fresh send moves the viewport. Expanding or collapsing a row never scrolls,
+  // so the row the reader is looking at keeps its place.
+  LaunchedEffect(contentKey, state.pending("send")) {
     if (state.pending("send")) follow = true
-    if (follow) { scrollBottom(); newContent = false } else if (rows.isNotEmpty()) newContent = true
+    if (follow) { scrollBottom(); newContent = false } else if (state.messages.isNotEmpty()) newContent = true
+  }
+  // Reaching the top pulls the previous page automatically; a spinner shows until it lands.
+  val loadingOlder = state.pending("messages-more")
+  val atTop by remember { derivedStateOf {
+    val info = list.layoutInfo
+    info.totalItemsCount > 0 && (info.visibleItemsInfo.firstOrNull()?.index ?: Int.MAX_VALUE) <= 1
+  } }
+  LaunchedEffect(atTop, state.messagesCursor, loadingOlder, state.connected, state.cached) {
+    if (atTop && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
+      follow = false
+      controller.loadOlderMessages()
+    }
   }
   val permissions = state.permissions.filter { it.sessionId == state.sessionId }
   val questions = state.questions.filter { it.sessionId == state.sessionId }
   Box(modifier) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       if (state.cached) item { Text(if (state.cacheComplete) if (state.connected) "会话缓存 · 消息待同步" else "离线缓存 · 恢复连接后更新" else "离线缓存已截断，部分历史与长输出未保留", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1) }
-      if (state.messagesCursor != null) item { TextButton(text = if (state.pending("messages-more")) "正在加载…" else "加载更早消息", enabled = !state.pending("messages-more"), onClick = { follow = false; controller.loadOlderMessages() }) }
+      if (state.messagesCursor != null) item(key = "older-loader") {
+        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+          if (loadingOlder) InfiniteProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
+        }
+      }
       if (rows.isEmpty()) item { ResourceHint(state.resource("messages"), "会话尚无消息", "在下方输入第一项任务。", controller::reload) }
       items(rows, key = { it.key }, contentType = { it.kind }) { row -> TranscriptRowView(row, expanded, onFile, onOpenChild) }
       items(permissions, key = { "permission:${it.id}" }) { MiuixPermissionCard(it, controller, state.supportsSavedPermissions, onModal) }
       items(questions, key = { "question:${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
-    AnimatedVisibility(!nearBottom && rows.isNotEmpty(), modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)) {
-      TextButton(text = if (newContent) "新消息 ↓" else "回到底部 ↓", onClick = { follow = true; newContent = false; scope.launch { scrollBottom() } })
+    Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+      horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      if (expansions.isNotEmpty()) {
+        Row(Modifier.clip(miuixCapsuleShape()).background(MiuixTheme.colorScheme.secondaryContainer)
+          .clickable { expanded.clear() }.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+          Icon(MiuixIcons.ChevronForward, "收起全部", Modifier.size(16.dp).rotate(-90f), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+          Spacer(Modifier.width(6.dp))
+          Text("收起全部", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        }
+      }
+      AnimatedVisibility(!nearBottom && rows.isNotEmpty()) {
+        Box(Modifier.size(36.dp).clip(miuixCapsuleShape()).background(MiuixTheme.colorScheme.secondaryContainer)
+          .clickable { follow = true; newContent = false; scope.launch { scrollBottom() } }, contentAlignment = Alignment.Center) {
+          DropdownChevron(18.dp, tint = if (newContent) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            description = if (newContent) "有新消息，回到最新" else "回到底部")
+        }
+      }
     }
   }
 }
@@ -109,7 +146,8 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
     // One selection container per reply so a long press can select across paragraphs; the turn's final
     // answer is also copyable as a whole from the meta row below it.
     "text" -> SelectionContainer { Column { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
-    "reasoning" -> SelectionContainer { Column(Modifier.padding(start = 10.dp)) {
+    "reasoning" -> ExpandableRow(row, expanded)
+    "reasoning-body" -> SelectionContainer { Column(Modifier.padding(start = 10.dp)) {
       parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) }
     } }
     "meta" -> Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {

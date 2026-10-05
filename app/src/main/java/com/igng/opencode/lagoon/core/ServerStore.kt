@@ -155,10 +155,6 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     preferences.edit().putString("scope:$id", project.orEmpty()).apply()
   }
 
-  fun knownDirectories(id: String): Set<String> = preferences.getStringSet("directories:$id", emptySet()).orEmpty().toSet()
-  fun rememberDirectory(id: String, directory: String) {
-    preferences.edit().putStringSet("directories:$id", knownDirectories(id) + directory).apply()
-  }
   fun sessionPreview(server: String, session: String): SessionPreview = runCatching {
     val raw = secrets.getString("preview:$server:$session", null)?.let(decryptValue)
       ?: preferences.getString("preview:$server:$session", "{}").orEmpty()

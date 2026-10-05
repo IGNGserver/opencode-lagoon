@@ -63,8 +63,7 @@ data class SessionGroup(val key: String, val name: String, val sessions: List<Se
 fun groupSessions(sessions: List<Session>, projects: List<Project>): List<SessionGroup> =
   sessions.filter { it.visibleOnHome }.sortedWith(sessionActivityOrder).groupBy { session ->
     val project = resolveSessionProject(session, projects)
-    (project?.id ?: "dir:${normalizedDirectory(session.directory)}") to
-      (project?.name ?: session.directory.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { session.directory })
+    (project?.id ?: "unassigned") to (project?.name ?: "未归入项目")
   }.map { (key, list) -> SessionGroup(key.first, key.second, list) }
     .sortedWith(compareByDescending<SessionGroup> { it.latest }.thenBy { it.key })
 

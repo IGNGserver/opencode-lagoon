@@ -48,13 +48,16 @@ object HomeSections {
     return sessions.groupBy(::bucket).map { (key, list) -> HomeSection("date:${key.first}", key.second, list) }
   }
 
-  /** One section per project, ordered by its latest session; sessions outside known projects group by folder. */
+  /**
+   * One section per server project, ordered by its latest session. Sessions whose directory is not a
+   * server project are not shown as a project of their own — they collect under one 未归入项目 section.
+   */
   fun byProject(sessions: List<Session>, projects: List<Project>): List<HomeSection> =
-    sessions.groupBy { session ->
-      val project = resolveSessionProject(session, projects)
-      (project?.id ?: "dir:${normalizedDirectory(session.directory)}") to
-        (project?.name ?: session.directory.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { session.directory })
-    }.map { (key, list) -> HomeSection("project:${key.first}", key.second, list) }
+    sessions.groupBy { session -> resolveSessionProject(session, projects)?.id.orEmpty() }
+      .map { (projectId, list) ->
+        val project = projects.firstOrNull { it.id == projectId }
+        HomeSection("project:${projectId.ifBlank { "unassigned" }}", project?.name ?: "未归入项目", list)
+      }
 
   /** 需要处理 › 运行中 › 未读结果 › 其他, the order the official client ranks session indicators. */
   fun byStatus(sessions: List<Session>, statuses: Map<String, SessionStatus>): List<HomeSection> {
