@@ -18,13 +18,14 @@ class SessionExperienceTest {
     assertEquals("b", resolveSessionProject(Session("s", "/work/app/lib/src", "", 0), projects)?.id)
     assertNull(resolveSessionProject(Session("s", "/work/application", "", 0), projects))
   }
-  @Test fun configurationRecordsAndStepMarkersDoNotBecomeVisibleBubbles() {
+  @Test fun configurationRecordsAreNoticesNotBubblesAndIdleMarkersAreHidden() {
     val configuration = JSONObject("""{"id":"config","type":"model-switched","model":{"providerID":"p","id":"m"},"time":{"created":1}}""").toMessage()
-    assertFalse(configuration.isDisplayable)
+    assertEquals("notice", configuration.role)
+    assertEquals("已切换到 m", configuration.notice?.label)
     assertEquals("m", configuration.model?.modelId)
-    val step = Message("step", "assistant", 1, listOf(MessagePart("p", "step-start")))
-    assertFalse(step.isDisplayable)
-    assertEquals(SessionContent.EMPTY, listOf(configuration, step).sessionPreview().content)
+    val idle = JSONObject("""{"id":"idle","type":"idle","outcome":"succeeded","time":{"created":2}}""").toMessage()
+    assertFalse(idle.isDisplayable)
+    assertEquals(SessionContent.EMPTY, listOf(configuration, idle).sessionPreview().content)
   }
   @Test fun nativeFileAttachmentsPreserveUriMimeAndName() {
     val message = JSONObject("""{"id":"u","type":"user","text":"查看图片","files":[{"uri":"file:///project/logo.png","mime":"image/png","name":"logo.png"}],"time":{"created":1}}""").toMessage()
@@ -35,14 +36,14 @@ class SessionExperienceTest {
   }
   @Test fun terminalToolSnapshotCannotRestartACompletedTask() {
     val previous = TaskState("s", TaskPhase.COMPLETED, "done", 10, 20)
-    val result = TaskReducer.event("s", "message.part.updated", JSONObject("""{"part":{"type":"tool","tool":"bash","state":{"status":"completed"}}}"""), previous)
+    val result = TaskReducer.event("s", "session.tool.called", JSONObject("""{"name":"shell","input":{"command":"ls"}}"""), previous)
     assertEquals(previous, result)
   }
   @Test fun finishingRecordsFinishTimeWithoutDiscardingRunStart() {
-    val completed = TaskReducer.status("s", "idle", TaskState("s", TaskPhase.THINKING, since = 10))
+    val completed = TaskReducer.status("s", false, TaskState("s", TaskPhase.THINKING, since = 10))
     assertEquals(10L, completed.since)
     assertNotNull(completed.finishedAt)
-    val resumed = TaskReducer.status("s", "busy", TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10))
+    val resumed = TaskReducer.status("s", true, TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10))
     assertEquals(10L, resumed.since)
   }
   @Test fun parentAndThreeRunningChildrenCountAsOneMainTask() {

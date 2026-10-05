@@ -66,22 +66,4 @@ class HomeScopeTest {
       assertEquals(null, list.requestUrl!!.queryParameter("path"))
     }
   }
-
-  @Test fun v1BrowsesFoldersAsTheInstanceDirectory() = runBlocking {
-    MockWebServer().use { server ->
-      server.dispatcher = object : Dispatcher() {
-        override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
-          "/global/health" -> MockResponse().setBody("""{"healthy":true,"version":"1.0"}""")
-          "/path" -> MockResponse().setBody("""{"home":"/root","directory":"/srv"}""")
-          "/file" -> MockResponse().setBody("""[{"name":"src","path":"src","type":"directory"},{"name":"README.md","path":"README.md","type":"file"}]""")
-          else -> MockResponse().setResponseCode(404)
-        }
-      }
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      assertEquals("/root", api.browseRoot())
-      assertEquals(listOf("src"), api.listDirectories("/srv/repo"))
-      val file = List(server.requestCount) { server.takeRequest() }.single { it.requestUrl!!.encodedPath == "/file" }
-      assertEquals("/srv/repo", file.requestUrl!!.queryParameter("directory"))
-    }
-  }
 }

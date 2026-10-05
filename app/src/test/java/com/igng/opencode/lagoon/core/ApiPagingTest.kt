@@ -9,68 +9,55 @@ import org.junit.Test
 
 class ApiPagingTest {
   private fun api(server:MockWebServer)=OpenCodeApi(ServerProfile("server","Server",server.url("/").toString(),allowCleartext=true), "fixture")
-  @Test fun blankV1TitleIsOmittedSoTheServerCanNameTheSession()=runBlocking {
+  @Test fun blankTitleIsOmittedSoTheServerCanNameTheSession()=runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setBody("""{"id":"s","directory":"/repo","title":"New session - 2026-10-03T00:00:00Z","time":{}}"""))
-      val client=api(server);client.health();client.createSession("/repo", " ")
-      server.takeRequest();val request=server.takeRequest()
-      assertFalse(JSONObject(request.body.readUtf8()).has("title"))
-      assertEquals("/repo",request.requestUrl!!.queryParameter("directory"))
-    }
-  }
-  @Test fun nativePagesSendOrderOnlyOnFirstRequestAndKeepMessagesChronological()=runBlocking {
-    MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404));server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"s","location":{"directory":"/repo"},"time":{}}],"cursor":{"next":"session-next"}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[],"cursor":{}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[{"id":"m2","type":"user","time":{"created":2},"text":"second"},{"id":"m1","type":"user","time":{"created":1},"text":"first"}],"cursor":{"next":"message-next"}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":[],"cursor":{}}"""))
-      val client=api(server);client.health()
-      val sessions=client.sessionsPage("/repo");assertEquals("session-next",sessions.next)
-      client.sessionsPage("/repo",sessions.next)
-      val messages=client.messagesPage("s","/repo");assertEquals(listOf("m1","m2"),messages.items.map { it.id })
-      client.messagesPage("s","/repo",messages.next)
-      val requests=List(6) { server.takeRequest() }
-      assertEquals("desc",requests[2].requestUrl!!.queryParameter("order"))
-      assertNull(requests[3].requestUrl!!.queryParameter("order"));assertEquals("session-next",requests[3].requestUrl!!.queryParameter("cursor"))
-      assertEquals("desc",requests[4].requestUrl!!.queryParameter("order"))
-      assertNull(requests[5].requestUrl!!.queryParameter("order"));assertEquals("message-next",requests[5].requestUrl!!.queryParameter("cursor"))
+      server.enqueue(MockResponse().setBody("""{"data":{"id":"s","location":{"directory":"/repo"},"time":{}}}"""))
+      api(server).createSession("/repo", " ")
+      val body=JSONObject(server.takeRequest().body.readUtf8())
+      assertFalse(body.has("title"))
+      assertEquals("/repo",body.getJSONObject("location").getString("directory"))
     }
   }
   @Test fun rootCatalogIsGlobalAndRetainsCursorEvenWhenPageContainsOnlyHiddenSessions() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"hidden","parentID":"parent","location":{"directory":"/tree"},"time":{}}],"cursor":{"next":"next"}}"""))
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"root","location":{"directory":"/other"},"time":{}}],"cursor":{}}"""))
-      val client = api(server); client.health()
+      val client = api(server)
       val first = client.rootSessionsPage()
       assertTrue(groupSessions(first.items, emptyList()).isEmpty())
       assertEquals("next", first.next)
       assertEquals("root", client.rootSessionsPage(cursor = first.next).items.single().id)
-      val requests = List(4) { server.takeRequest() }
-      for (request in requests.drop(2)) {
+      val requests = List(2) { server.takeRequest() }
+      for (request in requests) {
         assertNull(request.requestUrl!!.queryParameter("directory"))
         assertEquals("null", request.requestUrl!!.queryParameter("parentID"))
       }
-      assertEquals("desc", requests[2].requestUrl!!.queryParameter("order"))
-      assertNull(requests[3].requestUrl!!.queryParameter("order"))
+      assertEquals("desc", requests[0].requestUrl!!.queryParameter("order"))
+      assertNull(requests[1].requestUrl!!.queryParameter("order"))
+    }
+  }
+  @Test fun childrenFollowCursorsWithTheParentFilter() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"c1","parentID":"p","location":{"directory":"/repo"},"time":{}}],"cursor":{"next":"more"}}"""))
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"c2","parentID":"p","location":{"directory":"/repo"},"time":{}}],"cursor":{}}"""))
+      assertEquals(listOf("c1", "c2"), api(server).children(Session("p", "/repo", "P", 0)).map { it.id })
+      server.takeRequest()
+      val next = server.takeRequest().requestUrl!!
+      assertEquals("p", next.queryParameter("parentID")); assertEquals("more", next.queryParameter("cursor"))
     }
   }
 
   @Test fun documentedViewSendsExactIdleCycleAndDoesNotUseTheCurrentTime() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setResponseCode(404)); server.enqueue(MockResponse().setBody("{}"))
       server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}/view":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"idle":{"type":"number"}},"required":["idle"]}}}}}}}}"""))
-      server.enqueue(MockResponse().setBody("""{"data":true}"""))
-      val client = api(server); client.health(); val capabilities = client.discoverCapabilities()
+      server.enqueue(MockResponse().setResponseCode(204))
+      val client = api(server); val capabilities = client.discoverCapabilities()
       assertNotNull(capabilities.sessionView)
       client.viewSession(Session("s", "/repo", "Title", 1, idle = 123), 123)
-      val request = List(5) { server.takeRequest() }.last()
+      val request = List(2) { server.takeRequest() }.last()
       assertEquals("POST", request.method)
       assertEquals("/api/session/s/view", request.requestUrl!!.encodedPath)
       assertEquals(123L, JSONObject(request.body.readUtf8()).getLong("idle"))
     }
   }
-
 }

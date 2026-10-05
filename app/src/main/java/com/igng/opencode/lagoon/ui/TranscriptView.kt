@@ -49,15 +49,17 @@ private fun parsed(key: String, text: String): List<MarkdownBlock> = synchronize
 }
 
 @Composable
-internal fun Conversation(state: LagoonState, controller: LagoonController, modifier: Modifier = Modifier, onFile: (String) -> Unit, onModal: (Boolean) -> Unit) {
+internal fun Conversation(state: LagoonState, controller: LagoonController, modifier: Modifier = Modifier, onFile: (String) -> Unit, onModal: (Boolean) -> Unit,
+  onOpenChild: (String) -> Unit = {}) {
   val list = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val expanded = rememberSaveable(saver = mapSaver(save = { it.toMap() }, restore = { map -> mutableStateMapOf<String, Boolean>().apply { map.forEach { (k, v) -> put(k, v as Boolean) } } })) { mutableStateMapOf<String, Boolean>() }
   val expansions = expanded.filterValues { it }.keys
   val working = state.tasks[state.sessionId]?.active == true
-  val rows by produceState(emptyList<TranscriptRow>(), state.messages, expansions, working) {
+  val revert = state.session?.revertMessageId
+  val rows by produceState(emptyList<TranscriptRow>(), state.messages, expansions, working, revert) {
     delay(32)
-    value = withContext(Dispatchers.Default) { TranscriptRows.build(state.messages, expansions, working) }
+    value = withContext(Dispatchers.Default) { TranscriptRows.build(state.messages, expansions, working, revert) }
   }
   var follow by rememberSaveable { mutableStateOf(list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0) }
   var newContent by remember { mutableStateOf(false) }
@@ -84,7 +86,7 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
       if (state.cached) item { Text(if (state.cacheComplete) if (state.connected) "会话缓存 · 消息待同步" else "离线缓存 · 恢复连接后更新" else "离线缓存已截断，部分历史与长输出未保留", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1) }
       if (state.messagesCursor != null) item { TextButton(text = if (state.pending("messages-more")) "正在加载…" else "加载更早消息", enabled = !state.pending("messages-more"), onClick = { follow = false; controller.loadOlderMessages() }) }
       if (rows.isEmpty()) item { ResourceHint(state.resource("messages"), "会话尚无消息", "在下方输入第一项任务。", controller::reload) }
-      items(rows, key = { it.key }, contentType = { it.kind }) { row -> TranscriptRowView(row, expanded, onFile) }
+      items(rows, key = { it.key }, contentType = { it.kind }) { row -> TranscriptRowView(row, expanded, onFile, onOpenChild) }
       items(permissions, key = { "permission:${it.id}" }) { MiuixPermissionCard(it, controller, state.supportsSavedPermissions, onModal) }
       items(questions, key = { "question:${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
@@ -95,7 +97,7 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
 }
 
 @Composable
-private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<String, Boolean>, onFile: (String) -> Unit) {
+private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<String, Boolean>, onFile: (String) -> Unit, onOpenChild: (String) -> Unit) {
   when (row.kind) {
     "time" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
       Text(row.text, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
@@ -114,8 +116,12 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
     "error" -> Column(Modifier.fillMaxWidth().background(MiuixColorTokens.ErrorSubtle, miuixSquircleShape(10.dp)).padding(12.dp)) {
       Text(row.text, color = MiuixColorTokens.Error, style = MiuixTheme.textStyles.body2)
     }
-    "note" -> Text("${row.title} · ${row.text}", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-    "tool", "context-group", "tool-summary", "diff-summary" -> ExpandableRow(row, expanded)
+    "note" -> NoticeRow(row, onOpenChild)
+    "tool" -> Column {
+      ExpandableRow(row, expanded)
+      row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
+    }
+    "context-group", "tool-summary", "diff-summary" -> ExpandableRow(row, expanded)
     "context-item" -> Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       Text(row.title, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium))
       if (row.subtitle.isNotBlank()) {
@@ -185,6 +191,25 @@ private fun ExpandableRow(row: TranscriptRow, expanded: SnapshotStateMap<String,
       Spacer(Modifier.width(6.dp))
       Text(if (open) "⌄" else "›", style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
+  }
+}
+
+/** Official notice row: a one-line label (agent change, instructions updated, subagent result…), never a reply bubble. */
+@Composable
+private fun NoticeRow(row: TranscriptRow, onOpenChild: (String) -> Unit) {
+  val color = when (row.status) {
+    "error" -> MiuixColorTokens.Error
+    else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+  }
+  val target = row.target
+  Row(Modifier.fillMaxWidth().then(if (target != null) Modifier.clickable { onOpenChild(target) } else Modifier).padding(horizontal = 10.dp, vertical = 4.dp),
+    verticalAlignment = Alignment.CenterVertically) {
+    Text(row.title, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium, color = color))
+    if (row.text.isNotBlank()) {
+      Spacer(Modifier.width(8.dp))
+      Text(row.text, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+    } else Spacer(Modifier.weight(1f))
+    if (target != null) Text("›", style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
   }
 }
 

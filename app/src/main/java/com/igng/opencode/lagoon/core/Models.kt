@@ -28,12 +28,33 @@ data class Session(val id: String, val directory: String, val title: String, val
   /** 最近一轮执行进入空闲（即出结果）的时间点（`time.idle`）。 */
   val idle: Long = 0,
   /** 最近一轮执行的结局（`outcome`）：`succeeded` / `failed` / `interrupted`。 */
-  val outcome: String? = null) {
+  val outcome: String? = null,
+  /** 已暂存撤销的边界（`revert.messageID`）：官方时间线隐藏 id ≥ 它的消息。 */
+  val revertMessageId: String? = null) {
   /** 排序口径与官方一致：优先 `time.updated`，缺失时退回 `time.created`。 */
   val activityAt: Long get() = updated.takeIf { it > 0 } ?: created
 }
+
+/**
+ * One projected timeline entry (`Session.Message.Info`). [role] is the rendering family:
+ * - `user` / `assistant`: a turn's prompt and replies;
+ * - `shell`: a user-run shell command, which forms its own turn;
+ * - `notice`: model-facing records (system, synthetic, skill, agent/model/location switches, compaction).
+ *   Their `text` is written for the model and is never shown as a reply; [notice] carries the
+ *   official one-line presentation;
+ * - `hidden`: records the official timeline does not render (idle markers, synthetic input without
+ *   a description).
+ * [type] keeps the server's own message type.
+ */
 data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null,
-  val agent: String? = null, val model: ModelChoice? = null, val completedAt: Long? = null, val finish: String? = null)
+  val agent: String? = null, val model: ModelChoice? = null, val completedAt: Long? = null, val finish: String? = null,
+  val errorType: String? = null, val retry: String? = null, val notice: Notice? = null,
+  /** Admitted input not yet delivered to the agent (`/inbox`); `queue` items wait for the current turn. */
+  val queued: Boolean = false, val type: String = role)
+
+/** Official `Notice` row: a label, optional detail/items and, for subagent results, the child session. */
+data class Notice(val label: String, val detail: String = "", val items: List<String> = emptyList(), val target: String? = null,
+  val error: Boolean = false, val running: Boolean = false)
 data class Attachment(val url: String, val mime: String = "", val name: String = "")
 data class MessagePart(
   val id: String,
@@ -48,7 +69,9 @@ data class MessagePart(
   val error: String = "",
   val patch: String = "",
   val files: List<String> = emptyList(),
-  val mime: String = "", val attachments: List<Attachment> = emptyList()
+  val mime: String = "", val attachments: List<Attachment> = emptyList(),
+  /** Child session a subagent tool runs in, when the server reports it. */
+  val target: String? = null
 )
 data class PermissionRequest(
   val id: String,
@@ -69,8 +92,7 @@ data class QuestionPrompt(
   val custom: Boolean = false,
   val field: String = ""
 )
-data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>, val form: Boolean = false)
-data class TodoItem(val content: String, val status: String, val priority: String)
+data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>, val form: Boolean = true)
 data class FileChange(
   val path: String,
   val after: String,
@@ -80,7 +102,7 @@ data class FileChange(
 )
 data class FileNode(val path: String, val type: String)
 data class FileContent(val type: String, val content: String)
-data class ModelChoice(val providerId: String, val modelId: String, val label: String)
+data class ModelChoice(val providerId: String, val modelId: String, val label: String, val variant: String? = null)
 data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
 
@@ -107,6 +129,7 @@ internal fun JSONObject.str(key: String): String = optString(key).takeUnless { i
 internal fun JSONObject.obj(key: String): JSONObject = optJSONObject(key) ?: JSONObject()
 internal fun JSONObject.arr(key: String): JSONArray = optJSONArray(key) ?: JSONArray()
 internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
+internal fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull { optString(it).takeIf(String::isNotBlank) }
 internal fun JSONObject.longPath(parent: String, child: String): Long = obj(parent).optLong(child, 0)
 internal fun JSONObject.errorMessage(key: String = "error"): String {
   val direct = str("message")
@@ -130,204 +153,247 @@ internal fun JSONObject.valueText(key: String): String {
 
 internal fun JSONObject.toProject(): Project {
   val directory = str("canonical").ifBlank { str("worktree").ifBlank { str("directory") } }
-  val sandboxes = arr("sandboxes").let { paths -> (0 until paths.length()).mapNotNull { paths.optString(it).takeIf(String::isNotBlank) } }
+  val sandboxes = arr("sandboxes").strings()
   return Project(str("id"), directory, str("name").ifBlank { directory.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { directory } }, sandboxes)
 }
 internal fun JSONObject.toSession(): Session {
-  // Both session APIs return flat metadata; also accept an explicit info envelope.
-  val source = obj("info").takeIf { it.length() > 0 } ?: this
-  val root = source.str("directory").ifBlank { source.obj("location").str("directory").let { path -> source.str("subpath").takeIf { it.isNotBlank() }?.let { "$path/${it.trim('/')}" } ?: path } }
+  val root = obj("location").str("directory").let { path -> str("subpath").takeIf { it.isNotBlank() }?.let { "${path.trimEnd('/')}/${it.trim('/')}" } ?: path }
+    .ifBlank { str("directory") }
   return Session(
-    source.str("id"), root,
-    source.str("title"), source.longPath("time", "updated"), source.str("parentID").ifBlank { null },
-    source.str("projectID").ifBlank { source.obj("location").obj("project").str("id") }.ifBlank { null },
-    source.longPath("time", "created"), source.obj("time").opt("archived") is Number,
-    source.str("agent").ifBlank { null }, source.obj("model").toModelChoice(),
-    source.longPath("time", "viewed"), source.longPath("time", "idle"),
-    source.str("outcome").ifBlank { null }
+    str("id"), root,
+    str("title"), longPath("time", "updated"), str("parentID").ifBlank { null },
+    str("projectID").ifBlank { obj("location").obj("project").str("id") }.ifBlank { null },
+    longPath("time", "created"), obj("time").opt("archived") is Number,
+    str("agent").ifBlank { null }, obj("model").toModelChoice(),
+    longPath("time", "viewed"), longPath("time", "idle"),
+    str("outcome").ifBlank { null },
+    obj("revert").str("messageID").ifBlank { null }
   )
 }
+/** `Model.Ref` (`{providerID, id, variant?}`); `modelID` is accepted for metadata written by older clients. */
 internal fun JSONObject.toModelChoice(): ModelChoice? {
   val provider = str("providerID")
-  val model = str("modelID").ifBlank { str("id") }
-  return if (provider.isBlank() || model.isBlank()) null else ModelChoice(provider, model, str("name").ifBlank { model })
+  val model = str("id").ifBlank { str("modelID") }
+  return if (provider.isBlank() || model.isBlank()) null else ModelChoice(provider, model, str("name").ifBlank { model }, str("variant").ifBlank { null })
 }
 internal fun JSONArray.toAttachments(): List<Attachment> = objects().mapNotNull {
   val url = it.str("uri").ifBlank { it.str("url") }.ifBlank { it.str("path") }
-  if (url.isBlank()) null else Attachment(url, it.str("mime").ifBlank { it.str("mediaType") }, it.str("filename").ifBlank { it.str("name") })
+  if (url.isBlank()) null else Attachment(url, it.str("mime").ifBlank { it.str("mediaType") }, it.str("name").ifBlank { it.str("filename") })
 }
 internal fun JSONArray.contentText(): String = objects().mapNotNull { item ->
-  item.str("text").takeIf { it.isNotBlank() }
+  item.str("text").takeIf { item.str("type") != "file" && it.isNotBlank() }
 }.joinToString("\n")
+
+/** Parses one `Session.Message.Info`. */
 internal fun JSONObject.toMessage(): Message {
-  val info = obj("info")
-  if (info.length() == 0 && str("type").isNotBlank()) return toV2Message()
-  val parts = arr("parts").objects().map { part -> part.toMessagePart() }
-  return Message(info.str("id"), info.str("role"), info.longPath("time", "created"), parts,
-    info.errorMessage().ifBlank { null }, info.str("agent").ifBlank { null }, (info.obj("model").toModelChoice() ?: info.toModelChoice()),
-    info.longPath("time", "completed").takeIf { it > 0 }, info.str("finish").ifBlank { null })
-}
-
-/** Projects one legacy/V1 `part` object (as delivered in `message.part.updated` and `parts[]`). */
-internal fun JSONObject.toMessagePart(): MessagePart {
-  val state = obj("state")
-  val type = str("type")
-  val files = (0 until arr("files").length()).mapNotNull { index -> arr("files").optString(index).takeIf(String::isNotBlank) }
-  return MessagePart(
-    id = str("id"), type = type,
-    text = str("text").ifBlank { str("description").ifBlank { str("prompt") } }, tool = str("tool"),
-    title = state.str("title").ifBlank { str("filename") }, status = state.str("status"), input = state.valueText("input"),
-    output = state.valueText("output").ifBlank { state.valueText("result") }, path = str("url").ifBlank { str("uri").ifBlank { str("path").ifBlank { str("filename") } } },
-    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files,
-    mime = str("mime"), attachments = state.arr("attachments").toAttachments()
-  )
-}
-
-private fun JSONObject.toV2Message(): Message {
-  val type = str("type")
-  val role = when (type) {
-    "user" -> "user"
-    "assistant" -> "assistant"
-    else -> "system"
-  }
-  val parts = when (type) {
-    // V2 text/reasoning content has no id (only tool calls do); give each part a stable, unique one.
-    "assistant" -> arr("content").objects().mapIndexed { index, part ->
-      part.toV2MessagePart().let { if (it.id.isBlank()) it.copy(id = "${str("id")}#$index") else it }
-    }
-    "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
-    else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) }) +
-      arr("files").toAttachments().mapIndexed { index, attachment ->
-        MessagePart("${str("id")}:file:$index", "file", path = attachment.url, title = attachment.name, mime = attachment.mime)
+  val id = str("id")
+  val created = longPath("time", "created")
+  return when (val type = str("type")) {
+    "user" -> userMessage(id, created, this, obj("metadata"), queued = false)
+    "assistant" -> {
+      val ordinals = mutableMapOf("text" to 0, "reasoning" to 0)
+      val parts = arr("content").objects().map { content ->
+        val kind = content.str("type")
+        // Official part ids: tool calls keep their call id; text/reasoning are `<message>:<type>:<ordinal>`.
+        val partId = if (kind == "tool") content.str("id") else "$id:$kind:${ordinals.merge(kind, 1, Int::plus)!! - 1}"
+        content.toAssistantPart(partId)
       }
+      val error = optJSONObject("error")
+      val retry = optJSONObject("retry")
+      Message(id, "assistant", created, parts, error?.str("message")?.ifBlank { null }, str("agent").ifBlank { null }, obj("model").toModelChoice(),
+        longPath("time", "completed").takeIf { it > 0 }, str("finish").ifBlank { null }, error?.str("type")?.ifBlank { null },
+        retry?.let { "第 ${it.optInt("attempt")} 次重试：${it.obj("error").str("message")}" }, type = type)
+    }
+    "shell" -> Message(id, "shell", created, listOf(shellPart(id, str("command"), str("status"), opt("exit") as? Number, obj("output").str("output"))
+      .copy(target = str("shellID").ifBlank { null })),
+      completedAt = longPath("time", "completed").takeIf { it > 0 }, type = type)
+    "idle" -> Message(id, "hidden", created, emptyList(), type = type)
+    else -> noticeMessage(id, created, type, this)
   }
-  return Message(
-    id = str("id"), role = role, created = longPath("time", "created"), parts = parts,
-    error = errorMessage().ifBlank { null },
-    agent = str("agent").ifBlank { null }, model = obj("model").toModelChoice(),
-    completedAt = longPath("time", "completed").takeIf { it > 0 }, finish = str("finish").ifBlank { null }
+}
+
+/** A pending `/inbox` item rendered like the official transcript does before delivery. */
+internal fun JSONObject.toInboxMessage(): Message? {
+  val payload = obj("payload")
+  val created = longPath("time", "created")
+  val queued = str("delivery") == "queue"
+  return when (str("type")) {
+    "user" -> userMessage(str("id"), created, payload, payload.obj("metadata"), queued)
+    "synthetic" -> noticeMessage(str("id"), created, "synthetic", payload).copy(queued = queued)
+    else -> null
+  }
+}
+
+private fun userMessage(id: String, created: Long, source: JSONObject, metadata: JSONObject, queued: Boolean): Message {
+  // The official composer records what the user typed in `metadata.displayText`; `text` may carry
+  // expanded context (file contents, comments) written for the model.
+  val text = metadata.str("displayText").ifBlank { source.str("text") }
+  val parts = listOfNotNull(text.takeIf(String::isNotBlank)?.let { MessagePart("$id:text", "text", text = it) }) +
+    source.arr("files").toAttachments().mapIndexed { index, attachment ->
+      MessagePart("$id:file:$index", "file", path = attachment.url, title = attachment.name, mime = attachment.mime)
+    }
+  val agent = metadata.str("agent").ifBlank { null }
+  return Message(id, "user", created, parts, agent = agent, model = metadata.obj("model").toModelChoice(), queued = queued, type = "user")
+}
+
+private fun shellPart(id: String, command: String, status: String, exit: Number?, output: String): MessagePart {
+  val failed = status == "timeout" || status == "killed" || (status == "exited" && exit != null && exit.toInt() != 0)
+  return MessagePart("$id:shell", "tool", tool = "shell", input = JSONObject().put("command", command).toString(),
+    status = when { status == "running" -> "running"; failed -> "error"; else -> "completed" }, output = output,
+    error = if (failed) "退出码 ${exit ?: status}" else "")
+}
+
+/** Official `notice()` presentation for every non-user/assistant/shell/idle message type. */
+private fun noticeMessage(id: String, created: Long, type: String, source: JSONObject): Message {
+  val metadata = source.obj("metadata")
+  val description = source.str("description")
+  val notice: Notice? = when (type) {
+    "system" -> {
+      val sources = metadata.arr("instructionSources").strings()
+      val prefix = "Instructions updated: "
+      when {
+        metadata.str("notice") == "instructions" && sources.isNotEmpty() -> Notice("指令已更新", items = sources)
+        description.startsWith(prefix) -> Notice("指令已更新", items = description.removePrefix(prefix).split(',').map(String::trim).filter(String::isNotBlank))
+        description.isNotBlank() -> Notice(description)
+        // Never surface the model-facing text itself; it can be an entire tool catalog.
+        else -> Notice("系统更新")
+      }
+    }
+    "synthetic" -> {
+      val state = metadata.str("state")
+      val source = metadata.str("source")
+      val shellFailed = source == "shell" && state == "completed" && (metadata.optBoolean("timeout") || (metadata.opt("exit") as? Number)?.toInt()?.let { it != 0 } == true)
+      val required = state == "error" || shellFailed
+      when {
+        metadata.str("notice") == "restart" || description == "Continuing after restart" -> Notice("重启后继续")
+        source == "subagent" || source == "shell" -> {
+          val actor = if (source == "shell") "Shell" else metadata.str("agent").ifBlank { "智能体" }
+          val label = when (state) { "error" -> "$actor 失败"; "cancelled" -> "$actor 已取消"; else -> "$actor 已完成" }
+          Notice(label, description, target = metadata.str("childID").takeIf { source == "subagent" && it.isNotBlank() }, error = required)
+        }
+        // Official: synthetic input without a description is not a transcript row.
+        description.isBlank() && !required -> null
+        else -> Notice(description.ifBlank { "执行失败" }, error = required)
+      }
+    }
+    "skill" -> Notice("技能", source.str("name"))
+    "agent-switched" -> Notice("代理变更", listOfNotNull(source.str("previous").ifBlank { null }, source.str("agent")).joinToString(" → "))
+    "model-switched" -> Notice("已切换到 ${source.obj("model").str("id")}")
+    "location-switched" -> Notice("已移至", source.obj("location").str("directory"))
+    "compaction" -> when (source.str("status")) {
+      "running" -> Notice("正在整理上下文", running = true)
+      "failed" -> Notice("上下文整理失败", source.obj("error").str("message"), error = true)
+      else -> Notice("上下文已整理")
+    }
+    else -> null
+  }
+  return Message(id, if (notice == null) "hidden" else "notice", created, emptyList(), notice = notice,
+    agent = source.str("agent").ifBlank { null }.takeIf { type == "agent-switched" },
+    model = source.obj("model").toModelChoice().takeIf { type == "model-switched" }, type = type)
+}
+
+/** Projects one `Session.Message.Assistant` content item. */
+internal fun JSONObject.toAssistantPart(id: String): MessagePart {
+  val type = str("type")
+  if (type != "tool") return MessagePart(id, type, text = str("text"), status = if (type == "reasoning" && longPath("time", "completed") == 0L && obj("time").length() > 0) "running" else "")
+  val state = obj("state")
+  val metadata = state.obj("metadata")
+  val name = str("name")
+  val input = state.opt("input")
+  val inputObject = input as? JSONObject
+  val diffs = metadata.arr("files").objects()
+  var status = state.str("status")
+  // Shell completion reports the process outcome in metadata, not the tool status (official `shellResultFailed`).
+  val shellFailed = name in SHELL_TOOLS && status == "completed" && (metadata.optBoolean("timeout") || (metadata.opt("exit") as? Number)?.toInt()?.let { it != 0 } == true)
+  if (shellFailed) status = "error"
+  val content = state.arr("content")
+  return MessagePart(
+    id = id, type = "tool", tool = name,
+    title = inputObject?.str("description").orEmpty(),
+    status = if (status == "streaming") "pending" else status,
+    input = when (input) { is JSONObject -> input.toString(2); null, JSONObject.NULL -> ""; else -> input.toString() },
+    output = content.contentText(),
+    path = inputObject?.str("path").orEmpty(),
+    error = state.optJSONObject("error")?.str("message").orEmpty().ifBlank { if (shellFailed) "退出码 ${metadata.opt("exit") ?: "超时"}" else "" },
+    patch = diffs.joinToString("\n") { it.str("patch") }.trim(),
+    files = diffs.map { it.str("file") }.filter(String::isNotBlank),
+    attachments = content.objects().filter { it.str("type") == "file" }.let { JSONArray(it) }.toAttachments(),
+    target = (metadata.str("sessionID").ifBlank { inputObject?.str("sessionID").orEmpty() }).takeIf { name in SUBAGENT_TOOLS && it.isNotBlank() }
   )
 }
 
-/** Projects one V2 `message.part.updated` part object. */
-internal fun JSONObject.toV2MessagePart(): MessagePart {
-  val state = obj("state")
-  return MessagePart(
-    id = str("id"), type = str("type"), text = str("text"), tool = str("name"),
-    status = state.str("status"), input = state.valueText("input"),
-    output = state.arr("content").contentText().ifBlank { state.valueText("result") },
-    path = str("uri").ifBlank { str("url").ifBlank { str("path") } }, title = str("filename"), mime = str("mime"),
-    files = (0 until state.arr("outputPaths").length()).mapNotNull { state.arr("outputPaths").optString(it).takeIf(String::isNotBlank) },
-    attachments = state.arr("attachments").toAttachments() + state.arr("content").toAttachments(),
-    error = state.errorMessage().ifBlank { errorMessage() }
-  )
-}
+internal val SHELL_TOOLS = setOf("shell", "bash", "execute")
+internal val SUBAGENT_TOOLS = setOf("subagent", "task")
+
 internal fun JSONObject.toPermission(directory: String): PermissionRequest {
+  val resources = arr("resources")
   val detail = when {
-    arr("patterns").length() > 0 -> arr("patterns").toString()
-    arr("resources").length() > 0 -> arr("resources").toString()
+    resources.length() > 0 -> resources.strings().joinToString("\n")
+    str("message").isNotBlank() -> str("message")
     else -> obj("metadata").toString()
   }
-  val tool = optJSONObject("tool") ?: obj("source")
+  val source = obj("source")
   return PermissionRequest(
-    str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
-    str("permission").ifBlank { str("action") }, detail,
-    (optJSONArray("always") ?: arr("save")).let { values -> (0 until values.length()).mapNotNull { values.optString(it).takeIf(String::isNotBlank) } },
-    tool.str("messageID"), tool.str("callID").ifBlank { tool.str("id") }
+    str("id"), str("sessionID"), directory, str("action"), detail,
+    arr("save").strings(), source.str("messageID"), source.str("id")
   )
 }
-internal fun JSONObject.toQuestion(directory: String): QuestionRequest = QuestionRequest(
-  str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
-  arr("questions").objects().map { q -> QuestionPrompt(
-    q.str("question"), q.arr("options").objects().map { QuestionOption(it.str("label"), it.str("description")) },
-    q.optBoolean("multiple"), q.optBoolean("custom")
-  ) }
-)
-internal fun JSONObject.toTodo(): TodoItem = TodoItem(str("content"), str("status"), str("priority"))
+/** `FileDiff.Info` from `GET /api/session/{id}/diff`. */
 internal fun JSONObject.toChange(): FileChange = FileChange(
   path = str("file").ifBlank { str("path") }, after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
   patch = str("patch")
 )
-internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"))
-internal fun JSONObject.toFileContent(): FileContent = FileContent(
-  str("type").ifBlank { if (str("encoding") == "base64") "binary" else "text" },
-  str("content")
-)
 
 object TaskReducer {
   private val TEST_COMMAND = Regex("(?i)(test|gradle|pytest|vitest|jest)")
-  private val SUBAGENT_TOOLS = setOf("task", "subagent")
-  private val SHELL_TOOLS = setOf("bash", "shell")
 
-  fun status(sessionId: String, status: String, previous: TaskState? = null): TaskState = when (status) {
-    "busy", "running" -> {
+  /** Authoritative activity from `/api/session/active`: running or not. */
+  fun status(sessionId: String, running: Boolean, previous: TaskState? = null): TaskState = when {
+    running -> {
       val continuing = previous?.active == true
       TaskState(sessionId, if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.phase else TaskPhase.THINKING,
         TaskState.RUNNING_DETAIL, if (continuing) previous!!.since else System.currentTimeMillis())
     }
-    "retry" -> TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL,
-      if (previous?.active == true) previous.since else System.currentTimeMillis())
-    "idle" -> when {
-      previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since, System.currentTimeMillis())
-      previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) -> previous!!
-      else -> TaskState(sessionId, TaskPhase.IDLE)
-    }
-    else -> previous ?: TaskState(sessionId, TaskPhase.IDLE)
+    previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since, System.currentTimeMillis())
+    previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) -> previous!!
+    else -> TaskState(sessionId, TaskPhase.IDLE)
   }
-  fun event(sessionId: String, type: String, properties: JSONObject, previous: TaskState?): TaskState? {
+
+  private fun running(sessionId: String, phase: TaskPhase, previous: TaskState?, since: Long): TaskState? =
+    if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) || previous?.phase in TaskState.WAITING_PHASES) previous
+    else TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since)
+
+  /** Reduces one `/api/event` frame; null means the event does not change the task phase. */
+  fun event(sessionId: String, type: String, properties: JSONObject, previous: TaskState?, timestamp: Long = 0): TaskState? {
     val since = previous?.since ?: System.currentTimeMillis()
+    val at = timestamp.takeIf { it > 0 } ?: System.currentTimeMillis()
     return when (type) {
-      "session.status" -> status(sessionId, properties.obj("status").str("type"), previous)
-      "session.idle" -> status(sessionId, "idle", previous)
-      "session.execution.started", "session.execution.retried" -> status(sessionId, "running", previous)
-      "session.execution.succeeded" -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
-      "session.execution.failed" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { "执行失败" }, since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
-      "session.execution.interrupted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, properties.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis())
-      "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since, System.currentTimeMillis())
-      "session.aborted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, System.currentTimeMillis())
+      "session.execution.started" -> status(sessionId, true, previous?.takeIf { it.active })
+      "session.execution.succeeded" -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", since, at)
+      "session.execution.failed" -> TaskState(sessionId, TaskPhase.FAILED, properties.obj("error").str("message").ifBlank { "执行失败" }, since, at)
+      // A shutdown keeps the execution claim; the restarted server resumes the same turn.
+      "session.execution.interrupted" -> if (properties.str("reason") == "shutdown") previous
+        else TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, at)
       "permission.asked" -> TaskState(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", since)
-      "question.asked", "form.created" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
-      "permission.replied", "permission.rejected", "question.replied", "question.rejected", "form.replied", "form.cancelled" ->
-        TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
-      "message.part.updated" -> {
-        val part = properties.obj("part")
-        val toolStatus = part.obj("state").str("status")
-        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) ||
-          part.str("type") == "tool" && toolStatus in setOf("completed", "error")) return previous
-        when {
-          part.str("type") == "reasoning" -> TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
-          part.str("type") == "tool" -> {
-            // V1 parts carry `tool`; V2 parts carry `name`. Read both so the same V2 event produces the
-            // same phase through the reducer as through the plugin (A13).
-            val tool = part.str("tool").ifBlank { part.str("name") }
-            val phase = when {
-              tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
-              tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").str("command")) -> TaskPhase.TESTING
-              else -> TaskPhase.TOOL
-            }
-            TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since)
-          }
-          else -> previous
-        }
-      }
-      "message.part.delta", "session.next.text.delta", "session.next.reasoning.delta" ->
-        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
-        else TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since)
-      "session.next.prompted", "session.next.prompt.admitted", "session.next.step.started", "session.next.retried" ->
-        status(sessionId, "running", previous)
-      "session.next.tool.called", "session.next.shell.started" -> {
-        val tool = properties.str("tool").ifBlank { if (type.endsWith("shell.started")) "shell" else properties.str("name") }
+      "form.created" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
+      "permission.replied", "form.replied", "form.cancelled" ->
+        if (previous?.phase in TaskState.WAITING_PHASES) TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since) else previous
+      "session.step.started", "session.reasoning.started", "session.text.started", "session.retry.scheduled" ->
+        running(sessionId, TaskPhase.THINKING, previous, since)
+      "session.tool.called" -> {
+        val tool = properties.str("name")
         val phase = when {
           tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
-          tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(properties.obj("input").str("command").ifBlank { properties.str("command") }) -> TaskPhase.TESTING
+          tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(properties.obj("input").str("command")) -> TaskPhase.TESTING
           else -> TaskPhase.TOOL
         }
-        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
-        else TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since)
+        running(sessionId, phase, previous, since)
       }
-      "session.next.step.failed" -> TaskState(sessionId, TaskPhase.FAILED,
-        properties.obj("error").str("message").ifBlank { "执行失败" }, since, System.currentTimeMillis())
-      else -> previous
+      "session.tool.input.started" -> {
+        val tool = properties.str("name")
+        running(sessionId, if (tool in SUBAGENT_TOOLS) TaskPhase.SUBAGENT else TaskPhase.TOOL, previous, since)
+      }
+      else -> null
     }
   }
 }

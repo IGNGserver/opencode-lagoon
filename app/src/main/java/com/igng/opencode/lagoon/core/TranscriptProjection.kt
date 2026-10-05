@@ -1,106 +1,177 @@
 package com.igng.opencode.lagoon.core
 
+import org.json.JSONArray
 import org.json.JSONObject
 
-/** Pure message projection shared by streaming and regression fixtures. Null requests reconciliation. */
+/**
+ * Applies one `/api/event` frame to the open session's timeline, mirroring the official client's
+ * event reducer (`packages/client/src/solid/data.ts` `handleEvent`). Streaming events target one
+ * assistant message and, within it, the latest content of a kind; an event whose target was never
+ * loaded is dropped, exactly like the official client. [Result.reconcile] asks for an authoritative
+ * re-read where the official client also re-syncs (a run ending with tools still in flight).
+ */
 object TranscriptProjection {
-  fun apply(messages: List<Message>, event: ServerEvent, protocol: ServerProtocol): List<Message>? {
+  data class Result(val messages: List<Message>, val reconcile: Boolean = false)
+
+  /** Event ids become message ids for records projected from that event (`messageIDFromEvent`). */
+  fun messageId(event: ServerEvent): String = event.id.replace(Regex("^evt_"), "msg_")
+
+  /** Null when the event does not touch the transcript. */
+  fun apply(messages: List<Message>, event: ServerEvent): Result? {
     val p = event.properties
-    val type = event.type
-    val native = type.startsWith("session.next.")
-    val messageId = p.str("messageID").ifBlank { p.str("assistantMessageID") }
-    fun update(id: String, role: String = "assistant", change: (Message) -> Message): List<Message>? {
-      if (id.isBlank()) return null
-      val old = messages.firstOrNull { it.id == id }
-      if (old == null && !native) return null
-      val message = change(old ?: Message(id, role, p.optLong("timestamp", System.currentTimeMillis()), emptyList()))
-      return if (old == null) messages + message else messages.map { if (it.id == id) message else it }
+    val at = event.created.takeIf { it > 0 } ?: System.currentTimeMillis()
+    val assistantId = p.str("assistantMessageID")
+    fun result(next: List<Message>) = Result(next)
+    fun editAssistant(change: (Message) -> Message): Result {
+      val index = messages.indexOfFirst { it.id == assistantId && it.role == "assistant" }
+      if (index < 0) return Result(messages)
+      return result(messages.toMutableList().also { it[index] = change(it[index]) })
     }
-    fun part(id: String, partType: String, change: (MessagePart) -> MessagePart): List<Message>? {
-      if (id.isBlank()) return null
-      return update(messageId) { message ->
-      val old = message.parts.firstOrNull { it.id == id }
-      val next = change(old ?: MessagePart(id, partType))
-      message.copy(parts = if (old == null) message.parts + next else message.parts.map { if (it.id == id) next else it })
+    fun editLast(kind: String, change: (MessagePart) -> MessagePart) = editAssistant { message ->
+      val index = message.parts.indexOfLast { it.type == kind && (kind != "reasoning" || it.status == "running") }
+      if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
     }
+    fun editTool(change: (MessagePart) -> MessagePart) = editAssistant { message ->
+      val index = message.parts.indexOfLast { it.type == "tool" && it.id == p.str("id") }
+      if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
     }
-    return when (type) {
-      "message.updated" -> {
-        val info = p.obj("info")
-        val id = info.str("id")
-        if (id.isBlank()) null else {
-          val previous = messages.firstOrNull { it.id == id }
-          val next = JSONObject().put("info", info).toMessage().copy(parts = previous?.parts.orEmpty())
-          if (previous == null) messages + next else messages.map { if (it.id == id) next else it }
+    fun insert(message: Message?): Result = if (message == null || messages.any { it.id == message.id }) Result(messages) else result(messages + message)
+    fun record(type: String, fields: JSONObject): Message =
+      JSONObject(fields.toString()).put("id", messageId(event)).put("type", type).put("time", JSONObject().put("created", at)).toMessage()
+
+    return when (event.type) {
+      "session.step.started" -> {
+        val existing = messages.indexOfFirst { it.id == assistantId && it.role == "assistant" }
+        val agent = p.str("agent").ifBlank { null }
+        val model = p.obj("model").toModelChoice()
+        val started = p.optLong("started").takeIf { it > 0 } ?: at
+        if (existing >= 0) result(messages.toMutableList().also {
+          it[existing] = it[existing].copy(agent = agent ?: it[existing].agent, model = model ?: it[existing].model, retry = null, error = null,
+            errorType = null, finish = null, completedAt = null, created = started)
+        }) else {
+          val active = messages.indexOfLast { it.role == "assistant" && it.completedAt == null }
+          val closed = if (active < 0) messages else messages.toMutableList().also { it[active] = it[active].copy(retry = null, completedAt = at) }
+          result(closed + Message(assistantId, "assistant", started, emptyList(), agent = agent, model = model, type = "assistant"))
         }
       }
-      "message.removed" -> messages.filterNot { it.id == messageId }
-      "message.part.removed" -> update(messageId) { it.copy(parts = it.parts.filterNot { part -> part.id == p.str("partID") }) }
-      "message.part.updated" -> {
-        val json = p.optJSONObject("part") ?: return null
-        val id = json.str("id")
-        val target = messageId.ifBlank { json.str("messageID") }
-        if (id.isBlank()) null else update(target) { message ->
-          val next = if (protocol == ServerProtocol.V2) json.toV2MessagePart() else json.toMessagePart()
-          message.copy(parts = if (message.parts.none { it.id == id }) message.parts + next else message.parts.map { if (it.id == id) next else it })
+      "session.step.ended" -> editAssistant { it.copy(completedAt = at, finish = p.str("finish").ifBlank { "stop" }) }
+      "session.step.failed" -> editAssistant {
+        val error = p.obj("error")
+        it.copy(completedAt = at, finish = p.str("finish").ifBlank { "error" }, error = error.str("message").ifBlank { "执行失败" },
+          errorType = error.str("type").ifBlank { null }, retry = null)
+      }
+      "session.retry.scheduled" -> editAssistant { it.copy(retry = "第 ${p.optInt("attempt")} 次重试：${p.obj("error").str("message")}") }
+      "session.text.started", "session.reasoning.started" -> {
+        val kind = if (event.type.contains("reasoning")) "reasoning" else "text"
+        editAssistant { message ->
+          val ordinal = message.parts.count { it.type == kind }
+          message.copy(parts = message.parts + MessagePart("${message.id}:$kind:$ordinal", kind, status = if (kind == "reasoning") "running" else ""))
         }
       }
-      "message.part.delta" -> {
-        val id = p.str("partID")
-        val existing = messages.firstOrNull { it.id == messageId }?.parts?.firstOrNull { it.id == id } ?: return null
-        if (p.str("field") !in setOf("", "text")) return null
-        part(id, existing.type) { it.copy(text = it.text + p.str("delta")) }
+      "session.text.delta" -> editLast("text") { it.copy(text = it.text + p.str("delta")) }
+      "session.text.ended" -> editLast("text") { it.copy(text = p.str("text")) }
+      "session.reasoning.delta" -> editLast("reasoning") { it.copy(text = it.text + p.str("delta")) }
+      "session.reasoning.ended" -> editLast("reasoning") { it.copy(text = p.str("text"), status = "") }
+      "session.tool.input.started" -> editAssistant { message ->
+        message.copy(parts = message.parts + MessagePart(p.str("id"), "tool", tool = p.str("name"), status = "pending"))
       }
-      "session.next.prompted", "session.next.prompt.admitted" -> update(messageId, "user") { message ->
-        val prompt = p.obj("prompt")
-        val text = prompt.str("text")
-        message.copy(parts = listOfNotNull(text.takeIf { it.isNotBlank() }?.let { MessagePart("$messageId:text", "text", text = it) }) +
-          prompt.arr("files").toAttachments().mapIndexed { index, attachment ->
-            MessagePart("$messageId:file:$index", "file", path = attachment.url, title = attachment.name, mime = attachment.mime)
-          })
+      "session.tool.input.delta" -> editTool { if (it.status == "pending") it.copy(input = it.input + p.str("delta")) else it }
+      "session.tool.input.ended" -> editTool { if (it.status == "pending") it.copy(input = p.str("text")) else it }
+      "session.tool.called" -> editTool { tool ->
+        val input = p.obj("input")
+        tool.copy(status = "running", input = input.toString(2), title = input.str("description").ifBlank { tool.title },
+          path = input.str("path").ifBlank { tool.path },
+          target = input.str("sessionID").takeIf { tool.tool in SUBAGENT_TOOLS && it.isNotBlank() } ?: tool.target)
       }
-      "session.next.step.started" -> update(messageId) { it.copy(agent = p.str("agent").ifBlank { it.agent }, model = p.obj("model").toModelChoice() ?: it.model) }
-      "session.next.step.ended" -> update(messageId) { it.copy(completedAt = p.optLong("timestamp", System.currentTimeMillis()), finish = p.str("finish").ifBlank { "stop" }) }
-      "session.next.step.failed" -> update(messageId) { it.copy(error = p.obj("error").str("message").ifBlank { "执行失败" }) }
-      "session.next.text.started", "session.next.reasoning.started" -> {
-        val reasoning = type.contains("reasoning")
-        part(p.str(if (reasoning) "reasoningID" else "textID"), if (reasoning) "reasoning" else "text") { it }
+      "session.tool.progress" -> editTool { tool ->
+        val child = p.obj("metadata").str("sessionID")
+        if (tool.status == "running" && tool.tool in SUBAGENT_TOOLS && child.isNotBlank()) tool.copy(target = child) else tool
       }
-      "session.next.text.delta", "session.next.reasoning.delta", "session.next.text.ended", "session.next.reasoning.ended" -> {
-        val reasoning = type.contains("reasoning")
-        val id = p.str(if (reasoning) "reasoningID" else "textID")
-        if (id.isBlank()) return null
-        part(id, if (reasoning) "reasoning" else "text") {
-          it.copy(text = if (type.endsWith("delta")) it.text + p.str("delta") else p.str("text"))
+      "session.tool.success", "session.tool.failed" -> editTool { tool ->
+        if (tool.status != "running" && !(event.type.endsWith("failed") && tool.status == "pending")) return@editTool tool
+        // Rebuild through the snapshot parser so live and loaded tools look identical.
+        val state = JSONObject().put("status", if (event.type.endsWith("success")) "completed" else "error")
+          .put("input", tool.input.trim().takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject())
+          .put("content", p.optJSONArray("content") ?: JSONArray()).put("metadata", p.optJSONObject("metadata") ?: JSONObject())
+        p.optJSONObject("error")?.let { state.put("error", it) }
+        val rebuilt = JSONObject().put("type", "tool").put("id", tool.id).put("name", tool.tool).put("state", state).toAssistantPart(tool.id)
+        rebuilt.copy(title = rebuilt.title.ifBlank { tool.title }, target = rebuilt.target ?: tool.target)
+      }
+      "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted" -> {
+        val active = messages.indexOfLast { it.role == "assistant" && it.completedAt == null }
+        val cleared = if (active < 0) messages else messages.toMutableList().also { it[active] = it[active].copy(retry = null) }
+        // Official: a run that ends with tools still streaming/running is re-read from the server.
+        val dangling = cleared.any { message -> message.role == "assistant" && message.parts.any { it.type == "tool" && it.status in setOf("pending", "running") } }
+        Result(cleared, reconcile = dangling)
+      }
+      "session.instructions.updated" -> if (!p.has("text")) null else insert(record("system", JSONObject()
+        .put("text", p.str("text")).put("description", "Instructions updated: ${p.obj("delta").keys().asSequence().joinToString(", ")}")
+        .put("metadata", JSONObject().put("notice", "instructions").put("instructionSources", JSONArray(p.obj("delta").keys().asSequence().toList())))))
+      "session.synthetic" -> insert(record("synthetic", JSONObject().put("text", p.str("text")).put("description", p.str("description"))
+        .put("metadata", p.optJSONObject("metadata") ?: JSONObject())))
+      "session.skill.activated" -> insert(record("skill", JSONObject().put("skill", p.str("id")).put("name", p.str("name")).put("text", p.str("text"))))
+      "session.agent.selected" -> insert(record("agent-switched", JSONObject().put("agent", p.str("agent")).put("previous", p.str("previous"))))
+      "session.model.selected" -> insert(record("model-switched", JSONObject().put("model", p.obj("model"))))
+      "session.moved" -> insert(record("location-switched", JSONObject().put("location", p.obj("location"))))
+      "session.shell.started" -> {
+        val shell = p.obj("shell")
+        insert(record("shell", JSONObject().put("shellID", shell.str("id")).put("command", shell.str("command")).put("status", shell.str("status"))))
+          .let { inserted -> Result(inserted.messages.map { if (it.id == messageId(event)) it.withShellId(shell.str("id")) else it }) }
+      }
+      "session.shell.ended" -> {
+        val shell = p.obj("shell")
+        val index = messages.indexOfLast { it.role == "shell" && it.parts.firstOrNull()?.target == shell.str("id") }
+        if (index < 0) Result(messages) else {
+          val old = messages[index]
+          val ended = JSONObject().put("id", old.id).put("type", "shell").put("command", shell.str("command")).put("status", shell.str("status"))
+            .put("output", p.obj("output")).put("time", JSONObject().put("created", old.created).put("completed", at))
+          (shell.opt("exit") as? Number)?.let { ended.put("exit", it) }
+          result(messages.toMutableList().also { it[index] = ended.toMessage().withShellId(shell.str("id")) })
         }
       }
-      "session.next.tool.input.started", "session.next.tool.input.delta", "session.next.tool.input.ended" -> {
-        val id = p.str("callID")
-        if (id.isBlank()) return null
-        part(id, "tool") { it.copy(tool = p.str("name").ifBlank { it.tool }, status = "pending",
-          input = when { type.endsWith("delta") -> it.input + p.str("delta"); type.endsWith("ended") -> p.str("text"); else -> it.input }) }
+      "session.compaction.started" -> insert(JSONObject().put("id", p.str("inputID").ifBlank { messageId(event) }).put("type", "compaction")
+        .put("status", "running").put("time", JSONObject().put("created", at)).toMessage())
+      "session.compaction.ended", "session.compaction.failed" -> {
+        val failed = event.type.endsWith("failed")
+        val index = messages.indexOfLast { it.type == "compaction" && it.notice?.running == true }
+        val fields = JSONObject().put("type", "compaction").put("status", if (failed) "failed" else "completed").put("error", p.obj("error"))
+        if (index >= 0) result(messages.toMutableList().also {
+          it[index] = fields.put("id", it[index].id).put("time", JSONObject().put("created", it[index].created)).toMessage()
+        }) else insert(fields.put("id", messageId(event)).put("time", JSONObject().put("created", at)).toMessage())
       }
-      "session.next.tool.called", "session.next.tool.progress", "session.next.tool.success", "session.next.tool.failed" -> {
-        val id = p.str("callID")
-        if (id.isBlank()) return null
-        part(id, "tool") { previous -> previous.copy(
-          tool = p.str("tool").ifBlank { previous.tool },
-          status = when { type.endsWith("success") -> "completed"; type.endsWith("failed") -> "error"; else -> "running" },
-          input = if (p.has("input")) p.valueText("input") else previous.input,
-          output = p.arr("content").contentText().ifBlank { if (p.has("result")) p.valueText("result") else previous.output },
-          error = p.obj("error").str("message"),
-          files = if (p.has("outputPaths")) (0 until p.arr("outputPaths").length()).map { p.arr("outputPaths").optString(it) } else previous.files,
-          attachments = p.arr("content").toAttachments().ifEmpty { previous.attachments }
-        ) }
+      "session.inbox.enqueued" -> {
+        val item = JSONObject(p.obj("item").toString()).put("id", p.str("inboxID")).put("time", JSONObject().put("created", at))
+        val message = item.toInboxMessage() ?: return null
+        val index = messages.indexOfFirst { it.id == message.id }
+        result(if (index < 0) messages + message else messages.toMutableList().also { it[index] = message })
       }
-      "session.next.shell.started" -> part(p.str("callID"), "tool") { it.copy(tool = "shell", status = "running", input = p.str("command")) }
-      // Shell ended has no message ID: locate its original call without creating a new message.
-      "session.next.shell.ended" -> {
-        val id = p.str("callID")
-        if (messages.none { message -> message.parts.any { it.id == id } }) null
-        else messages.map { message -> message.copy(parts = message.parts.map { if (it.id == id) it.copy(output = p.str("output"), status = "completed") else it }) }
+      "session.inbox.delivery.changed" -> {
+        val id = p.str("inboxID")
+        if (messages.none { it.id == id }) null else result(messages.map { if (it.id == id) it.copy(queued = p.str("delivery") == "queue") else it })
+      }
+      // Delivery moves the input to the end of the timeline at its delivery time.
+      "session.inbox.delivered" -> {
+        val id = p.str("inboxID")
+        val existing = messages.firstOrNull { it.id == id } ?: return null
+        result(messages.filterNot { it.id == id } + existing.copy(created = at, queued = false))
+      }
+      "session.inbox.cancelled" -> if (messages.none { it.id == p.str("inboxID") }) null else result(messages.filterNot { it.id == p.str("inboxID") })
+      "session.revert.committed" -> {
+        val boundary = p.str("to")
+        result(messages.filter { it.id < boundary })
+      }
+      // Replay-only: older releases replaced completed assistant content wholesale.
+      "session.message.content.updated" -> {
+        val index = messages.indexOfFirst { it.id == p.str("messageID") && it.role == "assistant" }
+        if (index < 0) null else {
+          val old = messages[index]
+          val rebuilt = JSONObject().put("id", old.id).put("type", "assistant").put("content", p.arr("content")).put("time", JSONObject().put("created", old.created)).toMessage()
+          result(messages.toMutableList().also { it[index] = old.copy(parts = rebuilt.parts) })
+        }
       }
       else -> null
     }
   }
+
+  private fun Message.withShellId(shellId: String) = copy(parts = parts.map { it.copy(target = shellId) })
 }

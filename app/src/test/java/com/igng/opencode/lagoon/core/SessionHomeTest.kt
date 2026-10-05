@@ -64,7 +64,7 @@ class SessionHomeTest {
   @Test fun modernEventsRetainExecutionTimestampAndInterruptedRunsCreateNoUnreadResult() {
     val event = """{"id":"event","type":"session.execution.failed","created":200,"data":{"sessionID":"root","error":{"message":"failed"}}}""".toServerEvent("")
     val root = Session("root", "/repo", "Root", 1)
-    assertEquals(200L, TaskReducer.event("root", event.type, event.properties, TaskState("root", TaskPhase.THINKING, since = 100))?.finishedAt)
+    assertEquals(200L, TaskReducer.event("root", event.type, event.properties, TaskState("root", TaskPhase.THINKING, since = 100), event.created)?.finishedAt)
     assertTrue(event.resultNotice(root)!!.error)
     assertNull(event.resultNotice(root.copy(parentId = "parent")))
     assertNull(event.copy(type = "session.execution.interrupted").resultNotice(root))

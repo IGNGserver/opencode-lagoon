@@ -200,7 +200,7 @@ class MainActivity : ComponentActivity() {
                 if (target.session == DRAFT_SESSION) holder.SaveableStateProvider("draft:${state.serverId}:$draftNonce") {
                   DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
                 } else if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
-                  ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { openSession(it, true) }, onModal = { if (active) chatModal = it }, interactive = active)
+                  ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
                 } else holder.SaveableStateProvider("root:${state.serverId}:${target.tab}") {
                   // HyperOS large-title bars that collapse on scroll; refresh is pull-to-refresh.
                   val scroll = MiuixScrollBehavior(rememberTopAppBarState())

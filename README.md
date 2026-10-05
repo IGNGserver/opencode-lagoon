@@ -4,9 +4,9 @@
 
 ## 功能
 
-- 多服务器连接、Basic Auth/官方 pair 链接、V1/V2 健康检查、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
-- 项目与会话、异步任务、Agent/Model、斜杠命令、文本/Reasoning/Tool 消息、停止与权限/问题处理
-- Todo、子会话、改动、文件浏览与搜索；V1 另支持重命名、删除、Fork、Share，V1/V2 支持 Summarize、Revert
+- 仅支持 OpenCode 2.x 服务端（`/api/*` 接口，以 `/api/info` 识别版本；1.x 已不再支持）；多服务器连接、Basic Auth/官方 pair 链接、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
+- 项目与会话、异步任务（运行中可继续发送以引导当前轮次）、Agent/Model、斜杠命令（走服务端 `/command`）、文本/Reasoning/Tool 消息、停止与权限/表单处理；时间线按官方客户端规则投影，系统指令、合成输入、技能等给模型看的记录只显示一行通知
+- 子会话、改动、文件浏览与搜索、重命名、删除；随版本变化的接口（重命名、恢复撤销、改动、已读同步）按实例 `/openapi.json` 选择
 - 全服务器任务总览灵动岛：实时显示「xx 个运行中、xx 个未读已完成」，有待处理时追加「xx 个待回复」、有失败时追加「xx 个失败」；同一口径按设备能力分发到各厂商灵动岛（小米超级岛、vivo 原子岛、Android 16 Live Updates / OPPO ColorOS 16 流体云），详见 `docs/ISLAND_ADAPTATION.md`
 - 本地前台监控与运行中、待处理、完成通知；任务总览仅统计未读结果，用户打开会话后即视为已读
 
@@ -26,7 +26,7 @@ ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUni
 
 本地前台服务只监控当前服务器。切换服务器会明确停止旧服务器的本地监控，远端任务继续。离线缓存与局部失败数据均标记为过期，不能用于发送操作。
 
-当前 V2（`/api/info`）按发布契约发送消息、回复表单和权限。旧 V2（`/api/health`）保留原请求格式，不在写请求失败后盲目重发不同请求体。V1/旧 V2 不提供未经确认的长期授权；当前 V2 的“始终允许”需确认项目范围，聊天菜单可查看和撤销已保存权限。
+消息按官方客户端方式发送：客户端生成消息 id，仅在连接中断时用同一 id 重试一次。待处理权限按会话读取（`/api/session/{id}/permission`），表单按会话所在目录读取，不会因服务器工作目录不同而漏掉。“始终允许”只在服务端给出保存范围时提供，设置页可查看和撤销已保存权限。
 
 ## 更名与迁移
 

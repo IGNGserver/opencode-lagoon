@@ -165,7 +165,7 @@ class TranscriptRowsTest {
     // Official V2 schema: Assistant.Text / Assistant.Reasoning carry no id field.
     val message = JSONObject("""{"id":"msg_a","type":"assistant","time":{"created":$t0},"agent":"build","model":{"id":"m","providerID":"p"},
       "content":[{"type":"reasoning","text":"想一想"},{"type":"text","text":"答案"},{"type":"text","text":"补充"}]}""").toMessage()
-    assertEquals(listOf("msg_a#0", "msg_a#1", "msg_a#2"), message.parts.map { it.id })
+    assertEquals(listOf("msg_a:reasoning:0", "msg_a:text:0", "msg_a:text:1"), message.parts.map { it.id })
     val rows = TranscriptRows.build(listOf(user("u1", t0), message))
     assertEquals(1, rows.count { it.kind == "reasoning" })
     assertEquals(2, rows.count { it.kind == "text" })
@@ -221,5 +221,65 @@ class TranscriptRowsTest {
     assertEquals(1, rows.count { it.kind == "error" })
     assertTrue(rows.first { it.kind == "error" }.text.contains("boom"))
     assertFalse(rows.first { it.kind == "error" }.text.startsWith("Error:"))
+  }
+
+  private fun notice(id: String, created: Long, type: String, json: String) = JSONObject("""{"id":"$id","type":"$type","time":{"created":$created},$json}""").toMessage()
+
+  @Test fun modelFacingRecordsRenderAsOneLineNoticesNotReplies() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 100, part("p1", "text", text = "开始")),
+      notice("s1", t0 + 200, "system", """"text":"tools.playwright.browser_close(): Promise<unknown>","description":"Instructions updated: mcp:playwright","metadata":{"notice":"instructions","instructionSources":["mcp:playwright"]}"""),
+      notice("k1", t0 + 300, "skill", """"skill":"sk","name":"release","text":"# SKILL.md 全文" """),
+      notice("y1", t0 + 400, "synthetic", """"text":"model only" """))
+    val rows = TranscriptRows.build(messages)
+    val notes = rows.filter { it.kind == "note" }
+    assertEquals(listOf("指令已更新", "技能"), notes.map { it.title })
+    assertEquals("mcp:playwright", notes[0].text); assertEquals("release", notes[1].text)
+    assertEquals(listOf("开始"), rows.filter { it.kind == "text" }.map { it.text })
+    assertTrue(rows.none { it.text.contains("Promise<unknown>") || it.text.contains("SKILL.md") || it.text.contains("model only") })
+  }
+
+  @Test fun shellCommandsFormTheirOwnTurn() {
+    val shell = JSONObject("""{"id":"sh1","type":"shell","shellID":"sh_1","command":"ls","status":"exited","exit":2,"output":{"output":"nope","cursor":4,"size":4,"truncated":false},"time":{"created":${t0 + 10}}}""").toMessage()
+    val rows = TranscriptRows.build(listOf(user("u1", t0), shell, assistant("a1", t0 + 20, part("p1", "text", text = "后续"))))
+    assertEquals(1, rows.count { it.kind == "user" })
+    val tool = rows.single { it.kind == "tool" }
+    assertEquals("命令行", tool.title); assertEquals("ls", tool.subtitle); assertEquals("error", tool.status)
+    // The assistant after a shell turn starts its own turn instead of joining the shell.
+    assertEquals(2, rows.count { it.kind == "meta" } + rows.count { it.kind == "tool" })
+  }
+
+  @Test fun onlyTheLastAssistantErrorIsShownAndInterruptionsAreDividers() {
+    val first = Message("a1", "assistant", t0 + 1, listOf(part("p1", "text", text = "x")), error = "rate limited", errorType = "provider", completedAt = t0 + 2)
+    val last = Message("a2", "assistant", t0 + 3, listOf(part("p2", "text", text = "y")), error = "Interrupted by user", errorType = "session.interrupted", completedAt = t0 + 4)
+    val rows = TranscriptRows.build(listOf(user("u1", t0), first, last))
+    assertTrue(rows.none { it.kind == "error" })
+    assertEquals(1, rows.count { it.kind == "divider" && it.text == "本轮已中断" })
+    val failing = TranscriptRows.build(listOf(user("u1", t0), first.copy(error = null), last.copy(error = "boom", errorType = "provider")))
+    assertEquals(listOf("boom"), failing.filter { it.kind == "error" }.map { it.text })
+  }
+
+  @Test fun aStagedRevertHidesItsBoundaryAndEverythingAfter() {
+    val messages = listOf(user("msg_1", t0), assistant("msg_2", t0 + 1, part("p", "text", text = "a")), user("msg_3", t0 + 2, "撤销我"), assistant("msg_4", t0 + 3, part("q", "text", text = "b")))
+    val rows = TranscriptRows.build(messages, revertMessageId = "msg_3")
+    assertEquals(1, rows.count { it.kind == "user" })
+    assertTrue(rows.none { it.text == "撤销我" || it.text == "b" })
+  }
+
+  @Test fun queuedInputIsMarkedAndSubagentToolsLinkToTheirChild() {
+    val queued = user("msg_q", t0 + 5, "下一步").copy(queued = true)
+    val subagent = part("call_s", "tool", tool = "subagent", input = """{"agent":"explore","description":"查找调用"}""", status = "running").copy(target = "ses_child")
+    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 1, subagent, completedAt = null), queued), working = true)
+    assertTrue(rows.single { it.kind == "user" && it.text == "下一步" }.meta.startsWith("排队中"))
+    val tool = rows.single { it.kind == "tool" }
+    assertEquals("ses_child", tool.target); assertEquals("explore · 查找调用", tool.subtitle)
+  }
+
+  @Test fun editDiffsComeFromToolMetadata() {
+    val edit = JSONObject("""{"type":"tool","id":"call_e","name":"edit","state":{"status":"completed","input":{"path":"src/a.kt","oldString":"a","newString":"b"},"content":[{"type":"text","text":"ok"}],
+      "metadata":{"files":[{"file":"src/a.kt","patch":"@@ -1 +1 @@\n-a\n+b","additions":1,"deletions":1,"status":"modified"}]}},"time":{"created":1}}""").toAssistantPart("call_e")
+    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 1, edit)))
+    assertEquals("a.kt", rows.single { it.kind == "tool" }.subtitle)
+    val summary = rows.single { it.kind == "diff-summary" }
+    assertEquals("本轮改动 1 个文件", summary.title)
   }
 }
