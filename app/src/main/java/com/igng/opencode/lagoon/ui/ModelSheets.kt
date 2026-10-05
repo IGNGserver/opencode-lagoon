@@ -98,3 +98,20 @@ internal fun ManageModelsSheet(state: LagoonState, controller: LagoonController,
     }
   }
 }
+
+/** Agent for the next message, chosen from the composer: follow the session or pick one of the server's agents. */
+@Composable
+internal fun AgentPickerSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
+  SuperBottomSheet(title = "选择 Agent", show = true, onDismissRequest = onDismiss) {
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+      item { ResourceHint(state.resource("agents"), "服务器没有可用 Agent", retry = controller::reload) }
+      item { Card(Modifier.fillMaxWidth()) { ChoiceRow("跟随会话", "使用会话当前的 Agent", !state.agentChanged) { controller.chooseAgent(null); onDismiss() } } }
+      if (state.agents.isNotEmpty()) item {
+        Spacer(Modifier.height(12.dp))
+        Card(Modifier.fillMaxWidth()) { state.agents.forEach { agent ->
+          ChoiceRow(agent.name, agent.description.takeIf(String::isNotBlank), state.agentChanged && state.agent == agent.name) { controller.chooseAgent(agent.name); onDismiss() }
+        } }
+      }
+    }
+  }
+}
