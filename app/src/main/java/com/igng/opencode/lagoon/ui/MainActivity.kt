@@ -75,7 +75,6 @@ class MainActivity : ComponentActivity() {
       var showingServerForm by remember { mutableStateOf(false) }
       var editingServerId by remember { mutableStateOf<String?>(null) }
       var showingProjects by remember { mutableStateOf(false) }
-      var showingAddProject by remember { mutableStateOf(false) }
       // Each blank draft gets a fresh saveable scope so a sent draft never reappears.
       var draftNonce by rememberSaveable { mutableIntStateOf(0) }
       var chatModal by remember { mutableStateOf(false) }
@@ -158,7 +157,7 @@ class MainActivity : ComponentActivity() {
       var gestureRoute by remember { mutableStateOf<NavRoute?>(null) }
       // The real page a back gesture returns to, drawn under the outgoing one while the finger moves.
       var peekRoute by remember { mutableStateOf<NavRoute?>(null) }
-      PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects && !showingAddProject) { progress ->
+      PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects) { progress ->
         gestureActive = true; gestureRoute = route
         peekRoute = navigation.back().route.takeIf { previewBack && it.session == null }
         try {
@@ -228,8 +227,7 @@ class MainActivity : ComponentActivity() {
             MiuixToastHost(globalMessage, globalMessageType, { globalMessage = null }, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp))
             // MIUIX popups must stay inside this Scaffold content's popup registry.
             if (showingServerForm) ServersModal(state, controller, state.profiles.firstOrNull { it.id == editingServerId }) { showingServerForm = false; editingServerId = null }
-            if (showingProjects) ProjectScopeSheet(state, controller, { showingProjects = false }) { showingProjects = false; showingAddProject = true }
-            if (showingAddProject) DirectoryBrowserSheet(state, controller, { showingAddProject = false }) { showingAddProject = false }
+            if (showingProjects) ProjectScopeSheet(state, controller) { showingProjects = false }
           }
         }
       }

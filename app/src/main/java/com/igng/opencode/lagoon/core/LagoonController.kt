@@ -46,8 +46,6 @@ data class LagoonState(
   val projects: List<Project> = emptyList(), val projectId: String? = null,
   /** Home list filter: null = 全部会话 (default), otherwise one project id. Not the execution target. */
   val scopeProjectId: String? = null,
-  /** The server-side folder browser used to add a project; null when closed. */
-  val directoryListing: DirectoryListing? = null,
   val sessions: List<Session> = emptyList(), val sessionId: String? = null,
   val knownParents: Map<String, String> = emptyMap(),
   val messages: List<Message> = emptyList(), val tasks: Map<String, TaskState> = emptyMap(),
@@ -311,12 +309,8 @@ class LagoonController private constructor(private val appContext: Context) {
     val version = client.health()
     val capabilities = client.discoverCapabilities()
     val serverId = state.value.serverId ?: return
-    val discovered = if (controlOnly && state.value.projects.isNotEmpty()) state.value.projects else client.projects()
-    val known = store.knownDirectories(serverId).map { directory ->
-      discovered.firstOrNull { project -> project.directories.any { normalizedDirectory(it) == normalizedDirectory(directory) } }
-        ?: Project("directory:$directory", directory, directory.replace('\\', '/').substringAfterLast('/').ifBlank { directory })
-    }
-    val projects = (discovered + known).distinctBy { it.id }
+    // Projects are authoritative from the server; this client never invents one from a folder.
+    val projects = if (controlOnly && state.value.projects.isNotEmpty()) state.value.projects else client.projects()
     // Official home index: one global, newest-first listing of root sessions (directory filters are
     // exact, so per-project queries would miss worktrees). Reconciliation re-reads its first page too,
     // so a session created elsewhere while an event was missed still appears.
@@ -969,35 +963,6 @@ class LagoonController private constructor(private val appContext: Context) {
     val current = state.value
     val target = HomeScope.draftTarget(current.sessions, current.projects, current.scopeProjectId, current.projectId) ?: return
     if (target != current.projectId || current.sessionId != null) selectProject(target)
-  }
-  /** Lists child folders of [path] (null = the server's default location) for the add-project browser. */
-  fun browseDirectories(path: String?): Job {
-    val home = state.value.directoryListing?.home
-    mutable.update { it.copy(directoryListing = DirectoryListing(path ?: it.directoryListing?.path ?: "", home = home)) }
-    return act { op ->
-      val root = if (path == null) op.client.browseRoot() else null
-      val target = path ?: root!!
-      val listing = try {
-        DirectoryListing(target, op.client.listDirectories(target), ResourceStatus(ResourceState.READY), home ?: root)
-      } catch (cancel: CancellationException) { throw cancel } catch (error: Exception) {
-        DirectoryListing(target, emptyList(), ResourceStatus(ResourceState.ERROR, error.message ?: "无法读取这个文件夹"), home ?: root)
-      }
-      op.commitConnection { current -> if (current.directoryListing == null) current else current.copy(directoryListing = listing) }
-    }
-  }
-  fun closeDirectoryBrowser() = mutable.update { it.copy(directoryListing = null) }
-  fun addProjectDirectory(directory: String) {
-    val server = state.value.serverId ?: return
-    require(directory.isNotBlank() && !directory.contains('\u0000')) { "目录不能为空" }
-    require(directory.trim().startsWith("/") || Regex("^[A-Za-z]:[/\\\\]").containsMatchIn(directory.trim())) { "请输入服务器上的绝对目录" }
-    store.rememberDirectory(server, directory.trim())
-    val existing = state.value.projects.firstOrNull { normalizedDirectory(it.directory) == normalizedDirectory(directory) }
-    val project = existing ?: Project("directory:${directory.trim()}", directory.trim(), directory.trim().trimEnd('/').substringAfterLast('/').ifBlank { directory.trim() })
-    mutable.update { it.copy(projects = (it.projects + project).distinctBy { item -> normalizedDirectory(item.directory) }) }
-    // An added project becomes the home scope right away, like choosing it in the picker.
-    setScope(project.id)
-    if (state.value.projectId != project.id) selectProject(project.id)
-    reload()
   }
   fun conversationVisible(server: String, session: String, visible: Boolean) {
     if (visible) visibleConversation = server to session

@@ -443,20 +443,6 @@ class OpenCodeApi(
   suspend fun files(directory: String, path: String): List<FileNode> =
     dataArray(obj("api/fs/list", locationQuery(directory) + (if (path.isNotBlank() && path != ".") mapOf("path" to path) else emptyMap())))
       .objects().map { item -> FileNode(item.str("path"), item.str("type")) }
-  /** Where the server-side folder browser starts: the server's default location. */
-  suspend fun browseRoot(): String = dataObject(obj("api/location")).str("directory").ifBlank { "/" }
-
-  /**
-   * Child folders of an absolute server directory. Like the official folder picker, the folder to
-   * list is the request location (`path` only accepts paths relative to it).
-   */
-  suspend fun listDirectories(absolute: String): List<String> =
-    dataArray(obj("api/fs/list", locationQuery(absolute))).objects().map { it.str("path") to it.str("type") }
-      .filter { it.second == "directory" }
-      .map { it.first.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\') }
-      .filter { it.isNotBlank() && it != "." && it != ".." }
-      .distinct().sortedWith(compareBy<String> { it.startsWith('.') }.thenBy { it.lowercase() })
-
   suspend fun fileContent(directory: String, path: String): FileContent {
     val (bytes, contentType) = requestBytes("api/fs/read/${encodedPath(path)}", locationQuery(directory))
     return if (!isTextFile(path, contentType)) FileContent("binary", Base64.encodeToString(bytes, Base64.NO_WRAP))

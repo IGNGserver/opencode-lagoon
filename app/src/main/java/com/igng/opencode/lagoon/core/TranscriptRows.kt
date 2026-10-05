@@ -160,7 +160,7 @@ object TranscriptRows {
           part.type == "tool" && part.isDisplayable -> run += partRef(message, index, part) to part
           else -> {
             flush()
-            body += partRows(turnKey, partRef(message, index, part), part)
+            body += partRows(turnKey, partRef(message, index, part), part, expanded)
           }
         }
       }
@@ -211,14 +211,23 @@ object TranscriptRows {
     return rows
   }
 
-  private fun partRows(turnKey: String, ref: String, part: MessagePart): List<TranscriptRow> {
+  private fun partRows(turnKey: String, ref: String, part: MessagePart, expanded: Set<String>): List<TranscriptRow> {
     val key = "$turnKey:$ref"
     return when {
       part.type == "text" && part.text.isNotBlank() -> listOf(TranscriptRow(key, "text", text = part.text.trim()))
-      part.type == "reasoning" && part.text.isNotBlank() -> listOf(TranscriptRow(key, "reasoning", text = part.text.trim()))
+      part.type == "reasoning" && part.text.isNotBlank() -> reasoningRows(key, part.text.trim(), expanded)
       part.type == "file" -> listOf(TranscriptRow(key, "attachment", attachments = listOf(Attachment(part.path, part.mime, part.title))))
       else -> emptyList()
     }
+  }
+
+  /** Thinking is collapsed by default: the header shows until this row's key is expanded, then the markdown bodies. */
+  private fun reasoningRows(key: String, text: String, expanded: Set<String>): List<TranscriptRow> {
+    val preview = text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().take(80)
+    return listOf(TranscriptRow(key, "reasoning", title = "思考过程", subtitle = preview)) +
+      if (key !in expanded) emptyList() else MarkdownBlocks.chunks(text).mapIndexed { index, chunk ->
+        TranscriptRow("$key:body:$index", "reasoning-body", text = chunk)
+      }
   }
 
   private fun contextGroupRows(turnKey: String, refs: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> {

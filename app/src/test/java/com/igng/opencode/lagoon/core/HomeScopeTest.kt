@@ -1,10 +1,5 @@
 package com.igng.opencode.lagoon.core
 
-import kotlinx.coroutines.runBlocking
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -44,26 +39,5 @@ class HomeScopeTest {
     assertEquals("/home", HomeScope.parent("/home/me"))
     assertEquals("/", HomeScope.parent("/home"))
     assertEquals("/home/me/app", HomeScope.child("/home/me/", "app"))
-  }
-
-  @Test fun v2BrowsesFoldersThroughTheRequestLocation() = runBlocking {
-    MockWebServer().use { server ->
-      server.dispatcher = object : Dispatcher() {
-        override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
-          "/global/health" -> MockResponse().setResponseCode(404)
-          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
-          "/api/location" -> MockResponse().setBody("""{"data":{"directory":"/home/me","project":{"id":"global"}}}""")
-          "/api/fs/list" -> MockResponse().setBody("""{"data":[{"path":"项目","type":"directory"},{"path":".config/","type":"directory"},{"path":"a.txt","type":"file"},{"path":"Apps","type":"directory"}]}""")
-          else -> MockResponse().setResponseCode(404)
-        }
-      }
-      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
-      assertEquals("/home/me", api.browseRoot())
-      assertEquals(listOf("Apps", "项目", ".config"), api.listDirectories("/home/me"))
-      val requests = List(server.requestCount) { server.takeRequest() }
-      val list = requests.single { it.requestUrl!!.encodedPath == "/api/fs/list" }
-      assertEquals("/home/me", list.requestUrl!!.queryParameter("location[directory]"))
-      assertEquals(null, list.requestUrl!!.queryParameter("path"))
-    }
   }
 }

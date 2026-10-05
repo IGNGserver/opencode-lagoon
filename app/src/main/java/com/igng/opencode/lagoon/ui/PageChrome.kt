@@ -2,11 +2,18 @@ package com.igng.opencode.lagoon.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,6 +85,58 @@ internal data class MenuAction(val label: String, val icon: ImageVector? = null,
 internal data class MenuSection(val actions: List<MenuAction>, val title: String? = null)
 
 /**
+ * MIUIX's dropdown provider only measures the window's safe area, which excludes the system bars but
+ * not the software keyboard. With `adjustResize` the composer's ＋ sits just above the IME while the
+ * provider still believes there is room below, so the menu opens behind the keyboard. This mirrors the
+ * dropdown placement but measures the bottom against the IME, flipping the menu above the anchor.
+ */
+@Composable
+internal fun rememberImeAwarePopupPositionProvider(): PopupPositionProvider {
+  val density = LocalDensity.current
+  val imeBottom = WindowInsets.ime.getBottom(density)
+  return remember(imeBottom) {
+    object : PopupPositionProvider {
+      override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowBounds: IntRect,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+        popupMargin: IntRect,
+        alignment: PopupPositionProvider.Align,
+      ): IntOffset {
+        val endAligned = when (alignment) {
+          PopupPositionProvider.Align.End,
+          PopupPositionProvider.Align.TopEnd,
+          PopupPositionProvider.Align.BottomEnd -> true
+          else -> false
+        } xor (layoutDirection == LayoutDirection.Rtl)
+        val offsetX = if (endAligned) anchorBounds.right - popupContentSize.width - popupMargin.right
+        else anchorBounds.left + popupMargin.left
+        val bottom = windowBounds.bottom - imeBottom
+        val offsetY = if (bottom - anchorBounds.bottom > popupContentSize.height) {
+          // Room below the anchor and above the keyboard.
+          anchorBounds.bottom + popupMargin.bottom
+        } else if (anchorBounds.top - windowBounds.top > popupContentSize.height) {
+          // No room below: flip above the anchor.
+          anchorBounds.top - popupContentSize.height - popupMargin.top
+        } else {
+          anchorBounds.top + anchorBounds.height / 2 - popupContentSize.height / 2
+        }
+        return IntOffset(
+          x = offsetX.coerceIn(windowBounds.left, (windowBounds.right - popupContentSize.width - popupMargin.right).coerceAtLeast(windowBounds.left)),
+          y = offsetY.coerceIn(
+            (windowBounds.top + popupMargin.top).coerceAtMost(bottom - popupContentSize.height - popupMargin.bottom),
+            bottom - popupContentSize.height - popupMargin.bottom,
+          ),
+        )
+      }
+
+      override fun getMargins(): PaddingValues = PaddingValues(horizontal = 0.dp, vertical = 8.dp)
+    }
+  }
+}
+
+/**
  * MIUIX list popup with icon rows (the spinner item style), optional section titles and dividers —
  * the ⋯ menus of the home page, a chat, and a long-pressed session. Choosing a row dismisses first.
  */
@@ -85,7 +144,8 @@ internal data class MenuSection(val actions: List<MenuAction>, val title: String
 internal fun MenuPopup(show: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>,
   alignment: PopupPositionProvider.Align = PopupPositionProvider.Align.End) {
   val visible = sections.filter { it.actions.isNotEmpty() }
-  SuperListPopup(show = show, alignment = alignment, onDismissRequest = onDismiss) {
+  val positionProvider = rememberImeAwarePopupPositionProvider()
+  SuperListPopup(show = show, alignment = alignment, popupPositionProvider = positionProvider, onDismissRequest = onDismiss) {
     ListPopupColumn {
       visible.forEachIndexed { sectionIndex, section ->
         if (sectionIndex > 0) HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
