@@ -1,15 +1,34 @@
 package com.igng.opencode.lagoon.ui
 
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * The app-level back stack: side-swipe/back returns one level (child chat → parent chat → the page it
+ * was opened from → 会话) and only leaves the app from 会话.
+ */
 class SessionNavigationTest {
-  @Test fun childBackRestoresItsParentBeforeTheOriginatingTab() {
-    val nav = SessionNavigation(RootTab.ACTIVITY).open("parent").open("child", child = true).open("grandchild", child = true)
+  @Test fun homeIsTheOnlyRootAndDefersBackToTheSystem() {
+    assertFalse(SessionNavigation().canGoBack)
+    assertEquals(NavRoute(RootPage.HOME, null, 0), SessionNavigation().route)
+  }
+  @Test fun pushedPagesReturnHome() {
+    val settings = SessionNavigation().push(RootPage.SETTINGS)
+    assertTrue(settings.canGoBack)
+    assertEquals(SessionNavigation(), settings.back())
+    assertEquals(SessionNavigation(), SessionNavigation().push(RootPage.ARCHIVED).back())
+  }
+  @Test fun pushingAPageLeavesAnyOpenChat() {
+    assertEquals(SessionNavigation(RootPage.SETTINGS), SessionNavigation().open("s1").push(RootPage.SETTINGS))
+  }
+  @Test fun childBackRestoresItsParentBeforeTheOriginatingPage() {
+    val nav = SessionNavigation(RootPage.ARCHIVED).open("parent").open("child", child = true).open("grandchild", child = true)
     assertEquals(listOf("parent", "child"), nav.back().sessions)
     assertEquals(listOf("parent"), nav.back().back().sessions)
-    assertEquals(RootTab.ACTIVITY, nav.back().back().back().tab)
-    assertEquals(RootTab.SESSIONS, nav.back().back().back().back().tab)
+    assertEquals(SessionNavigation(RootPage.ARCHIVED), nav.back().back().back())
+    assertEquals(SessionNavigation(), nav.back().back().back().back())
     assertFalse(nav.back().back().back().back().canGoBack)
   }
   @Test fun unrelatedSessionDoesNotInheritAnotherSessionsBackChain() {
@@ -20,5 +39,10 @@ class SessionNavigationTest {
   @Test fun reopeningAnAncestorDoesNotDuplicateOrCycleTheStack() {
     val nav = SessionNavigation().open("parent").open("child", true).open("parent", true)
     assertEquals(listOf("parent"), nav.sessions)
+  }
+  @Test fun routeDepthCountsPagesAndChats() {
+    assertEquals(1, SessionNavigation().open("s1").route.depth)
+    assertEquals(1, SessionNavigation(RootPage.SETTINGS).route.depth)
+    assertEquals(3, SessionNavigation(RootPage.ARCHIVED).open("p").open("c", true).route.depth)
   }
 }

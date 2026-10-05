@@ -18,7 +18,6 @@ import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.ExpandMore
 import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.miuixCapsuleShape
@@ -63,7 +62,7 @@ internal fun CapsuleSelector(
     Text(text, Modifier.widthIn(max = maxTextWidth), maxLines = 1, overflow = TextOverflow.Ellipsis,
       style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium,
         color = if (enabled) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.onSurfaceVariantSummary))
-    Icon(MiuixIcons.ExpandMore, null, Modifier.size(16.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+    DropdownChevron()
   }
 }
 

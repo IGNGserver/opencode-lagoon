@@ -68,10 +68,12 @@ class MainActivity : ComponentActivity() {
       val systemDark = isSystemInDarkTheme()
       val dark = themeMode == ThemeMode.DARK || themeMode == ThemeMode.SYSTEM && systemDark
       var previewBack by remember { mutableStateOf(preferences.getBoolean("previewBack", true)) }
-      var currentTab by rememberSaveable { mutableStateOf(RootTab.SESSIONS) }
+      var currentPage by rememberSaveable { mutableStateOf(RootPage.HOME) }
       var sessionStack by rememberSaveable { mutableStateOf(emptyList<String>()) }
       var navigationServer by rememberSaveable { mutableStateOf(state.serverId) }
-      var showingServersSheet by remember { mutableStateOf(false) }
+      // The server sheet edits one profile (null = add a new one); switching happens on the home capsules.
+      var showingServerForm by remember { mutableStateOf(false) }
+      var editingServerId by remember { mutableStateOf<String?>(null) }
       var showingProjects by remember { mutableStateOf(false) }
       var showingAddProject by remember { mutableStateOf(false) }
       // Each blank draft gets a fresh saveable scope so a sent draft never reappears.
@@ -85,20 +87,20 @@ class MainActivity : ComponentActivity() {
       val focusManager = LocalFocusManager.current
       val density = LocalDensity.current
       val keyboardOpen = WindowInsets.ime.getBottom(density) > 0
-      val wide = LocalConfiguration.current.screenWidthDp >= 640
+      val navigation = SessionNavigation(currentPage, sessionStack)
       val inChatDetail = sessionStack.isNotEmpty()
-      val route = NavRoute(currentTab, sessionStack.lastOrNull(), sessionStack.size)
+      val route = navigation.route
       fun openSession(id: String, child: Boolean = false) {
         focusManager.clearFocus()
         if (state.session != null) snapshots["${state.serverId}:${state.sessionId}"] = state
         val known = controller.state.value.sessions.firstOrNull { it.id == id }
         if (child || known?.parentId == null && known != null) {
-          sessionStack = SessionNavigation(currentTab, sessionStack).open(id, child).sessions
+          sessionStack = SessionNavigation(currentPage, sessionStack).open(id, child).sessions
           if (controller.state.value.sessionId != id) controller.selectSession(id)
         } else {
-          val originTab = currentTab; val originStack = sessionStack
+          val originPage = currentPage; val originStack = sessionStack
           controller.resolveSession(id) { lineage ->
-          if (currentTab != originTab || sessionStack != originStack) return@resolveSession
+            if (currentPage != originPage || sessionStack != originStack) return@resolveSession
             sessionStack = lineage
             if (controller.state.value.sessionId != id) controller.selectSession(id)
           }
@@ -106,14 +108,17 @@ class MainActivity : ComponentActivity() {
       }
       fun openDraft() {
         focusManager.clearFocus()
+        if (!state.connected) { globalMessage = if (state.profiles.isEmpty()) "先添加一个 OpenCode 服务器" else "服务器尚未连接，连接后才能新建会话"; globalMessageType = MiuixToastType.INFO; return }
         controller.beginDraft()
         draftNonce += 1
         sessionStack = listOf(DRAFT_SESSION)
       }
+      fun openPage(page: RootPage) { focusManager.clearFocus(); val next = SessionNavigation(currentPage, sessionStack).push(page); currentPage = next.page; sessionStack = next.sessions }
+      fun editServer(profile: ServerProfile?) { editingServerId = profile?.id; showingServerForm = true }
       fun goBack() {
         focusManager.clearFocus()
-        val next = SessionNavigation(currentTab, sessionStack).back()
-        sessionStack = next.sessions; currentTab = next.tab
+        val next = SessionNavigation(currentPage, sessionStack).back()
+        sessionStack = next.sessions; currentPage = next.page
         next.sessions.lastOrNull()?.let(controller::selectSession)
       }
       LaunchedEffect(state.serverId) {
@@ -139,29 +144,33 @@ class MainActivity : ComponentActivity() {
         lifecycle.addObserver(observer); visible(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
         onDispose { lifecycle.removeObserver(observer); visible(false) }
       }
-      LaunchedEffect(state.profiles.isEmpty()) { if (state.profiles.isEmpty()) showingServersSheet = true }
+      LaunchedEffect(state.profiles.isEmpty()) { if (state.profiles.isEmpty()) editServer(null) }
       LaunchedEffect(state.error) { state.error?.let { globalMessage = it; globalMessageType = MiuixToastType.ERROR; controller.clearError() } }
       LaunchedEffect(state.message) { state.message?.let { globalMessage = it; globalMessageType = MiuixToastType.SUCCESS; controller.clearMessage() } }
       LaunchedEffect(deepLink, state.serverId, state.connected) {
         val (server, session) = deepLink ?: return@LaunchedEffect
         if (state.serverId != server) {
           if (state.profiles.any { it.id == server }) controller.connect(server) else { globalMessage = "这个服务器已移除"; globalMessageType = MiuixToastType.ERROR; deepLink = null }
-        } else if (state.connected) { openSession(session); deepLink = null }
+        } else if (state.connected) { currentPage = RootPage.HOME; openSession(session); deepLink = null }
       }
       val backProgress = remember { Animatable(0f) }
       var gestureActive by remember { mutableStateOf(false) }
       var gestureRoute by remember { mutableStateOf<NavRoute?>(null) }
-      PredictiveBackHandler(enabled = SessionNavigation(currentTab, sessionStack).canGoBack && !keyboardOpen && !chatModal && !showingServersSheet && !showingProjects && !showingAddProject) { progress ->
+      // The real page a back gesture returns to, drawn under the outgoing one while the finger moves.
+      var peekRoute by remember { mutableStateOf<NavRoute?>(null) }
+      PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects && !showingAddProject) { progress ->
         gestureActive = true; gestureRoute = route
+        peekRoute = navigation.back().route.takeIf { previewBack && it.session == null }
         try {
           progress.collect { if (previewBack) backProgress.snapTo(it.progress.coerceIn(0f, 1f)) }
+          peekRoute = null
           goBack()
           // Leave the outgoing surface at its gesture position until its exit transition finishes.
           delay(240); backProgress.snapTo(0f)
         } catch (cancel: CancellationException) {
           withContext(NonCancellable) { backProgress.animateTo(0f, spring(dampingRatio = 0.9f, stiffness = 500f)) }
           throw cancel
-        } finally { gestureActive = false }
+        } finally { gestureActive = false; peekRoute = null }
       }
       OpenCodeMiuixTheme(dark) {
         Scaffold(
@@ -171,20 +180,30 @@ class MainActivity : ComponentActivity() {
           bottomBar = {}
         ) { insets ->
           Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background)) {
-            if (gestureActive && inChatDetail) {
-              val parent = sessionStack.dropLast(1).lastOrNull()?.let { snapshots["${state.serverId}:$it"] }
-              Column(Modifier.fillMaxSize().padding(24.dp)) {
-                Text(parent?.session?.let(parent::title) ?: currentTab.label, style = MiuixTheme.textStyles.title2)
-                parent?.messages?.filter { it.isDisplayable }?.takeLast(3)?.forEach { message -> Text(message.parts.filter { it.type == "text" }.joinToString("\n") { it.text }.take(500), modifier = Modifier.padding(top = 16.dp)) }
+            @Composable
+            fun Page(target: NavRoute, active: Boolean) {
+              val displayed = if (target.session == state.sessionId) state else snapshots["${state.serverId}:${target.session}"] ?: state
+              when {
+                target.session == DRAFT_SESSION -> DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
+                target.session != null -> ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
+                target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
+                  if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                }, ::editServer, onBack = { goBack() })
+                else -> HomeScreen(state, controller, onOpen = { openSession(it) }, onNewSession = { openDraft() }, onProjects = { showingProjects = true },
+                  onSelectServer = { profile -> if (profile.id != state.serverId || !state.connected) controller.connect(profile.id) },
+                  onEditServer = ::editServer, onPage = ::openPage)
               }
+            }
+            peekRoute?.let { peek ->
+              Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } }) { Page(peek, active = false) }
             }
             AnimatedContent(route, transitionSpec = {
               // The first send turns the draft into the real session in place, without a page change.
               if (initialState.session == DRAFT_SESSION && targetState.depth == initialState.depth && targetState.session != DRAFT_SESSION) {
                 EnterTransition.None togetherWith ExitTransition.None
               } else {
-                // Direction comes from the route change itself: tabs to the right / deeper pages enter
-                // from the right, tabs to the left / going back enter from the left.
+                // Deeper pages enter from the right, going back enters from the left.
                 val direction = slideDirection(initialState, targetState)
                 val motion = tween<IntOffset>(300, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
                 (fadeIn(tween(220, delayMillis = 40)) + slideInHorizontally(motion) { it * direction / 4 }) togetherWith
@@ -192,63 +211,22 @@ class MainActivity : ComponentActivity() {
               }
             }, label = "navigation") { target ->
               val active = target == route
-              val displayed = if (target.session == state.sessionId) state else snapshots["${state.serverId}:${target.session}"] ?: state
               Box(Modifier.fillMaxSize().graphicsLayer {
                 if (target == gestureRoute && gestureActive) { translationX = backProgress.value * size.width * 0.16f; scaleX = 1f - backProgress.value * 0.02f; scaleY = scaleX }
               }.then(if (active) Modifier else Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
                 .background(MiuixTheme.colorScheme.background)) {
-                if (target.session == DRAFT_SESSION) holder.SaveableStateProvider("draft:${state.serverId}:$draftNonce") {
-                  DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
-                } else if (target.session != null) holder.SaveableStateProvider("chat:${state.serverId}:${target.session}") {
-                  ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
-                } else holder.SaveableStateProvider("root:${state.serverId}:${target.tab}") {
-                  // HyperOS large-title bars that collapse on scroll; refresh is pull-to-refresh.
-                  val scroll = MiuixScrollBehavior(rememberTopAppBarState())
-                  Column(Modifier.fillMaxSize()) {
-                    when (target.tab) {
-                      RootTab.SESSIONS -> SelectorTopBar(
-                        title = state.scopeProjectId?.let { id -> state.projects.firstOrNull { it.id == id }?.name } ?: "全部会话",
-                        onTitleClick = { showingProjects = true },
-                        scrollBehavior = scroll,
-                        navigation = {
-                          CapsuleSelector(state.server?.name ?: "选择服务器", { showingServersSheet = true }, maxTextWidth = 120.dp, leading = {
-                            StatusDot(when {
-                              state.connected && state.streamConnected -> MiuixColorTokens.Success
-                              state.connected || state.loading -> MiuixColorTokens.Warning
-                              else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                            })
-                          })
-                        },
-                        actions = { IconButton(onClick = { openDraft() }, enabled = state.connected) { Icon(MiuixIcons.Add, "新建会话") } }
-                      )
-                      RootTab.ACTIVITY -> TopAppBar(title = "活动", color = MiuixTheme.colorScheme.background, scrollBehavior = scroll)
-                      RootTab.SETTINGS -> TopAppBar(title = "设置", color = MiuixTheme.colorScheme.background, scrollBehavior = scroll)
-                    }
-                    Row(Modifier.weight(1f).fillMaxWidth()) {
-                      if (wide) NavigationRail {
-                        val icons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
-                        RootTab.entries.forEachIndexed { i, tab -> NavigationRailItem(target.tab == tab, { currentTab = tab }, icons[i], tab.label) }
-                      }
-                      Box(Modifier.weight(1f).fillMaxHeight()) {
-                      when (target.tab) {
-                        RootTab.SESSIONS -> SessionsHomeScreen(state, controller, { openSession(it) }, { showingServersSheet = true }, { openDraft() }, scroll)
-                        RootTab.ACTIVITY -> ActivityScreen(state, controller, scroll) { openSession(it) }
-                        RootTab.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
-                          if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                          else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-                        }, { showingServersSheet = true }, scroll)
-                      }
-                      }
-                    }
-                    if (!wide && state.profiles.isNotEmpty()) MiuixNavigationDock(target.tab, { currentTab = it }, dark)
-                  }
+                val key = when {
+                  target.session == DRAFT_SESSION -> "draft:${state.serverId}:$draftNonce"
+                  target.session != null -> "chat:${state.serverId}:${target.session}"
+                  else -> "page:${state.serverId}:${target.page}"
                 }
+                holder.SaveableStateProvider(key) { Page(target, active) }
               }
             }
             if (state.loading || state.pendingOperations.any { ":open:" in it }) InfiniteProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter).height(3.dp))
             MiuixToastHost(globalMessage, globalMessageType, { globalMessage = null }, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp))
             // MIUIX popups must stay inside this Scaffold content's popup registry.
-            if (showingServersSheet) ServersModal(state, controller, { showingServersSheet = false }, { showingServersSheet = false; currentTab = RootTab.SESSIONS })
+            if (showingServerForm) ServersModal(state, controller, state.profiles.firstOrNull { it.id == editingServerId }) { showingServerForm = false; editingServerId = null }
             if (showingProjects) ProjectScopeSheet(state, controller, { showingProjects = false }) { showingProjects = false; showingAddProject = true }
             if (showingAddProject) DirectoryBrowserSheet(state, controller, { showingAddProject = false }) { showingAddProject = false }
           }

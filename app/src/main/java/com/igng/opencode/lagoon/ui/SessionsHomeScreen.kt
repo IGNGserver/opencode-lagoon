@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -15,25 +16,138 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.lagoon.core.*
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 /** “已完成” = results this device saw finish and the user has not opened yet. */
 private enum class HomeFilter(val label: String) { ALL("全部"), ATTENTION("待处理"), RUNNING("运行中"), UNSEEN("已完成") }
 
 /**
- * 会话首页。顶栏大标题（MainActivity）就是范围选择：「全部会话」默认按最近活动平铺所有项目的主会话、
- * 每行带项目名；选中某个项目只看它。状态与未读语义沿用 docs/HOME_REDESIGN.md（未读账本、父链汇总）。
+ * 会话首页，结构对齐 Qoder 的任务列表：标题「全部会话 ⌄」选择项目范围，右上角 ⋯ 收纳低频入口，
+ * 标题下一行是服务器胶囊（点按切换、长按编辑、＋ 添加），右下角悬浮按钮新建会话。
+ * 状态与未读语义沿用 docs/HOME_REDESIGN.md（未读账本、父链汇总）。
  */
 @Composable
-fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen: (String) -> Unit,
-  onServers: () -> Unit, onNewSession: () -> Unit, scrollBehavior: ScrollBehavior) {
+internal fun HomeScreen(
+  state: LagoonState,
+  controller: LagoonController,
+  onOpen: (String) -> Unit,
+  onNewSession: () -> Unit,
+  onProjects: () -> Unit,
+  onSelectServer: (ServerProfile) -> Unit,
+  onEditServer: (ServerProfile?) -> Unit,
+  onPage: (RootPage) -> Unit
+) {
+  var menu by remember { mutableStateOf(false) }
+  Box(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+      HomeTopBar(
+        title = state.scopeProjectId?.let { id -> state.projects.firstOrNull { it.id == id }?.name } ?: "全部会话",
+        onTitleClick = onProjects,
+        menu = {
+          Box {
+            CircleIconButton(MiuixIcons.More, "更多", { menu = true })
+            MenuPopup(menu, { menu = false }, listOf(
+              MenuSection(listOf(MenuAction("设置", MiuixIcons.Settings) { onPage(RootPage.SETTINGS) }))
+            ))
+          }
+        }
+      )
+      ServerChips(state, onSelectServer, onEditServer)
+      Box(Modifier.weight(1f).fillMaxWidth()) {
+        SessionList(state, controller, onOpen, onNewSession, onEditServer)
+      }
+    }
+    FloatingActionButton(onClick = onNewSession, modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 24.dp, bottom = 24.dp)) {
+      Icon(MiuixIcons.Add, "新建会话", Modifier.size(26.dp), tint = MiuixTheme.colorScheme.onPrimary)
+    }
+  }
+}
+
+/** Fixed header: grid glyph + scope title with ⌄ on the left, a round ⋯ on the right. */
+@Composable
+private fun HomeTopBar(title: String, onTitleClick: () -> Unit, menu: @Composable () -> Unit) {
+  Row(Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 64.dp).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
+    verticalAlignment = Alignment.CenterVertically) {
+    Box(Modifier.weight(1f)) {
+    Row(Modifier.clip(CircleShape).clickable(role = Role.Button, onClick = onTitleClick).padding(horizontal = 8.dp, vertical = 6.dp),
+      verticalAlignment = Alignment.CenterVertically) {
+      Icon(MiuixIcons.GridView, null, Modifier.size(26.dp), tint = MiuixTheme.colorScheme.onSurface)
+      Spacer(Modifier.width(10.dp))
+      Text(title, Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface))
+      Spacer(Modifier.width(4.dp))
+      DropdownChevron(20.dp, MiuixTheme.colorScheme.onSurface, "切换项目范围")
+    }
+    }
+    Spacer(Modifier.width(8.dp))
+    menu()
+  }
+}
+
+/**
+ * One capsule per saved server. The current one is tinted with the MIUIX primary and carries the
+ * connection dot (connected / recovering / offline); tap switches, long press edits, ＋ adds.
+ */
+@Composable
+private fun ServerChips(state: LagoonState, onSelect: (ServerProfile) -> Unit, onEdit: (ServerProfile?) -> Unit) {
+  LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    items(state.profiles, key = { it.id }) { profile ->
+      val current = profile.id == state.serverId
+      val dot = when {
+        !current -> null
+        state.connected && state.streamConnected -> MiuixColorTokens.Success
+        state.connected || state.loading -> MiuixColorTokens.Warning
+        else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+      }
+      Card(
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        colors = CardDefaults.defaultColors(color = if (current) MiuixColorTokens.PrimarySubtle else MiuixTheme.colorScheme.secondaryContainer),
+        pressFeedbackType = PressFeedbackType.Sink,
+        onClick = { onSelect(profile) },
+        onLongPress = { onEdit(profile) }
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          dot?.let { StatusDot(it); Spacer(Modifier.width(8.dp)) }
+          Text(profile.name, Modifier.widthIn(max = 160.dp), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MiuixTheme.textStyles.body2.copy(fontWeight = if (current) FontWeight.Medium else FontWeight.Normal,
+              color = if (current) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        }
+      }
+    }
+    item(key = "add-server") {
+      Card(
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer),
+        pressFeedbackType = PressFeedbackType.Sink,
+        onClick = { onEdit(null) }
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Icon(MiuixIcons.Add, "添加服务器", Modifier.size(20.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+          if (state.profiles.isEmpty()) {
+            Spacer(Modifier.width(4.dp))
+            Text("添加服务器", style = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SessionList(state: LagoonState, controller: LagoonController, onOpen: (String) -> Unit, onNewSession: () -> Unit, onEditServer: (ServerProfile?) -> Unit) {
   var query by rememberSaveable(state.serverId) { mutableStateOf("") }
   var filter by rememberSaveable(state.serverId) { mutableStateOf(HomeFilter.ALL) }
   var refreshing by remember { mutableStateOf(false) }
@@ -59,7 +173,7 @@ fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen:
   val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
 
   PullToRefresh(isRefreshing = refreshing, onRefresh = { refreshing = true; refreshScope.launch { controller.reload().join(); refreshing = false } },
-    topAppBarScrollBehavior = scrollBehavior, refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "已刷新")) {
+    refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "已刷新")) {
     LazyColumn(Modifier.fillMaxSize().overScrollVertical(), state = list, contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp)) {
       item(key = "search") {
         TextField(query, { query = it }, label = if (allScope) "搜索标题或项目" else "搜索此项目的会话", useLabelAsPlaceholder = true,
@@ -83,7 +197,7 @@ fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen:
         Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
           Text(when { state.loading -> "正在读取会话…"; searchingOrFiltered -> "没有符合条件的会话"; state.connected -> "暂无会话"; else -> "连接 OpenCode" }, color = muted)
           if (!state.loading) TextButton(text = if (searchingOrFiltered) "显示全部" else if (state.connected) "新建会话" else "添加服务器",
-            onClick = { if (searchingOrFiltered) { query = ""; filter = HomeFilter.ALL } else if (state.connected) onNewSession() else onServers() })
+            onClick = { if (searchingOrFiltered) { query = ""; filter = HomeFilter.ALL } else if (state.connected) onNewSession() else onEditServer(null) })
         }
       }
       if (state.sessionCursors.isNotEmpty()) item(key = "more") {

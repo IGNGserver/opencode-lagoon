@@ -131,13 +131,6 @@ internal fun DirectoryBrowserSheet(state: LagoonState, controller: LagoonControl
   }
 }
 
-/** Project chip under the draft composer: where the new session will be created. */
-@Composable
-internal fun DraftTargetChip(state: LagoonState, onPick: () -> Unit) {
-  CapsuleSelector(state.project?.name ?: "选择项目", onPick, enabled = state.connected,
-    leading = { Icon(MiuixIcons.Folder, null, Modifier.size(16.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) })
-}
-
 /** Lightweight project chooser for a draft: picks where the new session starts, without changing the home scope. */
 @Composable
 internal fun DraftTargetSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit, onAdd: () -> Unit) {
