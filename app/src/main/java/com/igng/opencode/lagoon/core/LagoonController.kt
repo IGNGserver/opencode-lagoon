@@ -1155,6 +1155,12 @@ class LagoonController private constructor(private val appContext: Context) {
     op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id) }
     if (op.connectionCurrent(this)) reload()
   }
+  /** Archives (or restores) [target]; the home list hides archived sessions, 已归档 lists them. */
+  fun setArchived(target: String, archived: Boolean, onDone: (() -> Unit)? = null) = withSession("archive", target) { op, client, session ->
+    client.setArchived(session, archived)
+    op.commitConnection { it.copy(sessions = it.sessions.map { item -> if (item.id == session.id) item.copy(archived = archived) else item }) }
+    if (op.connectionCurrent(this)) onDone?.invoke()
+  }
   fun fork(onForked: ((Session) -> Unit)? = null) = withSession("fork") { op, client, session ->
     val fork = client.forkSession(session)
     op.commitConnection { it.copy(sessions = (listOf(fork) + it.sessions).distinctBy { s -> s.id }) }

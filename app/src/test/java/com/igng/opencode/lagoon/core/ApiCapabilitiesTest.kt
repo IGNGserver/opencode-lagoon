@@ -22,6 +22,20 @@ class ApiCapabilitiesTest {
     val doc = JSONObject("""{"paths":{"/api/session/{id}/rename":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title","unknown"]}}}}}}}}""")
     assertFalse(ApiCapabilities.fromDocument(doc).supports(SessionAction.RENAME))
   }
+  @Test fun archiveIsOfferedOnlyWhenTheUpdateBodyDocumentsTimeArchived() {
+    fun caps(time: String) = ApiCapabilities.fromDocument(JSONObject("""{"paths":{"/api/session/{sessionID}":{"patch":{"requestBody":{"content":{"application/json":{"schema":
+      {"type":"object","properties":{"title":{"type":"string"},"time":$time}}}}}}}}}"""))
+    assertNull(ApiCapabilities.BASELINE.archive)
+    assertNull(caps("""{"type":"object","properties":{"updated":{"type":"number"}}}""").archive)
+    assertEquals(ArchiveEndpoint(ActionEndpoint("PATCH", "api/session/{sessionID}"), restorable = false),
+      caps("""{"type":"object","properties":{"archived":{"type":"number"}}}""").archive)
+    assertTrue(caps("""{"type":"object","properties":{"archived":{"anyOf":[{"type":"number"},{"type":"null"}]}}}""").archive!!.restorable)
+  }
+  @Test fun aNullFirstUnionStillResolvesToItsSchema() {
+    val doc = JSONObject("""{"paths":{"/api/session/{id}":{"patch":{"requestBody":{"content":{"application/json":{"schema":
+      {"anyOf":[{"type":"null"},{"type":"object","properties":{"title":{"type":"string"}}}]}}}}}}}}""")
+    assertTrue(ApiCapabilities.fromDocument(doc).supports(SessionAction.RENAME))
+  }
   @Test fun aDocumentWithoutPathsMeansTheCurrentContract() {
     assertEquals(ApiCapabilities.BASELINE, ApiCapabilities.fromDocument(JSONObject("{}")))
   }

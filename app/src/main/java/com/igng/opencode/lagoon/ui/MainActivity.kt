@@ -186,6 +186,7 @@ class MainActivity : ComponentActivity() {
               when {
                 target.session == DRAFT_SESSION -> DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
                 target.session != null -> ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
+                target.page == RootPage.ARCHIVED -> ArchivedScreen(state, controller, onOpen = { openSession(it) }, onBack = { goBack() })
                 target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, {
                   if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                   else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))

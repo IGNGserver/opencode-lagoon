@@ -60,13 +60,17 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   // ⋯ 分两段：查看会话的资源，以及对会话本身的操作。整理上下文 / 撤销 / 分享 / 分支不在手机上提供，已保存权限在设置页。
   val menuSections = listOf(
     MenuSection(buildList {
-      add(MenuAction("子任务（${state.children.size}）", MiuixIcons.Layers) { sheet = ChatSheet.CHILDREN })
+      add(MenuAction("子任务（${state.children.size}）", MiuixIcons.MindMap) { sheet = ChatSheet.CHILDREN })
       if (state.capabilities.diff) add(MenuAction("改动（${state.changes.size}）", MiuixIcons.Merge) { sheet = ChatSheet.CHANGES })
       add(MenuAction("文件", MiuixIcons.Folder) { sheet = ChatSheet.FILES; controller.listFiles() })
     }),
     MenuSection(buildList {
       add(MenuAction(if (session.id in state.pinned) "取消置顶" else "置顶", if (session.id in state.pinned) MiuixIcons.Unpin else MiuixIcons.Pin) { controller.togglePin(session.id) })
       if (state.capabilities.supports(SessionAction.RENAME)) add(MenuAction("重命名", MiuixIcons.Rename) { rename = true })
+      state.capabilities.archive?.let { archive ->
+        if (!session.archived) add(MenuAction("归档", ARCHIVE_ICON) { controller.setArchived(session.id, true, onBack) })
+        else if (archive.restorable) add(MenuAction("取消归档", UNARCHIVE_ICON) { controller.setArchived(session.id, false) })
+      }
       add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
     })
   )
