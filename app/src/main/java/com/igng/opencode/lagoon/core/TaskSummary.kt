@@ -25,7 +25,9 @@ data class TaskSummary(
   val completed: Int = 0,
   val waiting: Int = 0,
   val failed: Int = 0,
-  val items: List<TaskSummaryItem> = emptyList()
+  val items: List<TaskSummaryItem> = emptyList(),
+  /** 其中在应用处于后台时仍在运行的根会话数（用于“后台运行中”文案）。 */
+  val background: Int = 0
 ) {
   val isEmpty: Boolean get() = running == 0 && completed == 0 && waiting == 0 && failed == 0
 
@@ -69,7 +71,8 @@ data class TaskSummary(
       tasks: Map<String, TaskState>,
       notices: List<SessionNotice> = emptyList(),
       parents: Map<String, String> = emptyMap(),
-      titles: Map<String, String> = emptyMap()
+      titles: Map<String, String> = emptyMap(),
+      backgroundRoots: Set<String> = emptySet()
     ): TaskSummary {
       val active = aggregate(tasks.filterValues { it.active }, parents)
       val results = notices.filterNot { it.viewed || it.sessionId in active }.groupBy { it.sessionId }.map { (session, unseen) ->
@@ -81,9 +84,13 @@ data class TaskSummary(
       var completed = 0
       var waiting = 0
       var failed = 0
+      var background = 0
       for (task in rootTasks.values) {
         when (task.phase) {
-          in TaskState.RUNNING_PHASES -> running += 1
+          in TaskState.RUNNING_PHASES -> {
+            running += 1
+            if (task.sessionId in backgroundRoots) background += 1
+          }
           TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION -> waiting += 1
           TaskPhase.COMPLETED -> completed += 1
           TaskPhase.FAILED -> failed += 1
@@ -110,7 +117,8 @@ data class TaskSummary(
         completed = completed,
         waiting = waiting,
         failed = failed,
-        items = sortedTasks
+        items = sortedTasks,
+        background = background
       )
     }
 

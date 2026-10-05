@@ -26,6 +26,13 @@ class TaskSummaryTest {
     assertTrue(summarize(tasks("a" to TaskPhase.IDLE, "b" to TaskPhase.DISCONNECTED)).isEmpty)
   }
 
+  @Test fun backgroundRootsAreCountedSeparatelyFromRunning() {
+    val live = mapOf("a" to TaskState("a", TaskPhase.THINKING), "b" to TaskState("b", TaskPhase.TOOL))
+    val summary = TaskSummary.of(live, backgroundRoots = setOf("a"))
+    assertEquals(2, summary.running)
+    assertEquals(1, summary.background)
+  }
+
   @Test fun alwaysShowsRunningAndCompletedBaseline() {
     val summary = summarize(tasks(
       "a" to TaskPhase.THINKING,

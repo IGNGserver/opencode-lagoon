@@ -63,7 +63,7 @@ object HomeSections {
   fun byStatus(sessions: List<Session>, statuses: Map<String, SessionStatus>): List<HomeSection> {
     fun bucket(session: Session) = when (statuses[session.id] ?: SessionStatus.NONE) {
       SessionStatus.WAITING_PERMISSION, SessionStatus.WAITING_QUESTION -> 0
-      SessionStatus.RUNNING -> 1
+      SessionStatus.RUNNING, SessionStatus.BACKGROUND_RUNNING -> 1
       SessionStatus.FAILED, SessionStatus.COMPLETED -> 2
       SessionStatus.NONE -> 3
     }

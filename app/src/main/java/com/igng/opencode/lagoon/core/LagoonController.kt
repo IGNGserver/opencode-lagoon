@@ -73,6 +73,11 @@ data class LagoonState(
   val notices: List<SessionNotice> = emptyList(), val collapsedSections: Set<String> = emptySet(), val pinned: Set<String> = emptySet(),
   /** 全服务器范围的任务计数，由实时 [tasks] 与未读 [notices] 派生，供灵动岛与系统通知复用。 */
   val summary: TaskSummary = TaskSummary.EMPTY,
+  /**
+   * 曾在应用处于后台时仍在运行的根会话：用于在首页 / 灵动岛 / 会话内提示“后台运行中”。
+   * 当前仍活跃的保留，运行结束后自动移除。
+   */
+  val backgroundRunning: Set<String> = emptySet(),
   /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
   val summaryTargetId: String? = null
 ) {
@@ -91,7 +96,7 @@ data class LagoonState(
   /** Live (running / waiting) state of each session family, rolled up to its root. */
   val activeRootTasks: Map<String, TaskState> get() = TaskSummary.aggregate(tasks.filterValues { it.active }, parents)
   fun sessionStatus(session: Session, active: Map<String, TaskState> = activeRootTasks): SessionStatus =
-    sessionStatus(active[session.id], notices.unseenFor(session.id))
+    sessionStatus(active[session.id], notices.unseenFor(session.id), session.id in backgroundRunning)
 }
 
 class LagoonController private constructor(private val appContext: Context) {
@@ -115,9 +120,14 @@ class LagoonController private constructor(private val appContext: Context) {
     state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
     val titles = state.sessions.associate { it.id to state.title(it) }
     val active = state.activeRootTasks
-    val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles)
+    // 曾在后台运行：应用处于后台时把当前活跃根会话记入，回到前台后保留到该轮结束（intersect 活跃集）。
+    val observed = if (!foreground && backgroundedOnce) state.backgroundRunning + active.keys else state.backgroundRunning
+    val background = observed intersect active.keys
+    if (background != state.backgroundRunning) state.serverId?.let { store.rememberBackgroundRunning(it, background) }
+    val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles, background)
     return state.copy(
     summary = summary,
+    backgroundRunning = background,
     // Prefer the session that needs a reply, then the newest unread result; otherwise the summary's
     // headline task, so tapping the island always lands somewhere, including when tasks are only running.
     summaryTargetId = active.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
@@ -157,6 +167,8 @@ class LagoonController private constructor(private val appContext: Context) {
   @Volatile private var foreground = false
   /** [TaskMonitorService] keeps the process alive for running tasks; the stream may then run in background. */
   @Volatile private var monitoring = false
+  /** 应用是否真的退到过后台；用于把“后台期间仍在运行”的会话标成“后台运行中”。 */
+  @Volatile private var backgroundedOnce = false
   private var backgroundStop: Job? = null
   private var connecting: Job? = null
   @Volatile private var lastFullRefreshAt = 0L
@@ -254,7 +266,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedSections = store.collapsedSections(id), pinned = store.pinnedSessions(id),
-      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
+      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id), backgroundRunning = store.backgroundRunning(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -389,6 +401,20 @@ class LagoonController private constructor(private val appContext: Context) {
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
       nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
+      // 权威清除等待态：只有本次成功读取过该会话对应的权限/表单、且确认没有待处理项时才结束等待。
+      // 读取失败、或该会话根本没被读取时一律保留，避免“等待输入 ↔ 运行中”的假切换（A04）。
+      val readPermissionIds = waitingCandidates.map { it.id }.filterNot { it in failedPermissionSessions }.toSet()
+      val readFormDirs = formDirectories.map(::normalizedDirectory).filterNot { it in failedFormDirs }.toSet()
+      val resolvedWaiting = states.values.filter { it.phase in TaskState.WAITING_PHASES }.mapNotNull { task ->
+        val session = nextSessions.firstOrNull { it.id == task.sessionId } ?: return@mapNotNull null
+        val resolved = when (task.phase) {
+          TaskPhase.WAITING_PERMISSION -> task.sessionId in readPermissionIds && nextPermissions.none { it.sessionId == task.sessionId }
+          TaskPhase.WAITING_QUESTION -> normalizedDirectory(session.directory) in readFormDirs && nextQuestions.none { it.sessionId == task.sessionId }
+          else -> false
+        }
+        task.sessionId.takeIf { resolved }
+      }
+      resolvedWaiting.forEach { id -> states[id] = TaskState(id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, states[id]!!.since) }
       // Roots whose family this device saw running and that an authoritative read now shows idle.
       val parentMap = store.taskParents(serverId) + nextSessions.mapNotNull { s -> s.parentId?.let { s.id to it } }
       val wasActive = TaskSummary.aggregate(previousTasks.filterValues { it.active }, parentMap)
@@ -476,6 +502,15 @@ class LagoonController private constructor(private val appContext: Context) {
   /** The app left the foreground: keep live events only while the monitoring service runs. */
   fun onBackground() {
     foreground = false
+    backgroundedOnce = true
+    // 退到后台的这一刻就把仍在运行的根会话记入“后台运行中”，回到前台后保留到该轮结束。
+    val server = state.value.serverId
+    val active = state.value.activeRootTasks.keys
+    if (server != null && active.isNotEmpty()) {
+      val next = state.value.backgroundRunning + active
+      store.rememberBackgroundRunning(server, next)
+      mutable.update { if (it.serverId == server) it.copy(backgroundRunning = next) else it }
+    }
     backgroundStop?.cancel()
     backgroundStop = scope.launch {
       delay(BACKGROUND_GRACE_MILLIS)

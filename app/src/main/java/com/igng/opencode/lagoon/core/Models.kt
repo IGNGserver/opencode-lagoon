@@ -348,9 +348,12 @@ object TaskReducer {
 
   /** Authoritative activity from `/api/session/active`: running or not. */
   fun status(sessionId: String, running: Boolean, previous: TaskState? = null): TaskState = when {
+    // WAITING 具有粘性：服务器仍在执行时，不因一次通用的“活跃”读取就把它降级为运行中，
+    // 否则权限/表单枚举的瞬时抖动会让会话在“等待输入/运行中”之间反复跳。权威清除在 loadAll。
+    running && previous?.phase in TaskState.WAITING_PHASES -> previous!!
     running -> {
       val continuing = previous?.active == true
-      TaskState(sessionId, if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.phase else TaskPhase.THINKING,
+      TaskState(sessionId, if (continuing) previous!!.phase else TaskPhase.THINKING,
         TaskState.RUNNING_DETAIL, if (continuing) previous!!.since else System.currentTimeMillis())
     }
     previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since, System.currentTimeMillis())

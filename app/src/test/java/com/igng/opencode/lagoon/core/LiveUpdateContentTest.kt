@@ -22,6 +22,16 @@ class LiveUpdateContentTest {
     assertEquals(LiveUpdateStage.ACTIVE, LiveUpdateContent.stageOf(summary(Triple("a", TaskPhase.WAITING_PERMISSION, 1))))
   }
 
+  @Test fun backgroundRunningIsNamedInTheIslandTitle() {
+    val onlyBackground = TaskSummary.of(mapOf("a" to TaskState("a", TaskPhase.THINKING)), backgroundRoots = setOf("a"))
+    assertEquals("1 个任务在后台运行中", LiveUpdateContent.of(onlyBackground).title)
+    val mixed = TaskSummary.of(
+      mapOf("a" to TaskState("a", TaskPhase.THINKING), "b" to TaskState("b", TaskPhase.TOOL)),
+      backgroundRoots = setOf("a")
+    )
+    assertEquals("2 个任务运行中（1 个在后台）", LiveUpdateContent.of(mixed).title)
+  }
+
   @Test fun onlyTerminalResultsAreSettledNotActive() {
     // A lingering "0跑·1完" must not keep the Live Update / island alive.
     val settled = summary(Triple("a", TaskPhase.COMPLETED, 1), Triple("b", TaskPhase.FAILED, 2))
