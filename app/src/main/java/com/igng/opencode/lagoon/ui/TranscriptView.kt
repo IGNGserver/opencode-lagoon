@@ -86,7 +86,11 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
     val info = list.layoutInfo; val last = info.visibleItemsInfo.lastOrNull()
     last != null && last.index == info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 40
   } }
-  LaunchedEffect(dragged, nearBottom) { if (dragged && !autoScroll) follow = nearBottom }
+  // Track the reader's intent while they actually move the list (drag or fling), not only mid-drag, so a
+  // fling to the top also stops following. Programmatic scrolls set [autoScroll] and are ignored.
+  LaunchedEffect(list.isScrollInProgress, dragged, nearBottom) {
+    if ((list.isScrollInProgress || dragged) && !autoScroll) follow = nearBottom
+  }
   val contentKey = state.messages.lastOrNull()?.let { it.id to it.parts.sumOf { part -> part.text.length + part.output.length } }
   val permissions = state.permissions.filter { it.sessionId == state.sessionId }
   val questions = state.questions.filter { it.sessionId == state.sessionId }
@@ -118,15 +122,17 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   LaunchedEffect(imeBottom > 0) {
     if (imeBottom > 0) { follow = true; delay(120); scrollBottom() }
   }
-  // Only a deliberate scroll to the top pulls the previous page; the initial layout must not trigger it,
-  // otherwise it kept loading older history until the very first message.
+  // Standard history paging: reaching the very top pulls exactly ONE page, then stays disarmed until the
+  // reader scrolls away from the top and comes back. Anchoring by key keeps the viewport steady while the
+  // older page is inserted. This replaces the old `<= 1` check that re-triggered every frame and loaded
+  // the whole history in one go.
   val loadingOlder = state.pending("messages-more")
-  val atTop by remember { derivedStateOf {
-    val info = list.layoutInfo
-    info.totalItemsCount > 0 && (info.visibleItemsInfo.firstOrNull()?.index ?: Int.MAX_VALUE) <= 1
-  } }
-  LaunchedEffect(atTop, state.messagesCursor, loadingOlder, state.connected, state.cached, follow) {
-    if (atTop && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
+  val firstVisibleIndex by remember { derivedStateOf { list.firstVisibleItemIndex } }
+  var olderArmed by remember(state.sessionId) { mutableStateOf(true) }
+  LaunchedEffect(firstVisibleIndex) { if (firstVisibleIndex > 0) olderArmed = true }
+  LaunchedEffect(firstVisibleIndex, olderArmed, state.messagesCursor, loadingOlder, state.connected, state.cached, follow) {
+    if (firstVisibleIndex == 0 && olderArmed && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
+      olderArmed = false
       controller.loadOlderMessages()
     }
   }

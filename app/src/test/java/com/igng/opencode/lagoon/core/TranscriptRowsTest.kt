@@ -38,7 +38,7 @@ class TranscriptRowsTest {
     assertEquals(2, far.count { it.kind == "time" })
   }
 
-  @Test fun consecutiveToolsGroupByCategory() {
+  @Test fun mixedToolCallsBetweenTextsFoldIntoOneGroup() {
     val parts = listOf(
       tool("t1", "read", input = """{"filePath":"a.kt"}"""),
       tool("t2", "glob", input = """{"pattern":"*.kt"}"""),
@@ -46,19 +46,35 @@ class TranscriptRowsTest {
       tool("t4", "read", input = """{"filePath":"b.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("使用了 1 个 读取", "使用了 2 个 搜索", "使用了 1 个 读取"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertEquals(listOf("使用了 2 个读取、2 个搜索"), rows.filter { it.kind == "tool-group" }.map { it.title })
     assertTrue(rows.none { it.kind == "tool" })
   }
 
-  @Test fun editBetweenToolsSplitsGroups() {
+  @Test fun toolAndReasoningBetweenTextsShareOneGroup() {
     val parts = listOf(
-      tool("t1", "read", input = """{"filePath":"a.kt"}"""),
-      tool("t2", "edit", input = """{"filePath":"a.kt"}""", patch = "@@ -1 +1 @@"),
-      tool("t3", "list", input = """{"path":"src"}""")
+      part("r1", "reasoning", text = "先看看"),
+      tool("t1", "grep", input = """{"pattern":"foo"}"""),
+      tool("t2", "bash", input = """{"command":"ls"}"""),
+      tool("t3", "bash", input = """{"command":"pwd"}"""),
+      part("r2", "reasoning", text = "再总结")
+    )
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
+    val rows = TranscriptRows.build(messages)
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("使用了 1 个搜索、2 个Shell、2 个思考", group.title)
+    val details = TranscriptRows.details(messages, group.key)
+    assertEquals(3, details.count { it.kind == "tool" })
+    assertEquals(2, details.count { it.kind == "reasoning" })
+  }
+
+  @Test fun textSplitsRunsIntoTwoGroups() {
+    val parts = listOf(
+      tool("t1", "bash", input = """{"command":"ls"}"""),
+      part("x1", "text", text = "先执行了第一步"),
+      tool("t2", "read", input = """{"filePath":"a.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("使用了 1 个 读取", "使用了 1 个 编辑", "使用了 1 个 列表"), rows.filter { it.kind == "tool-group" }.map { it.title })
-    assertTrue(rows.none { it.kind == "tool" })
+    assertEquals(listOf("使用了 1 个Shell", "使用了 1 个读取"), rows.filter { it.kind == "tool-group" }.map { it.title })
   }
 
   @Test fun hiddenAndPendingToolsProduceNoRows() {
@@ -69,7 +85,7 @@ class TranscriptRowsTest {
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
     assertEquals(1, rows.count { it.kind == "tool-group" })
-    assertEquals("使用了 1 个 提问", rows.first { it.kind == "tool-group" }.title)
+    assertEquals("使用了 1 个提问", rows.first { it.kind == "tool-group" }.title)
   }
 
   @Test fun emptyMessagesProduceNoRows() {
@@ -81,7 +97,7 @@ class TranscriptRowsTest {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *(1..8).map { tool("t$it", "bash", input = """{"command":"cmd$it"}""", output = "ok") }.toTypedArray()))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("使用了 8 个 Shell", group.title)
+    assertEquals("使用了 8 个Shell", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertEquals(8, TranscriptRows.details(messages, group.key).count { it.kind == "tool" })
   }
@@ -111,14 +127,14 @@ class TranscriptRowsTest {
     assertEquals("Main.kt", item.subtitle)
   }
 
-  @Test fun eachCategoryGroupCarriesItsOwnCompactItems() {
+  @Test fun combinedGroupCarriesEveryCompactItem() {
     val parts = listOf(tool("t1", "read", input = """{"filePath":"a.kt"}"""), tool("t2", "grep", input = """{"pattern":"foo","include":"*.kt"}"""))
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
     val base = TranscriptRows.build(messages)
     assertTrue(base.none { it.kind == "tool" })
-    val search = base.first { it.kind == "tool-group" && it.title == "使用了 1 个 搜索" }
-    val searchItem = TranscriptRows.details(messages, search.key).first { it.kind == "tool" }
-    assertEquals("搜索内容", searchItem.title)
+    val group = base.single { it.kind == "tool-group" }
+    assertEquals("使用了 1 个读取、1 个搜索", group.title)
+    val searchItem = TranscriptRows.details(messages, group.key).first { it.kind == "tool" && it.title == "搜索内容" }
     assertTrue(searchItem.args.contains("include=*.kt"))
   }
 
@@ -192,13 +208,13 @@ class TranscriptRowsTest {
       assistant("a2", t0 + 900, part("a2#0", "reasoning", text = "再查"), tool("call_1966253", "grep", input = """{"pattern":"y"}""")),
       assistant("a3", t0 + 1_300, tool("call_7", "bash", input = """{"command":"ls"}"""), tool("call_7", "bash", input = """{"command":"pwd"}""")))
     val rows = TranscriptRows.build(messages)
-    // All greps fold into one「搜索」group even though the call id repeats; the shells form another.
-    assertEquals(listOf("使用了 2 个 搜索", "使用了 2 个 Shell"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    // One group for the whole span between user text and the turn end, even though call ids repeat.
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("使用了 2 个搜索、2 个Shell、2 个思考", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertUniqueKeys(rows)
-    val details = rows.filter { it.kind == "tool-group" }.flatMap { TranscriptRows.details(messages, it.key) }
+    val details = TranscriptRows.details(messages, group.key)
     assertEquals(4, details.count { it.kind == "tool" })
-    // The two 思考 entries beside the greps travel with the group.
     assertEquals(2, details.count { it.kind == "reasoning" })
     assertUniqueKeys(details)
   }

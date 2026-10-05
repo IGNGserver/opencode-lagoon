@@ -55,12 +55,6 @@ object TranscriptRows {
   }
 
   /**
-   * 一段连续同类工具调用。`items` 保留原始顺序，元素为（原始引用 → 部件），第二个字段是
-   * `"tool"` 或 `"reasoning"`，这样夹在工具之间的「思考」也进同一个半屏分组。
-   */
-  private class ToolGroup(val category: String, val items: MutableList<Pair<Pair<String, MessagePart>, String>> = mutableListOf())
-
-  /**
    * [revertMessageId] is the session's staged revert boundary: like the official timeline, messages
    * at or after it are hidden until the revert is cleared or committed.
    */
@@ -150,24 +144,16 @@ object TranscriptRows {
     val assistants = turn.entries.filter { it.role == "assistant" }
     val body = mutableListOf<TranscriptRow>()
     val run = mutableListOf<Pair<String, MessagePart>>()
-    // Consecutive tool calls of the same category fold behind one「使用了 N 个 X」row; the 思考 parts
-    // beside them become entries inside the same half-sheet group instead of extra inline rows.
+    // Everything between two text segments collapses into ONE 「使用了 N 个X、M 个思考」row: mixed
+    // categories (grep / shell / 思考 …) stay together instead of splitting into one group per category.
     fun flush() {
       if (run.isEmpty()) return
-      val groups = mutableListOf<ToolGroup>()
-      val pendingReasoning = mutableListOf<Pair<String, MessagePart>>()
-      run.forEach { entry ->
-        val part = entry.second
-        if (part.type == "reasoning") { pendingReasoning += entry; return@forEach }
-        val category = toolCategory(part)
-        if (groups.lastOrNull()?.category != category) groups += ToolGroup(category)
-        groups.last().items += pendingReasoning.map { it to "reasoning" }
-        pendingReasoning.clear()
-        groups.last().items += entry to "tool"
+      if (run.none { it.second.type == "tool" }) {
+        // Only reasoning between two texts: keep the inline collapsible rows.
+        run.forEach { (ref, part) -> body += partRows(turnKey, ref, part, expanded) }
+      } else {
+        body += toolGroupRows(turnKey, run, expanded)
       }
-      groups.forEach { group -> body += toolGroupRows(turnKey, group, expanded) }
-      // Reasoning that never precedes another tool in this run stays an inline collapsible row.
-      pendingReasoning.forEach { (ref, part) -> body += partRows(turnKey, ref, part, expanded) }
       run.clear()
     }
     val compaction = turn.entries.any { it.type == "compaction" }
@@ -259,27 +245,33 @@ object TranscriptRows {
   }
 
   /**
-   * One「使用了 N 个 X」row for a run of same-category tool calls. The main timeline keeps only this
-   * row; the half-sheet rebuilt by [details] carries one line per call (with its 思考 entries) and the
-   * call bodies behind [TranscriptRow.bodyOf].
+   * The single summary row for everything between two text segments: mixed tool calls and 思考 parts.
+   * Its title is a per-category count (「使用了 1 个搜索、2 个Shell、2 个思考」); the half-sheet rebuilt
+   * by [details] carries one line per call/思考, and each call's body sits behind [TranscriptRow.bodyOf].
    */
-  private fun toolGroupRows(turnKey: String, group: ToolGroup, expanded: Set<String>): List<TranscriptRow> {
-    val key = "$turnKey:tools:${group.items.first().first.first}"
-    val tools = group.items.filter { it.second == "tool" }.map { it.first.second }
+  private fun toolGroupRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> {
+    val key = "$turnKey:tools:${entries.first().first}"
+    val tools = entries.filter { it.second.type == "tool" }.map { it.second }
+    val reasonings = entries.filter { it.second.type == "reasoning" }.map { it.second }
     val status = when {
       tools.any { it.status in setOf("running", "pending") } -> "running"
       tools.any { it.status == "error" } -> "error"
       else -> "completed"
     }
+    val counts = LinkedHashMap<String, Int>()
+    tools.forEach { tool -> counts[toolCategory(tool)] = (counts[toolCategory(tool)] ?: 0) + 1 }
+    val summary = buildList {
+      counts.forEach { (label, count) -> add("$count 个$label") }
+      if (reasonings.isNotEmpty()) add("${reasonings.size} 个思考")
+    }.joinToString("、")
     val preview = tools.take(2).mapNotNull { toolInfo(it).second.takeIf { value -> value.isNotBlank() } }.joinToString("、")
-    val row = TranscriptRow(key, "tool-group", title = "使用了 ${tools.size} 个 ${group.category}", subtitle = preview, status = status,
-      target = tools.lastOrNull()?.takeIf { tools.size == 1 && tools.first().tool in SUBAGENT_TOOLS }?.target)
+    val row = TranscriptRow(key, "tool-group", title = "使用了 $summary", subtitle = preview, status = status,
+      target = tools.singleOrNull()?.takeIf { it.tool in SUBAGENT_TOOLS }?.target)
     if (key !in expanded) return listOf(row)
     val children = mutableListOf<TranscriptRow>()
-    group.items.forEach { (entry, kind) ->
-      val (ref, part) = entry
+    entries.forEach { (ref, part) ->
       val itemKey = "$key:$ref"
-      if (kind == "reasoning") {
+      if (part.type == "reasoning") {
         val text = part.text.trim()
         children += TranscriptRow(itemKey, "reasoning", title = "思考",
           subtitle = text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().take(80), detailOf = key)
