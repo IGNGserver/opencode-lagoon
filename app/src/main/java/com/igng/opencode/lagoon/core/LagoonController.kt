@@ -104,6 +104,8 @@ class LagoonController private constructor(private val appContext: Context) {
     private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED)
     /** Keep the live stream briefly after leaving the app so quick app switches do not reconnect. */
     private const val BACKGROUND_GRACE_MILLIS = 30_000L
+    /** 总览读完为非活跃后，先等这么久复核再拆岛，避免多步任务步骤间隙导致息屏超级岛反复重弹。 */
+    private const val SUMMARY_SETTLE_MILLIS = 4_000L
     @Volatile private var instance: LagoonController? = null
     fun get(context: Context): LagoonController = instance ?: synchronized(this) {
       instance ?: LagoonController(context.applicationContext).also { instance = it }
@@ -159,7 +161,10 @@ class LagoonController private constructor(private val appContext: Context) {
   private var catalogSequence = 0L
   private var messageSequence = 0L
   private var reconcile: Job? = null
-  private var lastSummary: Triple<ServerProfile?, TaskSummary, String?>? = null
+  /** 上一次真正下发到系统的岛内容指纹（服务器 + 落点 + 渲染后的文案），与瞬时的 detail 无关。 */
+  private var lastSummary: Triple<String?, String?, LiveUpdateContent>? = null
+  /** 拆岛的延迟复核任务：瞬时非活跃不立即取消，避免澎湃息屏下反复消失/重弹。 */
+  private var summarySettle: Job? = null
   private var visibleConversation: Pair<String, String>? = null
   private val seenEvents = linkedSetOf<String>()
   private val draftWrites = mutableMapOf<String, Job>()
@@ -182,7 +187,11 @@ class LagoonController private constructor(private val appContext: Context) {
     // Single publisher for the server-wide island summary, so the system notification never drifts
     // from the in-app island: both read the same derived `summary` on every state emission.
     scope.launch { state.collect { state ->
-      val signature = Triple(state.server, state.summary, state.summaryTargetId)
+      val profile = state.server
+      // Dedupe on the content the system actually renders, not on the transient task detail: a running
+      // task changes detail on every tool step, and re-posting the same island each time makes HyperOS
+      // replay its expand animation on the AOD island.
+      val signature = profile?.let { Triple(it.id, state.summaryTargetId, LiveUpdateContent.of(state.summary)) }
       if (signature != lastSummary) { lastSummary = signature; publishSummary(state); ensureMonitoring(state) }
     } }
     if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!)
@@ -192,10 +201,25 @@ class LagoonController private constructor(private val appContext: Context) {
     attempt { BackgroundSyncWorker.schedule(appContext, store.profiles().isNotEmpty()) }
       .onFailure { Diagnostics.warn("BackgroundSync", "无法安排后台定时刷新", it) }
   }
+  /**
+   * 下发服务器总览（灵动岛）。真正开始时立即发布；一旦读到的不是 ACTIVE，先等一个短暂窗口复核，
+   * 只有持续非活跃才拆岛。多步任务在步骤之间会瞬时变为 idle，立即拆岛会让息屏超级岛反复消失/重弹。
+   */
   private fun publishSummary(state: LagoonState) {
     val profile = state.server ?: return
-    // showSummary cancels the notification itself when the summary is empty.
-    notifications.showSummary(profile, state.summary, state.summaryTargetId)
+    if (LiveUpdateContent.stageOf(state.summary) == LiveUpdateStage.ACTIVE) {
+      summarySettle?.cancel(); summarySettle = null
+      notifications.showSummary(profile, state.summary, state.summaryTargetId)
+      return
+    }
+    summarySettle?.cancel()
+    summarySettle = scope.launch {
+      delay(SUMMARY_SETTLE_MILLIS)
+      val current = this@LagoonController.state.value
+      val settled = current.server
+      // 复核期间又活跃起来时，上面的 ACTIVE 分支已经取消了这个任务。
+      if (settled?.id == profile.id) notifications.showSummary(settled, current.summary, current.summaryTargetId)
+    }
   }
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()

@@ -142,6 +142,8 @@ class TaskNotifications(private val context: Context) {
       .setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
       .setOngoing(active).setAutoCancel(!active)
       .setOnlyAlertOnce(true).setShowWhen(false)
+      // 内容级更新不应触发声音/横幅；澎湃超级岛只应按内容变化做平滑更新，而不是重放“收到通知”动画。
+      .setSilent(true)
       .setCategory(if (active) NotificationCompat.CATEGORY_PROGRESS else NotificationCompat.CATEGORY_STATUS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setRequestPromotedOngoing(active)

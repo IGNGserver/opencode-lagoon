@@ -14,7 +14,7 @@ data class ToolSection(val label: String, val text: String, val code: Boolean = 
  * leading notices), notice rows, part visibility, context-tool grouping, interruption divider and
  * the last-error rule. Row kinds:
  * time | user | text | reasoning | meta | divider | thinking | error | note |
- * tool | tool-body | context-group | context-item | tool-summary | diff-summary | diff-file
+ * tool | tool-body | tool-group | diff-summary | diff-file | reasoning-body
  */
 data class TranscriptRow(
   val key: String,
@@ -33,16 +33,18 @@ data class TranscriptRow(
    * 该行是某个分组行的明细，取值即分组行的 key；null 表示主时间线行。主时间线不渲染明细，
    * 点击分组行时由 [TranscriptRows.details] 取同一批行在半屏窗口里滚动查看。
    */
-  val detailOf: String? = null
+  val detailOf: String? = null,
+  /**
+   * 该行是半屏窗口里某个条目（工具调用 / 思考 / 改动文件）的正文时，取值即条目头的 key；
+   * null 表示条目头或主时间线行。半屏窗口据此在用户点开条目前隐藏正文。
+   */
+  val bodyOf: String? = null
 )
 
 object TranscriptRows {
-  /** Tool runs of at least this many calls fold behind one summary row. */
-  const val SUMMARY_THRESHOLD = 8
   private const val TIME_GAP_MS = 30 * 60 * 1000L
   private const val MAX_DIFF_FILES = 10
 
-  private val CONTEXT_TOOLS = setOf("read", "glob", "grep", "list")
   private val HIDDEN_TOOLS = setOf("todowrite")
   private val EDIT_TOOLS = setOf("edit", "write", "patch", "apply_patch")
   private val FINISHED_TOOLS = setOf("completed", "error")
@@ -51,6 +53,12 @@ object TranscriptRows {
   private class Turn(val id: String, val created: Long, val user: Message? = null, val shell: Message? = null) {
     val entries = mutableListOf<Message>()
   }
+
+  /**
+   * 一段连续同类工具调用。`items` 保留原始顺序，元素为（原始引用 → 部件），第二个字段是
+   * `"tool"` 或 `"reasoning"`，这样夹在工具之间的「思考」也进同一个半屏分组。
+   */
+  private class ToolGroup(val category: String, val items: MutableList<Pair<Pair<String, MessagePart>, String>> = mutableListOf())
 
   /**
    * [revertMessageId] is the session's staged revert boundary: like the official timeline, messages
@@ -85,18 +93,16 @@ object TranscriptRows {
     return rows.withUniqueKeys()
   }
 
-  /** 分组行的 kind（点击后弹半屏窗口看明细的入口）。 */
-  private val GROUP_KINDS = setOf("tool", "context-group", "tool-summary", "diff-summary")
-
   /**
-   * 点击分组行时，半屏窗口要展示的明细。与主时间线共用同一套投影：把该分组（以及它直接包含的
-   * 下一级分组）标记为展开后重建，再取出带 [TranscriptRow.detailOf] 的行，顺序与官方时间线一致。
+   * 点击分组行时，半屏窗口要展示的明细。与主时间线共用同一套投影：先展开该分组，再把它直接包含
+   * 的条目（工具调用 / 思考 / 改动文件）一并展开，取出带 [TranscriptRow.detailOf] 的行。条目正文由
+   * [TranscriptRow.bodyOf] 指回条目头，半屏窗口默认折叠正文，点击条目才显示。
    */
   fun details(messages: List<Message>, key: String, working: Boolean = false, revertMessageId: String? = null): List<TranscriptRow> {
     if (key.isBlank()) return emptyList()
     val first = build(messages, setOf(key), working, revertMessageId)
-    val childGroups = first.filter { it.detailOf == key && it.kind in GROUP_KINDS }.map { it.key }.toSet()
-    val rows = if (childGroups.isEmpty()) first else build(messages, setOf(key) + childGroups, working, revertMessageId)
+    val children = first.filter { it.detailOf == key }.map { it.key }.toSet()
+    val rows = if (children.isEmpty()) first else build(messages, setOf(key) + children, working, revertMessageId)
     return rows.filter { it.detailOf != null }
   }
 
@@ -144,26 +150,24 @@ object TranscriptRows {
     val assistants = turn.entries.filter { it.role == "assistant" }
     val body = mutableListOf<TranscriptRow>()
     val run = mutableListOf<Pair<String, MessagePart>>()
+    // Consecutive tool calls of the same category fold behind one「使用了 N 个 X」row; the 思考 parts
+    // beside them become entries inside the same half-sheet group instead of extra inline rows.
     fun flush() {
       if (run.isEmpty()) return
-      val folded = mutableListOf<TranscriptRow>()
-      var index = 0
-      while (index < run.size) {
-        val (ref, part) = run[index]
-        if (part.tool in CONTEXT_TOOLS && part.status != "error") {
-          val group = mutableListOf<Pair<String, MessagePart>>()
-          while (index < run.size && run[index].second.tool in CONTEXT_TOOLS && run[index].second.status != "error") group += run[index++]
-          folded += contextGroupRows(turnKey, group, expanded)
-        } else {
-          folded += toolRows(turnKey, ref, part, expanded)
-          index++
-        }
+      val groups = mutableListOf<ToolGroup>()
+      val pendingReasoning = mutableListOf<Pair<String, MessagePart>>()
+      run.forEach { entry ->
+        val part = entry.second
+        if (part.type == "reasoning") { pendingReasoning += entry; return@forEach }
+        val category = toolCategory(part)
+        if (groups.lastOrNull()?.category != category) groups += ToolGroup(category)
+        groups.last().items += pendingReasoning.map { it to "reasoning" }
+        pendingReasoning.clear()
+        groups.last().items += entry to "tool"
       }
-      if (run.size >= SUMMARY_THRESHOLD) {
-        val key = "$turnKey:summary:${run.first().first}"
-        body += TranscriptRow(key, "tool-summary", title = "已处理 ${run.size} 个操作")
-        if (key in expanded) body += folded.map { it.copy(detailOf = key) }
-      } else body += folded
+      groups.forEach { group -> body += toolGroupRows(turnKey, group, expanded) }
+      // Reasoning that never precedes another tool in this run stays an inline collapsible row.
+      pendingReasoning.forEach { (ref, part) -> body += partRows(turnKey, ref, part, expanded) }
       run.clear()
     }
     val compaction = turn.entries.any { it.type == "compaction" }
@@ -178,6 +182,7 @@ object TranscriptRows {
         when {
           part.type == "tool" && (part.tool in HIDDEN_TOOLS || (part.tool == "question" && part.status !in FINISHED_TOOLS)) -> Unit
           part.type == "tool" && part.isDisplayable -> run += partRef(message, index, part) to part
+          part.type == "reasoning" && part.text.isNotBlank() -> run += partRef(message, index, part) to part
           else -> {
             flush()
             body += partRows(turnKey, partRef(message, index, part), part, expanded)
@@ -199,7 +204,9 @@ object TranscriptRows {
     if (assistants.isNotEmpty()) {
       val finished = assistants.all { it.completedAt != null }
       val first = turn.user?.created ?: turn.created
-      val duration = if (finished) assistants.maxOf { it.completedAt ?: 0L } - first else 0L
+      // A running turn's「用时」would be a stale, non-ticking number that reads as “已结束” at the very
+      // bottom; only surface it once the whole turn has actually completed.
+      val duration = if (finished && !working) assistants.maxOf { it.completedAt ?: 0L } - first else 0L
       val meta = listOfNotNull(
         last?.agent,
         last?.model?.label,
@@ -219,10 +226,11 @@ object TranscriptRows {
         if (key in expanded) edits.take(MAX_DIFF_FILES).forEach { (ref, edit) ->
           val path = edit.files.joinToString("、").ifBlank { inputString(edit, "path") }.ifBlank { "改动" }
           val patch = edit.patch.ifBlank { edit.output }
-          rows += TranscriptRow("$key:$ref", "diff-file", title = path, detailOf = key)
+          val fileKey = "$key:$ref"
+          rows += TranscriptRow(fileKey, "diff-file", title = path, detailOf = key)
           MarkdownBlocks.chunks(patch).forEachIndexed { index, chunk ->
-            rows += TranscriptRow("$key:$ref:$index", "tool-body", title = if (index == 0) "改动" else "", text = chunk,
-              copyText = patch.takeIf { index == 0 }, detailOf = key)
+            rows += TranscriptRow("$fileKey:$index", "tool-body", title = if (index == 0) "改动" else "", text = chunk,
+              copyText = patch.takeIf { index == 0 }, detailOf = key, bodyOf = fileKey)
           }
         }
       }
@@ -250,22 +258,69 @@ object TranscriptRows {
       }
   }
 
-  private fun contextGroupRows(turnKey: String, refs: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> {
-    val key = "$turnKey:ctx:${refs.first().first}"
-    val parts = refs.map { it.second }
-    val read = parts.count { it.tool == "read" }
-    val search = parts.count { it.tool == "glob" || it.tool == "grep" }
-    val list = parts.count { it.tool == "list" }
-    val summary = listOfNotNull(
-      "$read 个读取".takeIf { read > 0 }, "$search 个搜索".takeIf { search > 0 }, "$list 个列表".takeIf { list > 0 }
-    ).joinToString("、").ifBlank { "无" }
-    return listOf(TranscriptRow(key, "context-group", title = "已收集上下文", subtitle = summary, status = parts.last().status)) +
-      if (key !in expanded) emptyList() else refs.map { (ref, part) ->
+  /**
+   * One「使用了 N 个 X」row for a run of same-category tool calls. The main timeline keeps only this
+   * row; the half-sheet rebuilt by [details] carries one line per call (with its 思考 entries) and the
+   * call bodies behind [TranscriptRow.bodyOf].
+   */
+  private fun toolGroupRows(turnKey: String, group: ToolGroup, expanded: Set<String>): List<TranscriptRow> {
+    val key = "$turnKey:tools:${group.items.first().first.first}"
+    val tools = group.items.filter { it.second == "tool" }.map { it.first.second }
+    val status = when {
+      tools.any { it.status in setOf("running", "pending") } -> "running"
+      tools.any { it.status == "error" } -> "error"
+      else -> "completed"
+    }
+    val preview = tools.take(2).mapNotNull { toolInfo(it).second.takeIf { value -> value.isNotBlank() } }.joinToString("、")
+    val row = TranscriptRow(key, "tool-group", title = "使用了 ${tools.size} 个 ${group.category}", subtitle = preview, status = status,
+      target = tools.lastOrNull()?.takeIf { tools.size == 1 && tools.first().tool in SUBAGENT_TOOLS }?.target)
+    if (key !in expanded) return listOf(row)
+    val children = mutableListOf<TranscriptRow>()
+    group.items.forEach { (entry, kind) ->
+      val (ref, part) = entry
+      val itemKey = "$key:$ref"
+      if (kind == "reasoning") {
+        val text = part.text.trim()
+        children += TranscriptRow(itemKey, "reasoning", title = "思考",
+          subtitle = text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().take(80), detailOf = key)
+        reasoningBodies(key, itemKey, text).forEach { children += it }
+      } else {
         val (title, subtitle) = toolInfo(part)
-        TranscriptRow("$key:$ref", "context-item", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status, detailOf = key)
+        children += TranscriptRow(itemKey, "tool", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status,
+          attachments = part.attachments, target = part.target.takeIf { part.tool in SUBAGENT_TOOLS }, detailOf = key)
+        toolSections(part).flatMap { section ->
+          MarkdownBlocks.chunks(section.text).mapIndexed { index, chunk ->
+            TranscriptRow("$itemKey:${section.label}:$index", "tool-body", title = if (index == 0) section.label else "", text = chunk,
+              copyText = section.copyText?.takeIf { index == 0 }, detailOf = key, bodyOf = itemKey)
+          }
+        }.forEach { children += it }
       }
+    }
+    return listOf(row) + children
   }
 
+  /** 半屏窗口里「思考」条目的正文，默认折叠，点击条目头才显示。 */
+  private fun reasoningBodies(groupKey: String, itemKey: String, text: String): List<TranscriptRow> =
+    MarkdownBlocks.chunks(text).mapIndexed { index, chunk ->
+      TranscriptRow("$itemKey:body:$index", "reasoning-body", text = chunk, detailOf = groupKey, bodyOf = itemKey)
+    }
+
+  /** 工具归类文案，用于「使用了 N 个 X」的分组标题。 */
+  private fun toolCategory(part: MessagePart): String = when (part.tool) {
+    in SHELL_TOOLS -> "Shell"
+    "read" -> "读取"
+    "list" -> "列表"
+    "glob", "grep" -> "搜索"
+    in EDIT_TOOLS -> "编辑"
+    "webfetch" -> "网页"
+    "websearch" -> "网络搜索"
+    in SUBAGENT_TOOLS -> "子任务"
+    "question" -> "提问"
+    "skill" -> "技能"
+    else -> part.tool.ifBlank { "工具" }
+  }
+
+  /** A standalone tool row, used for explicit shell turns; its body is shown only after [details] expands it. */
   private fun toolRows(turnKey: String, ref: String, part: MessagePart, expanded: Set<String>): List<TranscriptRow> {
     val key = "$turnKey:tool:$ref"
     val (title, subtitle) = toolInfo(part)
@@ -274,7 +329,7 @@ object TranscriptRows {
     return listOf(row) + if (key !in expanded) emptyList() else toolSections(part).flatMap { section ->
       MarkdownBlocks.chunks(section.text).mapIndexed { index, chunk ->
         TranscriptRow("$key:${section.label}:$index", "tool-body", title = if (index == 0) section.label else "", text = chunk,
-          copyText = section.copyText?.takeIf { index == 0 }, detailOf = key)
+          copyText = section.copyText?.takeIf { index == 0 }, detailOf = key, bodyOf = key)
       }
     }
   }

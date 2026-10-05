@@ -38,7 +38,7 @@ class TranscriptRowsTest {
     assertEquals(2, far.count { it.kind == "time" })
   }
 
-  @Test fun consecutiveContextToolsFoldIntoOneGroup() {
+  @Test fun consecutiveToolsGroupByCategory() {
     val parts = listOf(
       tool("t1", "read", input = """{"filePath":"a.kt"}"""),
       tool("t2", "glob", input = """{"pattern":"*.kt"}"""),
@@ -46,23 +46,19 @@ class TranscriptRowsTest {
       tool("t4", "read", input = """{"filePath":"b.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    val groups = rows.filter { it.kind == "context-group" }
-    assertEquals(1, groups.size)
-    assertEquals("已收集上下文", groups.first().title)
-    assertTrue(groups.first().subtitle.contains("2 个读取"))
-    assertTrue(groups.first().subtitle.contains("2 个搜索"))
+    assertEquals(listOf("使用了 1 个 读取", "使用了 2 个 搜索", "使用了 1 个 读取"), rows.filter { it.kind == "tool-group" }.map { it.title })
     assertTrue(rows.none { it.kind == "tool" })
   }
 
-  @Test fun editBetweenContextToolsSplitsGroups() {
+  @Test fun editBetweenToolsSplitsGroups() {
     val parts = listOf(
       tool("t1", "read", input = """{"filePath":"a.kt"}"""),
       tool("t2", "edit", input = """{"filePath":"a.kt"}""", patch = "@@ -1 +1 @@"),
       tool("t3", "list", input = """{"path":"src"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(2, rows.count { it.kind == "context-group" })
-    assertEquals(1, rows.count { it.kind == "tool" && it.title == "编辑文件" })
+    assertEquals(listOf("使用了 1 个 读取", "使用了 1 个 编辑", "使用了 1 个 列表"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertTrue(rows.none { it.kind == "tool" })
   }
 
   @Test fun hiddenAndPendingToolsProduceNoRows() {
@@ -72,8 +68,8 @@ class TranscriptRowsTest {
       tool("t3", "question", status = "completed")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(1, rows.count { it.kind == "tool" })
-    assertEquals("提问", rows.first { it.kind == "tool" }.title)
+    assertEquals(1, rows.count { it.kind == "tool-group" })
+    assertEquals("使用了 1 个 提问", rows.first { it.kind == "tool-group" }.title)
   }
 
   @Test fun emptyMessagesProduceNoRows() {
@@ -81,26 +77,27 @@ class TranscriptRowsTest {
     assertTrue(rows.isEmpty())
   }
 
-  @Test fun toolRunOfEightFoldsBehindSummaryRowUntilExpanded() {
-    val parts = (1..8).map { tool("t$it", "bash", input = """{"command":"cmd$it"}""", output = "ok") }
-    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    val summary = rows.single { it.kind == "tool-summary" }
-    assertEquals("已处理 8 个操作", summary.title)
+  @Test fun aRunOfSameCategoryToolsFoldsIntoOneGroup() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *(1..8).map { tool("t$it", "bash", input = """{"command":"cmd$it"}""", output = "ok") }.toTypedArray()))
+    val rows = TranscriptRows.build(messages)
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("使用了 8 个 Shell", group.title)
     assertTrue(rows.none { it.kind == "tool" })
-    val expanded = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())), setOf(summary.key))
-    assertEquals(8, expanded.count { it.kind == "tool" })
+    assertEquals(8, TranscriptRows.details(messages, group.key).count { it.kind == "tool" })
   }
 
-  @Test fun toolRowsDeriveTitleSubtitleAndSections() {
-    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500,
-      tool("t1", "bash", input = """{"command":"ls -la"}""", output = "file1\nfile2"))))
-    val row = rows.single { it.kind == "tool" }
-    assertEquals("命令行", row.title)
-    assertEquals("ls -la", row.subtitle)
-    val expanded = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500,
-      tool("t1", "bash", input = """{"command":"ls -la"}""", output = "file1"))), setOf(row.key))
-    val body = expanded.filter { it.kind == "tool-body" }
+  @Test fun halfSheetCarriesToolTitleSubtitleAndBody() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500,
+      tool("t1", "bash", input = """{"command":"ls -la"}""", output = "file1\nfile2")))
+    val group = TranscriptRows.build(messages).single { it.kind == "tool-group" }
+    val details = TranscriptRows.details(messages, group.key)
+    val item = details.single { it.kind == "tool" }
+    assertEquals("命令行", item.title)
+    assertEquals("ls -la", item.subtitle)
+    val body = details.filter { it.kind == "tool-body" }
     assertTrue(body.isNotEmpty())
+    // The body is attached to the item header so the sheet can keep it collapsed until tapped.
+    assertEquals(item.key, body.first().bodyOf)
     assertTrue(body.first().text.contains("$ ls -la"))
     assertTrue(body.first().text.contains("file1"))
   }
@@ -108,20 +105,21 @@ class TranscriptRowsTest {
   @Test fun readToolUsesFilenameAsSubtitle() {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500,
       tool("t1", "read", input = """{"filePath":"src/Main.kt"}""")))
-    val group = TranscriptRows.build(messages).single { it.kind == "context-group" }
-    val item = TranscriptRows.build(messages, setOf(group.key)).first { it.kind == "context-item" }
+    val group = TranscriptRows.build(messages).single { it.kind == "tool-group" }
+    val item = TranscriptRows.details(messages, group.key).first { it.kind == "tool" }
     assertEquals("读取文件", item.title)
     assertEquals("Main.kt", item.subtitle)
   }
 
-  @Test fun contextGroupExpandsToCompactItems() {
+  @Test fun eachCategoryGroupCarriesItsOwnCompactItems() {
     val parts = listOf(tool("t1", "read", input = """{"filePath":"a.kt"}"""), tool("t2", "grep", input = """{"pattern":"foo","include":"*.kt"}"""))
-    val base = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    val group = base.single { it.kind == "context-group" }
-    assertTrue(base.none { it.kind == "context-item" })
-    val expanded = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())), setOf(group.key))
-    assertEquals(2, expanded.count { it.kind == "context-item" })
-    assertTrue(expanded.first { it.kind == "context-item" && it.title == "搜索内容" }.args.contains("include=*.kt"))
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
+    val base = TranscriptRows.build(messages)
+    assertTrue(base.none { it.kind == "tool" })
+    val search = base.first { it.kind == "tool-group" && it.title == "使用了 1 个 搜索" }
+    val searchItem = TranscriptRows.details(messages, search.key).first { it.kind == "tool" }
+    assertEquals("搜索内容", searchItem.title)
+    assertTrue(searchItem.args.contains("include=*.kt"))
   }
 
   @Test fun diffSummaryAggregatesEditedFiles() {
@@ -139,6 +137,14 @@ class TranscriptRowsTest {
     assertTrue(pending.any { it.kind == "thinking" })
     val done = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, part("p1", "text", text = "x"))), working = true)
     assertTrue(done.none { it.kind == "thinking" })
+  }
+
+  @Test fun runningTurnOmitsTheStaticDuration() {
+    // Between steps every existing assistant message may already be "completed"; showing a frozen 用时
+    // there reads as “已结束”, so the running turn must not render it.
+    val messages = listOf(user("u1", t0), assistant("a1", t0, part("p1", "text", text = "x"), completedAt = t0 + 5_000))
+    assertFalse(TranscriptRows.build(messages, working = true).single { it.kind == "meta" }.meta.contains("用时"))
+    assertTrue(TranscriptRows.build(messages, working = false).single { it.kind == "meta" }.meta.contains("用时 5 秒"))
   }
 
   @Test fun metaRowCarriesDurationAndCopyText() {
@@ -186,12 +192,15 @@ class TranscriptRowsTest {
       assistant("a2", t0 + 900, part("a2#0", "reasoning", text = "再查"), tool("call_1966253", "grep", input = """{"pattern":"y"}""")),
       assistant("a3", t0 + 1_300, tool("call_7", "bash", input = """{"command":"ls"}"""), tool("call_7", "bash", input = """{"command":"pwd"}""")))
     val rows = TranscriptRows.build(messages)
-    assertEquals(2, rows.count { it.kind == "context-group" })
-    assertEquals(2, rows.count { it.kind == "tool" })
+    // All greps fold into one「搜索」group even though the call id repeats; the shells form another.
+    assertEquals(listOf("使用了 2 个 搜索", "使用了 2 个 Shell"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertTrue(rows.none { it.kind == "tool" })
     assertUniqueKeys(rows)
-    val expanded = TranscriptRows.build(messages, rows.filter { it.kind == "context-group" || it.kind == "tool" }.map { it.key }.toSet())
-    assertEquals(2, expanded.count { it.kind == "context-item" })
-    assertUniqueKeys(expanded)
+    val details = rows.filter { it.kind == "tool-group" }.flatMap { TranscriptRows.details(messages, it.key) }
+    assertEquals(4, details.count { it.kind == "tool" })
+    // The two 思考 entries beside the greps travel with the group.
+    assertEquals(2, details.count { it.kind == "reasoning" })
+    assertUniqueKeys(details)
   }
 
   @Test fun duplicateMessagesStillProduceUniqueKeys() {
@@ -204,10 +213,10 @@ class TranscriptRowsTest {
 
   @Test fun keysAreStableAcrossRebuildsSoExpansionSurvivesUpdates() {
     val first = listOf(user("u1", t0), assistant("a1", t0 + 500, part("a1#0", "reasoning", text = "r"), tool("call_1", "bash", input = """{"command":"ls"}""", output = "x")))
-    val toolKey = TranscriptRows.build(first).single { it.kind == "tool" }.key
+    val groupKey = TranscriptRows.build(first).single { it.kind == "tool-group" }.key
     val grown = first + assistant("a2", t0 + 900, part("a2#0", "text", text = "完成"))
-    val rebuilt = TranscriptRows.build(grown, setOf(toolKey))
-    assertEquals(toolKey, rebuilt.single { it.kind == "tool" }.key)
+    val rebuilt = TranscriptRows.build(grown, setOf(groupKey))
+    assertEquals(groupKey, rebuilt.single { it.kind == "tool-group" }.key)
     assertTrue(rebuilt.any { it.kind == "tool-body" })
   }
 
@@ -270,34 +279,37 @@ class TranscriptRowsTest {
     val subagent = part("call_s", "tool", tool = "subagent", input = """{"agent":"explore","description":"查找调用"}""", status = "running").copy(target = "ses_child")
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 1, subagent, completedAt = null), queued), working = true)
     assertTrue(rows.single { it.kind == "user" && it.text == "下一步" }.meta.startsWith("排队中"))
-    val tool = rows.single { it.kind == "tool" }
+    val tool = rows.single { it.kind == "tool-group" }
     assertEquals("ses_child", tool.target); assertEquals("explore · 查找调用", tool.subtitle)
   }
 
   @Test fun editDiffsComeFromToolMetadata() {
     val edit = JSONObject("""{"type":"tool","id":"call_e","name":"edit","state":{"status":"completed","input":{"path":"src/a.kt","oldString":"a","newString":"b"},"content":[{"type":"text","text":"ok"}],
       "metadata":{"files":[{"file":"src/a.kt","patch":"@@ -1 +1 @@\n-a\n+b","additions":1,"deletions":1,"status":"modified"}]}},"time":{"created":1}}""").toAssistantPart("call_e")
-    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 1, edit)))
-    assertEquals("a.kt", rows.single { it.kind == "tool" }.subtitle)
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 1, edit))
+    val rows = TranscriptRows.build(messages)
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("a.kt", TranscriptRows.details(messages, group.key).single { it.kind == "tool" }.subtitle)
     val summary = rows.single { it.kind == "diff-summary" }
     assertEquals("本轮改动 1 个文件", summary.title)
   }
 
   @Test fun halfSheetDetailsReturnTheGroupChildren() {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, tool("t1", "bash", input = """{"command":"ls -la"}""", output = "file.txt")))
-    val row = TranscriptRows.build(messages).single { it.kind == "tool" }
+    val row = TranscriptRows.build(messages).single { it.kind == "tool-group" }
     val details = TranscriptRows.details(messages, row.key)
     assertTrue(details.isNotEmpty())
     assertTrue(details.all { it.detailOf == row.key })
-    assertTrue(details.any { it.kind == "tool-body" && it.text.contains("ls -la") })
+    assertTrue(details.any { it.kind == "tool" && it.bodyOf == null })
+    assertTrue(details.any { it.kind == "tool-body" && it.text.contains("ls -la") && it.bodyOf != null })
   }
 
   @Test fun halfSheetDetailsForContextGroupReturnItems() {
     val parts = listOf(tool("t1", "read", input = """{"filePath":"a.kt"}"""), tool("t2", "read", input = """{"filePath":"b.kt"}"""))
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
-    val group = TranscriptRows.build(messages).single { it.kind == "context-group" }
+    val group = TranscriptRows.build(messages).single { it.kind == "tool-group" }
     val details = TranscriptRows.details(messages, group.key)
-    assertEquals(2, details.count { it.kind == "context-item" })
+    assertEquals(2, details.count { it.kind == "tool" })
     assertTrue(details.all { it.detailOf == group.key })
   }
 
