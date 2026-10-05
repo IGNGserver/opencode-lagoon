@@ -54,13 +54,8 @@ import java.util.UUID
 
 /* ------------------------------------------------------------------ *
  * 信息架构主线：Server → Project/Directory → Session → Conversation
- * 「会话」是默认首页：按项目折叠分组，组内严格按服务端修改时间排序。
- * 状态附着在 Session 上，不再保留工作台 Dashboard、焦点看板与指标大数字。
+ * 「会话」是唯一的根页面；设置与已归档从首页 ⋯ 菜单整页推入。
  * ------------------------------------------------------------------ */
-
-private fun projectName(state: LagoonState, session: Session): String =
-  resolveSessionProject(session, state.projects)?.name
-    ?: session.directory.substringAfterLast('/').ifBlank { session.directory }
 
 private class DateFormatterCache {
   private var locale: java.util.Locale? = null
@@ -92,406 +87,68 @@ internal fun formatRelative(timestamp: Long, now: Long = System.currentTimeMilli
   }
 }
 
-/** 已运行时长：活动页与运行中会话。 */
-private fun formatElapsed(since: Long, now: Long = System.currentTimeMillis()): String {
-  if (since <= 0) return ""
-  val diff = (now - since).coerceAtLeast(0)
-  val minute = 60_000L
-  val hour = 60 * minute
-  return when {
-    diff < minute -> "已运行 ${diff / 1000} 秒"
-    diff < hour -> "已运行 ${diff / minute} 分钟"
-    else -> "已运行 ${diff / hour} 小时"
-  }
-}
-
-
-/** The state itself is the pill (“运行中 / 等待授权 …”); the meta line only locates the session. */
-private fun buildMeta(state: LagoonState, session: Session, includeServer: Boolean = false): String =
-  buildList {
-    add(projectName(state, session))
-    if (includeServer && state.profiles.size > 1) state.server?.name?.let(::add)
-  }.joinToString(" · ")
-
 /**
- * 高密度会话条目：标题 / 所属项目 / 状态 / 时间（多服务器时含 Server）。
- * 需要处理的会话以警示底色置顶强调，状态始终附着在 Session 上。
+ * Add ([existing] = null) or edit one server. Switching servers happens on the home capsules; this
+ * sheet only owns the profile itself, including removing it from the device.
  */
-@Composable
-private fun MiuixSessionRow(
-  session: Session,
-  task: TaskState?,
-  meta: String,
-  onClick: () -> Unit,
-  emphasized: Boolean = false,
-  trailing: String? = null
-) {
-  Card(
-    modifier = Modifier.fillMaxWidth(),
-    pressFeedbackType = PressFeedbackType.Sink,
-    showIndication = true,
-    insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-    colors = CardDefaults.defaultColors(
-      color = if (emphasized) MiuixColorTokens.WarningSubtle else MiuixTheme.colorScheme.surfaceContainer
-    ),
-    onClick = onClick
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Column(Modifier.weight(1f)) {
-        Text(
-          text = session.title,
-          style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium),
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-          text = meta,
-          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis
-        )
-      }
-      Spacer(Modifier.width(10.dp))
-      Column(horizontalAlignment = Alignment.End) {
-        if (task != null && task.phase != TaskPhase.IDLE) {
-          MiuixStatePill(task.phase)
-          Spacer(Modifier.height(3.dp))
-        }
-        if (!trailing.isNullOrBlank()) {
-          Text(
-            text = trailing,
-            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-          )
-        }
-      }
-    }
-  }
-}
-
-@Composable
-fun MiuixEmptyStateCard(title: String, subtitle: String) {
-  Card(
-    modifier = Modifier.fillMaxWidth(),
-    cornerRadius = 16.dp,
-    insideMargin = PaddingValues(20.dp),
-    colors = CardDefaults.defaultColors(
-      color = MiuixTheme.colorScheme.surfaceContainer
-    )
-  ) {
-    Text(
-      text = title,
-      style = MiuixTheme.textStyles.headline2.copy(
-        fontWeight = FontWeight.SemiBold,
-        color = MiuixTheme.colorScheme.onSurface
-      )
-    )
-    Spacer(Modifier.height(4.dp))
-    Text(
-      text = subtitle,
-      style = MiuixTheme.textStyles.footnote1.copy(
-        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-      )
-    )
-  }
-}
-
-@Composable
-private fun MiuixEmptyActionCard(title: String, subtitle: String, action: String, onAction: () -> Unit) {
-  Card(
-    modifier = Modifier.fillMaxWidth(),
-    cornerRadius = 16.dp,
-    insideMargin = PaddingValues(20.dp),
-    colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer)
-  ) {
-    Text(
-      text = title,
-      style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
-    )
-    Spacer(Modifier.height(4.dp))
-    Text(
-      text = subtitle,
-      style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-    )
-    Spacer(Modifier.height(14.dp))
-    Button(
-      onClick = onAction,
-      cornerRadius = 18.dp,
-      colors = ButtonDefaults.buttonColorsPrimary()
-    ) {
-      Text(action)
-    }
-  }
-}
-
-/* ---------------------------- 活动中心 ---------------------------- */
-
-/**
- * Coding agent 活动中心：需要处理（授权 / 提问就地回复）、正在运行、最近完成。
- * 用于快速处理 Permission / Question 与查看跨项目任务状态，不是统计 Dashboard。
- */
-@Composable
-fun ActivityScreen(
-  state: LagoonState,
-  controller: LagoonController,
-  scrollBehavior: ScrollBehavior,
-  onOpen: (String) -> Unit
-) {
-  var refreshing by remember { mutableStateOf(false) }
-  val refreshScope = rememberCoroutineScope()
-  val permissions = state.permissions
-  val questions = state.questions
-  val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
-  val active = state.activeRootTasks
-  val running = state.sessions.filter { session -> session.parentId == null && active[session.id]?.phase in TaskState.RUNNING_PHASES }
-  // Results come from the unread ledger: unread ones carry “已完成 / 失败”, opened ones are history.
-  val finished = state.notices.groupBy { it.sessionId }.mapNotNull { (id, notices) ->
-    val session = state.sessions.firstOrNull { it.id == id && it.parentId == null } ?: return@mapNotNull null
-    val latest = notices.maxBy { it.time }
-    val unseen = notices.unseenFor(id)
-    val phase = when { id in active -> null; unseen.any { it.error } -> TaskPhase.FAILED; unseen.isNotEmpty() -> TaskPhase.COMPLETED; else -> null }
-    Triple(session, latest.time, phase?.let { TaskState(id, it, since = latest.time, finishedAt = latest.time) })
-  }.sortedByDescending { it.second }.take(12)
-
-  PullToRefresh(isRefreshing = refreshing, onRefresh = { refreshing = true; refreshScope.launch { controller.reload().join(); refreshing = false } },
-    topAppBarScrollBehavior = scrollBehavior, refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "已刷新")) {
-  LazyColumn(
-    modifier = Modifier.fillMaxSize().overScrollVertical(),
-    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 120.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp)
-  ) {
-    if (permissions.isEmpty() && questions.isEmpty() && running.isEmpty() && finished.isEmpty()) {
-      item { MiuixEmptyStateCard("暂无活动", "需要处理的授权 / 提问、运行中的任务和最近结果会显示在这里。") }
-    }
-
-    if (permissions.isNotEmpty() || questions.isNotEmpty()) {
-      item { MiuixSectionHeader("需要处理", permissions.size + questions.size) }
-      items(permissions, key = { "activity-permission-${it.id}" }) { request ->
-        Column {
-          MiuixSessionAnchor(state, request.sessionId, onOpen)
-          MiuixPermissionCard(request, controller, state.supportsSavedPermissions)
-        }
-      }
-      items(questions, key = { "activity-question-${it.id}" }) { request ->
-        Column {
-          MiuixSessionAnchor(state, request.sessionId, onOpen)
-          MiuixQuestionCard(request, controller)
-        }
-      }
-    }
-
-    if (running.isNotEmpty()) {
-      item { MiuixSectionHeader("正在运行", running.size) }
-      items(running, key = { "activity-running-${it.id}" }) { session ->
-        MiuixSessionRow(
-          session = session.copy(title = state.title(session)),
-          task = active[session.id],
-          meta = buildMeta(state, session, includeServer = true),
-          onClick = { onOpen(session.id) },
-          trailing = active[session.id]?.let { formatElapsed(it.since, now) } ?: formatRelative(session.updated)
-        )
-      }
-    }
-
-    if (finished.isNotEmpty()) {
-      item { MiuixSectionHeader("最近完成", finished.size) }
-      items(finished, key = { "activity-done-${it.first.id}" }) { (session, time, task) ->
-        MiuixSessionRow(
-          session = session.copy(title = state.title(session)),
-          task = task,
-          meta = buildMeta(state, session, includeServer = true),
-          onClick = { onOpen(session.id) },
-          trailing = formatRelative(time)
-        )
-      }
-    }
-  }
-  }
-}
-
-/** 待处理请求所属会话的轻量锚点：点按进入会话上下文。 */
-@Composable
-private fun MiuixSessionAnchor(state: LagoonState, sessionId: String, onOpen: (String) -> Unit) {
-  val session = state.sessions.firstOrNull { it.id == sessionId } ?: return
-  Row(
-    modifier = Modifier
-      .fillMaxWidth()
-      .clickable(
-        interactionSource = remember { MutableInteractionSource() },
-        indication = androidx.compose.foundation.LocalIndication.current,
-        onClick = { onOpen(sessionId) }
-      )
-      .padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
-    verticalAlignment = Alignment.CenterVertically
-  ) {
-    Icon(
-      imageVector = MiuixIcons.VerticalSplit,
-      contentDescription = null,
-      tint = MiuixTheme.colorScheme.primary,
-      modifier = Modifier.size(14.dp)
-    )
-    Spacer(Modifier.width(6.dp))
-    Text(
-      text = state.title(session),
-      style = MiuixTheme.textStyles.footnote1.copy(
-        color = MiuixTheme.colorScheme.primary,
-        fontWeight = FontWeight.Medium
-      ),
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.weight(1f)
-    )
-    Text(
-      text = "进入会话 ›",
-      style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.primary)
-    )
-  }
-}
-
-@Composable
-private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
-  Card(
-    modifier = Modifier.padding(end = 6.dp),
-    pressFeedbackType = PressFeedbackType.Sink,
-    showIndication = true,
-    cornerRadius = 18.dp,
-    insideMargin = PaddingValues(horizontal = 14.dp, vertical = 7.dp),
-    colors = CardDefaults.defaultColors(
-      color = if (selected) MiuixColorTokens.PrimarySubtle else MiuixTheme.colorScheme.secondaryContainer
-    ),
-    onClick = onClick
-  ) {
-    Text(
-      text = label,
-      style = MiuixTheme.textStyles.footnote1.copy(
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
-      )
-    )
-  }
-}
-
 @Composable
 fun ServersModal(
   state: LagoonState,
   controller: LagoonController,
-  onDismiss: () -> Unit,
-  onConnected: () -> Unit
+  existing: ServerProfile?,
+  onDismiss: () -> Unit
 ) {
-  var editing by remember { mutableStateOf<ServerProfile?>(null) }
-  var showForm by remember { mutableStateOf(state.profiles.isEmpty()) }
-  var deleting by remember { mutableStateOf<ServerProfile?>(null) }
+  var deleting by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
   SuperBottomSheet(
-    title = if (showForm) (if (editing == null) "添加新服务器" else "编辑服务器") else "服务器连接管理",
+    title = if (existing == null) "添加服务器" else "编辑服务器",
     show = true,
     onDismissRequest = onDismiss
   ) {
     Box(Modifier.fillMaxWidth().fillMaxHeight(0.85f)) {
-      if (showForm) {
-        MiuixServerForm(
-          existing = editing,
-          onCancel = {
-            if (state.profiles.isNotEmpty()) {
-              showForm = false
-              editing = null
-            } else {
+      MiuixServerForm(
+        existing = existing,
+        onCancel = onDismiss,
+        onDelete = existing?.let { { deleting = true } },
+        onSave = { profile, password, done ->
+          scope.launch {
+            try {
+              val pair = PairLinkResolver.isPairLink(profile.url)
+              val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
+              val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
+              val savedUrl = state.profiles.firstOrNull { it.id == profile.id }?.url
+              val credentials = resolved?.credentials ?: profileCredentials(
+                savedUrl, actualProfile.url, controller.credentials(profile.id), actualProfile.username, password
+              )
+              val version = controller.testServer(actualProfile, credentials)
+              controller.saveServer(actualProfile, credentials.password, credentials.cookie, credentials.username)
+              done("已连接 OpenCode $version")
               onDismiss()
-            }
-          },
-          onSave = { profile, password, done ->
-            scope.launch {
-              try {
-                val pair = PairLinkResolver.isPairLink(profile.url)
-                val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
-                val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
-                val savedUrl = state.profiles.firstOrNull { it.id == profile.id }?.url
-                val credentials = resolved?.credentials ?: profileCredentials(
-                  savedUrl, actualProfile.url, controller.credentials(profile.id), actualProfile.username, password
-                )
-                val version = controller.testServer(actualProfile, credentials)
-                controller.saveServer(actualProfile, credentials.password, credentials.cookie, credentials.username)
-                done("已连接 OpenCode $version")
-                showForm = false
-                editing = null
-                onConnected()
-              } catch (error: Exception) {
-                done(error.message ?: "连接失败")
-              }
-            }
-          }
-        )
-      } else {
-        LazyColumn(
-          modifier = Modifier.fillMaxSize().overScrollVertical(),
-          contentPadding = PaddingValues(16.dp),
-          verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-          item {
-            TextButton(text = "添加新服务器", onClick = { editing = null; showForm = true }, modifier = Modifier.fillMaxWidth(),
-              colors = ButtonDefaults.textButtonColorsPrimary())
-          }
-          items(state.profiles, key = { it.id }) { profile ->
-            Card(insideMargin = PaddingValues(16.dp)) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                  modifier = Modifier
-                    .size(40.dp)
-                    .background(MiuixTheme.colorScheme.primaryVariant.copy(alpha = 0.15f), miuixSquircleShape(10.dp)),
-                  contentAlignment = Alignment.Center
-                ) {
-                  Icon(
-                    imageVector = MiuixIcons.Sort,
-                    contentDescription = null,
-                    tint = MiuixTheme.colorScheme.primary,
-                    modifier = Modifier.size(22.dp)
-                  )
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                  Text(profile.name, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-                  Text(
-                    profile.url,
-                    style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                  )
-                }
-                if (profile.id == state.serverId) {
-                  MiuixStatePill(if (state.connected) TaskPhase.COMPLETED else TaskPhase.DISCONNECTED, if (state.connected) "活跃" else "离线")
-                }
-              }
-              Spacer(Modifier.height(12.dp))
-              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(text = "连接", onClick = { controller.connect(profile.id); onConnected() },
-                  enabled = profile.id != state.serverId || !state.connected, modifier = Modifier.weight(1f),
-                  colors = ButtonDefaults.textButtonColorsPrimary())
-                TextButton(text = "编辑", onClick = { editing = profile; showForm = true }, modifier = Modifier.weight(1f))
-                TextButton(text = "删除", onClick = { deleting = profile }, modifier = Modifier.weight(1f),
-                  colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
-              }
+            } catch (error: Exception) {
+              done(error.message ?: "连接失败")
             }
           }
         }
-      }
+      )
     }
   }
 
-  deleting?.let { profile ->
+  if (deleting && existing != null) {
     SuperDialog(
-      title = "移除 ${profile.name}？",
-      show = deleting != null,
-      onDismissRequest = { deleting = null }
+      title = "移除 ${existing.name}？",
+      show = true,
+      onDismissRequest = { deleting = false }
     ) {
       Column(Modifier.padding(top = 8.dp)) {
         Text(
           "仅从此设备删除连接记录和存储凭据，不会对远程服务器数据产生任何影响。",
           style = MiuixTheme.textStyles.body1
         )
-        DialogActions("取消", { deleting = null }, "确认删除", danger = true) {
-          controller.deleteServer(profile.id)
-          deleting = null
+        DialogActions("取消", { deleting = false }, "确认删除", danger = true) {
+          controller.deleteServer(existing.id)
+          deleting = false
+          onDismiss()
         }
       }
     }
@@ -502,6 +159,7 @@ fun ServersModal(
 private fun MiuixServerForm(
   existing: ServerProfile?,
   onCancel: () -> Unit,
+  onDelete: (() -> Unit)?,
   onSave: (ServerProfile, String?, (String) -> Unit) -> Unit
 ) {
   val clipboard = LocalClipboardManager.current
@@ -654,6 +312,11 @@ private fun MiuixServerForm(
         }
       }
     }
+
+    if (onDelete != null) item {
+      TextButton(text = "从此设备移除", onClick = onDelete, modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
+    }
   }
 }
 
@@ -666,8 +329,8 @@ fun SettingsScreen(
   previewBack: Boolean,
   onPreviewBack: (Boolean) -> Unit,
   onNotifications: () -> Unit,
-  onManageServers: () -> Unit,
-  scrollBehavior: ScrollBehavior
+  onEditServer: (ServerProfile?) -> Unit,
+  onBack: () -> Unit
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
   // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
@@ -690,25 +353,28 @@ fun SettingsScreen(
   var showSaved by remember { mutableStateOf(false) }
   val permissionProject = state.session?.let { resolveSessionProject(it, state.projects) } ?: state.project
 
+  // MIUIX settings: white cards on the grey page surface.
+  Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
+  PageTopBar("设置", onBack)
   // MIUIX settings layout: 12dp card margin + SmallTitle's 28dp inset aligns titles with row content.
   LazyColumn(
     modifier = Modifier
       .fillMaxSize()
-      .overScrollVertical()
-      .nestedScroll(scrollBehavior.nestedScrollConnection),
-    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 120.dp)
+      .overScrollVertical(),
+    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 48.dp)
   ) {
     item {
-      SmallTitle("网络与连接")
+      SmallTitle("服务器")
       Card(Modifier.fillMaxWidth()) {
-        SuperArrow(
-          title = state.server?.name ?: "未连接服务器",
-          summary = if (state.connected) "OpenCode ${state.version.ifBlank { "V2" }} · 正常通信中" else "离线或尚未连接 · 点按管理服务器",
-          startAction = {
-            StatusDot(if (state.connected) MiuixColorTokens.Success else MiuixTheme.colorScheme.onSurfaceVariantSummary, Modifier.padding(end = 12.dp))
-          },
-          onClick = onManageServers
-        )
+        state.profiles.forEach { profile ->
+          val current = profile.id == state.serverId
+          SuperArrow(
+            title = profile.name,
+            summary = if (!current) profile.url else if (state.connected) "当前 · OpenCode ${state.version.ifBlank { "2.x" }} · ${profile.url}" else "当前 · 未连接 · ${profile.url}",
+            onClick = { onEditServer(profile) }
+          )
+        }
+        SuperArrow(title = "添加服务器", summary = "地址或 opencode pair 配对链接", onClick = { onEditServer(null) })
       }
     }
 
@@ -815,6 +481,7 @@ fun SettingsScreen(
     }
   }
 
+  }
   if (showModels) ManageModelsSheet(state, controller) { showModels = false }
   if (showSaved) SuperBottomSheet(title = "已保存的项目权限", show = true, onDismissRequest = { showSaved = false; controller.closeSavedPermissions() }) {
     Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(bottom = 16.dp)) {

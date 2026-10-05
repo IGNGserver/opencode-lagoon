@@ -39,9 +39,6 @@ import top.yukonga.miuix.kmp.theme.miuixShape
 
 private enum class ChatSheet { CHANGES, FILES, CHILDREN, AGENTS }
 
-/** One entry of the session's ⋯ menu; [danger] items render in the error color. */
-private data class MenuEntry(val label: String, val danger: Boolean = false, val action: () -> Unit)
-
 @Composable
 fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> Unit, onOpenChild: (String) -> Unit, onModal: (Boolean) -> Unit, interactive: Boolean = true) {
   val session = state.session
@@ -59,35 +56,25 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) { Text("会话尚未加载或已关闭"); TextButton(text = "返回列表", onClick = onBack) }
     return
   }
-  // 子任务、文件、Agent 都收进右上角 ⋯；整理上下文 / 撤销 / 分享 / 分支不在手机上提供，已保存权限移到设置页。
-  val entries = buildList {
-    add(MenuEntry("子任务（${state.children.size}）") { sheet = ChatSheet.CHILDREN })
-    add(MenuEntry("文件") { sheet = ChatSheet.FILES; controller.listFiles() })
-    if (state.capabilities.diff) add(MenuEntry("改动（${state.changes.size}）") { sheet = ChatSheet.CHANGES })
-    add(MenuEntry("Agent：${state.agent ?: "默认"}") { sheet = ChatSheet.AGENTS })
-    if (state.capabilities.supports(SessionAction.RENAME)) add(MenuEntry("重命名") { title = state.title(session); rename = true })
-    add(MenuEntry("删除会话", danger = true) { delete = true })
-  }
-  Column(Modifier.fillMaxSize()) {
-    SmallTopAppBar(title = state.title(session), navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } }, actions = {
-      Box {
-        IconButton(onClick = { menu = true }) { Icon(MiuixIcons.More, "会话操作") }
-        SuperListPopup(show = menu, alignment = PopupPositionProvider.Align.End, onDismissRequest = { menu = false }) {
-          ListPopupColumn {
-            entries.forEachIndexed { index, entry ->
-              DropdownImpl(text = entry.label, optionSize = entries.size, isSelected = false, index = index,
-                dropdownColors = if (entry.danger) DropdownDefaults.dropdownColors(contentColor = MiuixColorTokens.Error) else DropdownDefaults.dropdownColors(),
-                onSelectedIndexChange = { menu = false; entry.action() })
-            }
-          }
-        }
-      }
+  // ⋯ 分两段：查看会话的资源，以及对会话本身的操作。整理上下文 / 撤销 / 分享 / 分支不在手机上提供，已保存权限在设置页。
+  val menuSections = listOf(
+    MenuSection(buildList {
+      add(MenuAction("子任务（${state.children.size}）", MiuixIcons.Layers) { sheet = ChatSheet.CHILDREN })
+      if (state.capabilities.diff) add(MenuAction("改动（${state.changes.size}）", MiuixIcons.Merge) { sheet = ChatSheet.CHANGES })
+      add(MenuAction("文件", MiuixIcons.Folder) { sheet = ChatSheet.FILES; controller.listFiles() })
+      add(MenuAction("Agent：${state.agent ?: "默认"}", MiuixIcons.ContactsCircle) { sheet = ChatSheet.AGENTS })
+    }),
+    MenuSection(buildList {
+      if (state.capabilities.supports(SessionAction.RENAME)) add(MenuAction("重命名", MiuixIcons.Rename) { title = state.title(session); rename = true })
+      add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
     })
-    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 6.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-      Text(listOfNotNull(resolveSessionProject(session, state.projects)?.name, state.server?.name?.takeIf { state.profiles.size > 1 }).joinToString(" · "),
-        modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
-        style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-      state.tasks[session.id]?.takeIf { it.active }?.let { Spacer(Modifier.width(8.dp)); MiuixStatePill(it.phase) }
+  )
+  Column(Modifier.fillMaxSize()) {
+    PageTopBar(state.title(session), onBack, subtitle = { SessionSubtitle(state, session) }) {
+      Box {
+        CircleIconButton(MiuixIcons.More, "会话操作", { menu = true })
+        MenuPopup(menu, { menu = false }, menuSections)
+      }
     }
     Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it }, onOpenChild)
     ChatComposer(state, controller, interactive, onModal = { composerModal = it })
@@ -145,12 +132,21 @@ fun DraftScreen(state: LagoonState, controller: LagoonController, onBack: () -> 
   val modal = targetPicker || addProject || composerModal
   DisposableEffect(modal) { onModal(modal); onDispose { onModal(false) } }
   Column(Modifier.fillMaxSize()) {
-    SmallTopAppBar(title = "新会话", navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } })
+    PageTopBar("新会话", onBack, subtitle = {
+      // The subtitle is where the session will be created; tap it to pick another project.
+      Row(Modifier.clip(miuixCapsuleShape()).clickable(enabled = state.connected) { targetPicker = true }.padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(MiuixIcons.Folder, null, Modifier.size(14.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        Spacer(Modifier.width(4.dp))
+        Text(listOfNotNull(state.server?.name, state.project?.name ?: "选择项目").joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis,
+          style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        DropdownChevron(14.dp, description = "选择项目")
+      }
+    })
     Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("要做点什么？", style = MiuixTheme.textStyles.title3)
         Spacer(Modifier.height(8.dp))
-        Text(state.project?.let { "会在「${it.name}」中新建，发出第一条消息后才会创建会话" } ?: "先在下方选择一个项目",
+        Text(state.project?.let { "会在「${it.name}」中新建，发出第一条消息后才会创建会话" } ?: "先点标题下方选择一个项目",
           style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
           textAlign = androidx.compose.ui.text.style.TextAlign.Center)
       }
@@ -158,11 +154,25 @@ fun DraftScreen(state: LagoonState, controller: LagoonController, onBack: () -> 
     ChatComposer(state, controller, interactive, { composerModal = it }, busy = state.pending("create"), actionKey = "create", ready = state.project != null,
       // The created session inherits the text as its draft until the first send succeeds; each draft page
       // gets a fresh saveable key from MainActivity, so nothing needs clearing here.
-      onSend = { text, _ -> controller.startSession("", text, state.agent.takeIf { state.agentChanged }, state.model.takeIf { state.modelChanged }) },
-      footer = { DraftTargetChip(state) { targetPicker = true } })
+      onSend = { text, _ -> controller.startSession("", text, state.agent.takeIf { state.agentChanged }, state.model.takeIf { state.modelChanged }) })
   }
   if (targetPicker) DraftTargetSheet(state, controller, { targetPicker = false }) { targetPicker = false; addProject = true }
   if (addProject) DirectoryBrowserSheet(state, controller, { addProject = false }) { addProject = false }
+}
+
+/** “服务器 · 项目” under a chat title, led by the session's live state (running spinner / waiting / failed). */
+@Composable
+private fun SessionSubtitle(state: LagoonState, session: Session) {
+  val status = state.sessionStatus(session)
+  val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
+  when (status) {
+    SessionStatus.RUNNING -> { InfiniteProgressIndicator(color = MiuixTheme.colorScheme.primary, size = 12.dp, strokeWidth = 1.5.dp, orbitingDotSize = 1.5.dp); Spacer(Modifier.width(6.dp)) }
+    SessionStatus.WAITING_PERMISSION, SessionStatus.WAITING_QUESTION, SessionStatus.FAILED ->
+      Text("${status.label} · ", style = MiuixTheme.textStyles.footnote1.copy(color = if (status == SessionStatus.FAILED) MiuixColorTokens.Error else MiuixColorTokens.Warning))
+    else -> {}
+  }
+  Text(listOfNotNull(state.server?.name, resolveSessionProject(session, state.projects)?.name).joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis,
+    style = MiuixTheme.textStyles.footnote1.copy(color = muted))
 }
 
 /** MIUIX dialog footer: two equal-width buttons, the confirming one in the primary (or error) color. */

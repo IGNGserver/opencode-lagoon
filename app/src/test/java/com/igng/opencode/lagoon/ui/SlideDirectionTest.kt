@@ -3,30 +3,24 @@ package com.igng.opencode.lagoon.ui
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** The dock used to slide every tab change in from the right; direction must follow tab order. */
+/** Deeper pages enter from the right and going back enters from the left, whatever the entry point. */
 class SlideDirectionTest {
-  private fun tab(tab: RootTab) = NavRoute(tab, null, 0)
+  private val home = SessionNavigation().route
 
-  @Test fun tabsToTheRightEnterFromTheRight() {
-    assertEquals(1, slideDirection(tab(RootTab.SESSIONS), tab(RootTab.ACTIVITY)))
-    assertEquals(1, slideDirection(tab(RootTab.SESSIONS), tab(RootTab.SETTINGS)))
-    assertEquals(1, slideDirection(tab(RootTab.ACTIVITY), tab(RootTab.SETTINGS)))
+  @Test fun openingAPageOrChatEntersFromTheRight() {
+    assertEquals(1, slideDirection(home, SessionNavigation().push(RootPage.SETTINGS).route))
+    assertEquals(1, slideDirection(home, SessionNavigation().open("s1").route))
+    assertEquals(1, slideDirection(SessionNavigation().open("s1").route, SessionNavigation().open("s1").open("c1", true).route))
   }
 
-  @Test fun tabsToTheLeftEnterFromTheLeft() {
-    assertEquals(-1, slideDirection(tab(RootTab.SETTINGS), tab(RootTab.SESSIONS)))
-    assertEquals(-1, slideDirection(tab(RootTab.SETTINGS), tab(RootTab.ACTIVITY)))
-    assertEquals(-1, slideDirection(tab(RootTab.ACTIVITY), tab(RootTab.SESSIONS)))
+  @Test fun goingBackEntersFromTheLeft() {
+    val child = SessionNavigation(RootPage.ARCHIVED).open("s1").open("c1", true)
+    assertEquals(-1, slideDirection(child.route, child.back().route))
+    assertEquals(-1, slideDirection(child.back().route, child.back().back().route))
+    assertEquals(-1, slideDirection(SessionNavigation().push(RootPage.SETTINGS).route, home))
   }
 
-  @Test fun openingGoesRightAndBackGoesLeftRegardlessOfTab() {
-    val chat = NavRoute(RootTab.ACTIVITY, "s1", 1)
-    val child = NavRoute(RootTab.ACTIVITY, "c1", 2)
-    assertEquals(1, slideDirection(tab(RootTab.ACTIVITY), chat))
-    assertEquals(1, slideDirection(chat, child))
-    assertEquals(-1, slideDirection(child, chat))
-    assertEquals(-1, slideDirection(chat, tab(RootTab.ACTIVITY)))
-    // Back from a chat opened in 设置 lands on 会话 root: still a "back" (left) move.
-    assertEquals(-1, slideDirection(NavRoute(RootTab.SETTINGS, "s1", 1), tab(RootTab.SESSIONS)))
+  @Test fun replacingAChatAtTheSameDepthEntersFromTheRight() {
+    assertEquals(1, slideDirection(SessionNavigation().open("a").route, SessionNavigation().open("b").route))
   }
 }
