@@ -33,6 +33,20 @@ class TaskSummaryTest {
     assertEquals(1, summary.background)
   }
 
+  @Test fun onlyRootsWaitingOnADescendantAreBackground() {
+    // idleRoot 自己的主线程没跑，只有子任务在跑 → 后台运行中；自己的主线程在跑的一律是前台运行中。
+    val tasks = mapOf(
+      "self" to TaskState("self", TaskPhase.THINKING),
+      "child" to TaskState("child", TaskPhase.TOOL),
+      "idleRoot" to TaskState("idleRoot", TaskPhase.IDLE),
+      "grandchild" to TaskState("grandchild", TaskPhase.THINKING)
+    )
+    val parents = mapOf("child" to "idleRoot", "grandchild" to "self")
+    assertEquals(setOf("idleRoot"), TaskSummary.backgroundRoots(tasks, parents))
+    // A foreground-started run is never background, even once a descendant joins it.
+    assertFalse(TaskSummary.backgroundRoots(tasks, parents).contains("self"))
+  }
+
   @Test fun alwaysShowsRunningAndCompletedBaseline() {
     val summary = summarize(tasks(
       "a" to TaskPhase.THINKING,

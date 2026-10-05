@@ -40,8 +40,10 @@ import androidx.compose.ui.unit.sp
 import com.igng.opencode.lagoon.core.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -68,13 +70,15 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   // 「思考过程」等仍按行内展开；工具组改为半屏窗口，不再写入这里。
   val expanded = rememberSaveable(saver = mapSaver(save = { it.toMap() }, restore = { map -> mutableStateMapOf<String, Boolean>().apply { map.forEach { (k, v) -> put(k, v as Boolean) } } })) { mutableStateMapOf<String, Boolean>() }
   val expansions = expanded.filterValues { it }.keys
-  val working = state.tasks[state.sessionId]?.active == true
+  val task = state.tasks[state.sessionId]
+  val working = task?.active == true
   val revert = state.session?.revertMessageId
   val rows by produceState(emptyList<TranscriptRow>(), state.messages, expansions, working, revert) {
     delay(32)
     value = withContext(Dispatchers.Default) { TranscriptRows.build(state.messages, expansions, working, revert) }
   }
-  var follow by rememberSaveable { mutableStateOf(list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0) }
+  // A brand-new conversation opens at the newest message; only a deliberate drag up opts out of following.
+  var follow by rememberSaveable { mutableStateOf(true) }
   var newContent by remember { mutableStateOf(false) }
   var autoScroll by remember { mutableStateOf(false) }
   val dragged by list.interactionSource.collectIsDraggedAsState()
@@ -84,35 +88,48 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   } }
   LaunchedEffect(dragged, nearBottom) { if (dragged && !autoScroll) follow = nearBottom }
   val contentKey = state.messages.lastOrNull()?.let { it.id to it.parts.sumOf { part -> part.text.length + part.output.length } }
+  val permissions = state.permissions.filter { it.sessionId == state.sessionId }
+  val questions = state.questions.filter { it.sessionId == state.sessionId }
+  // The exact number of LazyColumn items the data implies; the scroll effect waits for the list to lay
+  // out that many before landing, so the initial open does not scroll while `rows` are still empty.
+  val mainRows = rows.filter { it.detailOf == null }
+  val expectedItems = (if (state.cached) 1 else 0) +
+    (if (state.sessionId in state.backgroundRunning) 1 else 0) +
+    (if (state.messagesCursor != null) 1 else 0) +
+    (if (rows.isEmpty()) 1 else 0) + mainRows.size + permissions.size + questions.size
   suspend fun scrollBottom() {
-    val count = list.layoutInfo.totalItemsCount
-    if (count > 0) { autoScroll = true; list.scrollToItem(count - 1); list.scrollBy(list.layoutInfo.viewportEndOffset.toFloat()); autoScroll = false }
+    autoScroll = true
+    try {
+      withTimeoutOrNull(1_000) { snapshotFlow { list.layoutInfo.totalItemsCount }.first { it >= expectedItems && it > 0 } }
+      val count = list.layoutInfo.totalItemsCount
+      if (count > 0) { list.scrollToItem(count - 1); list.scrollBy(list.layoutInfo.viewportEndOffset.toFloat()) }
+    } finally { autoScroll = false }
   }
-  // Only a new message or a fresh send moves the viewport. Expanding or collapsing a row never scrolls,
-  // so the row the reader is looking at keeps its place.
-  LaunchedEffect(contentKey, state.pending("send")) {
+  // Only a new message, a fresh send or the first successful layout moves the viewport. Expanding or
+  // collapsing a row never scrolls, so the row the reader is looking at keeps its place.
+  LaunchedEffect(contentKey, expectedItems, state.pending("send")) {
     if (state.pending("send")) follow = true
-    if (follow) { scrollBottom(); newContent = false } else if (state.messages.isNotEmpty()) newContent = true
+    if (!follow) { if (state.messages.isNotEmpty()) newContent = true; return@LaunchedEffect }
+    newContent = false
+    scrollBottom()
   }
   // 键盘弹出时列表视口变矮，最后几条会落到键盘后面；这一刻自动回到底部（等布局收敛后再滚）。
   val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
   LaunchedEffect(imeBottom > 0) {
     if (imeBottom > 0) { follow = true; delay(120); scrollBottom() }
   }
-  // Reaching the top pulls the previous page automatically; a spinner shows until it lands.
+  // Only a deliberate scroll to the top pulls the previous page; the initial layout must not trigger it,
+  // otherwise it kept loading older history until the very first message.
   val loadingOlder = state.pending("messages-more")
   val atTop by remember { derivedStateOf {
     val info = list.layoutInfo
     info.totalItemsCount > 0 && (info.visibleItemsInfo.firstOrNull()?.index ?: Int.MAX_VALUE) <= 1
   } }
-  LaunchedEffect(atTop, state.messagesCursor, loadingOlder, state.connected, state.cached) {
-    if (atTop && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
-      follow = false
+  LaunchedEffect(atTop, state.messagesCursor, loadingOlder, state.connected, state.cached, follow) {
+    if (atTop && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
       controller.loadOlderMessages()
     }
   }
-  val permissions = state.permissions.filter { it.sessionId == state.sessionId }
-  val questions = state.questions.filter { it.sessionId == state.sessionId }
   Box(modifier) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       if (state.cached) item { Text(if (state.cacheComplete) if (state.connected) "会话缓存 · 消息待同步" else "离线缓存 · 恢复连接后更新" else "离线缓存已截断，部分历史与长输出未保留", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1) }
@@ -146,19 +163,50 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
             description = if (newContent) "有新消息，回到最新" else "回到底部")
         }
       }
+      if (task?.active == true) WorkingIndicator(task)
     }
   }
   detail?.let { row ->
     val details by produceState(emptyList<TranscriptRow>(), row.key, state.messages, working, revert) {
       value = withContext(Dispatchers.Default) { TranscriptRows.details(state.messages, row.key, working, revert) }
     }
+    val sections = remember(details) { detailSections(details) }
+    val expandedItems = remember(row.key) { mutableStateMapOf<String, Boolean>() }
     SuperBottomSheet(title = row.title.ifBlank { "详情" }, show = true, onDismissRequest = { detail = null }) {
       LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (details.isEmpty()) item { Text("没有可显示的明细", style = MiuixTheme.textStyles.footnote1) }
-        items(details, key = { it.key }, contentType = { it.kind }) { item -> DetailRowView(item) }
+        if (sections.isEmpty()) item { Text("没有可显示的明细", style = MiuixTheme.textStyles.footnote1) }
+        items(sections, key = { it.header.key }) { section -> DetailSectionView(section, expandedItems) }
       }
     }
   }
+}
+
+/**
+ * 会话底部常驻的运行指示：只要该会话有任务在跑就一直显示，即使消息本身没有变化；已用时间每秒
+ * 刷新，避免用户把静态的「用时」当成“已结束”。
+ */
+@Composable
+private fun WorkingIndicator(task: TaskState) {
+  val waiting = task.phase in TaskState.WAITING_PHASES
+  var now by remember(task.sessionId, task.since) { mutableStateOf(System.currentTimeMillis()) }
+  LaunchedEffect(task.sessionId, task.since) {
+    while (true) { now = System.currentTimeMillis(); delay(1_000) }
+  }
+  val elapsed = ((now - task.since) / 1000).coerceAtLeast(0)
+  Row(Modifier.clip(miuixCapsuleShape()).background(MiuixTheme.colorScheme.secondaryContainer)
+    .padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    if (!waiting) {
+      InfiniteProgressIndicator(color = MiuixTheme.colorScheme.primary, size = 14.dp, strokeWidth = 1.5.dp)
+      Spacer(Modifier.width(6.dp))
+    }
+    Text(if (waiting) "等待你的操作" else "运行中 · ${elapsedText(elapsed)}",
+      style = MiuixTheme.textStyles.footnote2.copy(color = if (waiting) MiuixColorTokens.Warning else MiuixTheme.colorScheme.primary))
+  }
+}
+
+private fun elapsedText(seconds: Long): String = when {
+  seconds < 60 -> "${seconds} 秒"
+  else -> "${seconds / 60} 分 ${seconds % 60} 秒"
 }
 
 @Composable
@@ -195,7 +243,11 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
       GroupRow(row) { onDetail(row) }
       row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
     }
-    "context-group", "tool-summary", "diff-summary" -> GroupRow(row) { onDetail(row) }
+    "tool-group" -> Column {
+      GroupRow(row) { onDetail(row) }
+      row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
+    }
+    "diff-summary" -> GroupRow(row) { onDetail(row) }
     "context-item" -> Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       Text(row.title, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium))
       if (row.subtitle.isNotBlank()) {
@@ -277,7 +329,7 @@ private fun GroupRow(row: TranscriptRow, onClick: () -> Unit) {
     .background(MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f), miuixSquircleShape(10.dp))
     .clickable(onClick = onClick)
     .padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-    if (row.kind == "tool") {
+    if (row.kind in setOf("tool", "tool-group")) {
       ToolStatusDot(row.status)
       Spacer(Modifier.width(8.dp))
     }
@@ -320,7 +372,18 @@ private fun DetailRowView(row: TranscriptRow) {
     "diff-file" -> Text(row.title, Modifier.fillMaxWidth().padding(top = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis,
       style = MiuixTheme.textStyles.footnote1.copy(fontFamily = FontFamily.Monospace))
     "attachment" -> row.attachments.forEach { attachment -> AttachmentView(attachment) {} }
-    "tool", "context-group", "tool-summary", "diff-summary" -> Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    "reasoning" -> Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text(row.title.ifBlank { "思考" }, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium))
+      if (row.subtitle.isNotBlank()) {
+        Spacer(Modifier.width(8.dp))
+        Text(row.subtitle, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+      } else Spacer(Modifier.weight(1f))
+    }
+    "reasoning-body" -> SelectionContainer { Column(Modifier.fillMaxWidth().padding(start = 24.dp)) {
+      parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) }
+    } }
+    "tool", "tool-group", "diff-summary" -> Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
       ToolStatusDot(row.status)
       Spacer(Modifier.width(8.dp))
       Column(Modifier.weight(1f)) {
@@ -330,6 +393,43 @@ private fun DetailRowView(row: TranscriptRow) {
       }
     }
     else -> Unit
+  }
+}
+
+/**
+ * 半屏窗口里的一条调用记录：一行条目头（如“命令行 / ls -la · 已完成”）+ 可折叠的正文。点击条目头
+ * 才展开命令 / 输出 / 思考，未展开时整个分组只显示一行行记录，和电脑端一致。
+ */
+private data class DetailSection(val header: TranscriptRow, val bodies: List<TranscriptRow>)
+
+/** 按 [TranscriptRow.bodyOf] 把明细行折成「条目头 + 正文」的段落，保持原始顺序。 */
+private fun detailSections(rows: List<TranscriptRow>): List<DetailSection> {
+  val sections = mutableListOf<DetailSection>()
+  var header: TranscriptRow? = null
+  var bodies = mutableListOf<TranscriptRow>()
+  rows.forEach { row ->
+    if (row.bodyOf == null) {
+      header?.let { sections += DetailSection(it, bodies) }
+      header = row
+      bodies = mutableListOf()
+    } else bodies += row
+  }
+  header?.let { sections += DetailSection(it, bodies) }
+  return sections
+}
+
+@Composable
+private fun DetailSectionView(section: DetailSection, expandedItems: SnapshotStateMap<String, Boolean>) {
+  val expandable = section.bodies.isNotEmpty()
+  val open = expandedItems[section.header.key] == true
+  Column(Modifier.fillMaxWidth()) {
+    Row(Modifier.fillMaxWidth().clickable(enabled = expandable) { if (expandable) expandedItems[section.header.key] = !open },
+      verticalAlignment = Alignment.CenterVertically) {
+      Box(Modifier.weight(1f)) { DetailRowView(section.header) }
+      if (expandable) Text(if (open) "⌄" else "›", modifier = Modifier.padding(start = 6.dp),
+        style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+    }
+    if (open) section.bodies.forEach { body -> DetailRowView(body) }
   }
 }
 

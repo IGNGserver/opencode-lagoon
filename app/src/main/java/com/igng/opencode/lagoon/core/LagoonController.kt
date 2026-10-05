@@ -104,6 +104,8 @@ class LagoonController private constructor(private val appContext: Context) {
     private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED)
     /** Keep the live stream briefly after leaving the app so quick app switches do not reconnect. */
     private const val BACKGROUND_GRACE_MILLIS = 30_000L
+    /** 总览读完为非活跃后，先等这么久复核再拆岛，避免多步任务步骤间隙导致息屏超级岛反复重弹。 */
+    private const val SUMMARY_SETTLE_MILLIS = 4_000L
     @Volatile private var instance: LagoonController? = null
     fun get(context: Context): LagoonController = instance ?: synchronized(this) {
       instance ?: LagoonController(context.applicationContext).also { instance = it }
@@ -120,10 +122,9 @@ class LagoonController private constructor(private val appContext: Context) {
     state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
     val titles = state.sessions.associate { it.id to state.title(it) }
     val active = state.activeRootTasks
-    // 曾在后台运行：应用处于后台时把当前活跃根会话记入，回到前台后保留到该轮结束（intersect 活跃集）。
-    val observed = if (!foreground && backgroundedOnce) state.backgroundRunning + active.keys else state.backgroundRunning
-    val background = observed intersect active.keys
-    if (background != state.backgroundRunning) state.serverId?.let { store.rememberBackgroundRunning(it, background) }
+    // “后台运行中”= 根会话自身没有在跑，只有它派生的后台/子任务在跑（主线程在等后台任务），
+    // 而不是“应用退到过后台”。后者会把所有正在运行的会话都误标成后台运行中。
+    val background = TaskSummary.backgroundRoots(state.tasks, state.parents)
     val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles, background)
     return state.copy(
     summary = summary,
@@ -159,7 +160,10 @@ class LagoonController private constructor(private val appContext: Context) {
   private var catalogSequence = 0L
   private var messageSequence = 0L
   private var reconcile: Job? = null
-  private var lastSummary: Triple<ServerProfile?, TaskSummary, String?>? = null
+  /** 上一次真正下发到系统的岛内容指纹（服务器 + 落点 + 渲染后的文案），与瞬时的 detail 无关。 */
+  private var lastSummary: Triple<String?, String?, LiveUpdateContent>? = null
+  /** 拆岛的延迟复核任务：瞬时非活跃不立即取消，避免澎湃息屏下反复消失/重弹。 */
+  private var summarySettle: Job? = null
   private var visibleConversation: Pair<String, String>? = null
   private val seenEvents = linkedSetOf<String>()
   private val draftWrites = mutableMapOf<String, Job>()
@@ -167,8 +171,6 @@ class LagoonController private constructor(private val appContext: Context) {
   @Volatile private var foreground = false
   /** [TaskMonitorService] keeps the process alive for running tasks; the stream may then run in background. */
   @Volatile private var monitoring = false
-  /** 应用是否真的退到过后台；用于把“后台期间仍在运行”的会话标成“后台运行中”。 */
-  @Volatile private var backgroundedOnce = false
   private var backgroundStop: Job? = null
   private var connecting: Job? = null
   @Volatile private var lastFullRefreshAt = 0L
@@ -182,7 +184,11 @@ class LagoonController private constructor(private val appContext: Context) {
     // Single publisher for the server-wide island summary, so the system notification never drifts
     // from the in-app island: both read the same derived `summary` on every state emission.
     scope.launch { state.collect { state ->
-      val signature = Triple(state.server, state.summary, state.summaryTargetId)
+      val profile = state.server
+      // Dedupe on the content the system actually renders, not on the transient task detail: a running
+      // task changes detail on every tool step, and re-posting the same island each time makes HyperOS
+      // replay its expand animation on the AOD island.
+      val signature = profile?.let { Triple(it.id, state.summaryTargetId, LiveUpdateContent.of(state.summary)) }
       if (signature != lastSummary) { lastSummary = signature; publishSummary(state); ensureMonitoring(state) }
     } }
     if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!)
@@ -192,10 +198,25 @@ class LagoonController private constructor(private val appContext: Context) {
     attempt { BackgroundSyncWorker.schedule(appContext, store.profiles().isNotEmpty()) }
       .onFailure { Diagnostics.warn("BackgroundSync", "无法安排后台定时刷新", it) }
   }
+  /**
+   * 下发服务器总览（灵动岛）。真正开始时立即发布；一旦读到的不是 ACTIVE，先等一个短暂窗口复核，
+   * 只有持续非活跃才拆岛。多步任务在步骤之间会瞬时变为 idle，立即拆岛会让息屏超级岛反复消失/重弹。
+   */
   private fun publishSummary(state: LagoonState) {
     val profile = state.server ?: return
-    // showSummary cancels the notification itself when the summary is empty.
-    notifications.showSummary(profile, state.summary, state.summaryTargetId)
+    if (LiveUpdateContent.stageOf(state.summary) == LiveUpdateStage.ACTIVE) {
+      summarySettle?.cancel(); summarySettle = null
+      notifications.showSummary(profile, state.summary, state.summaryTargetId)
+      return
+    }
+    summarySettle?.cancel()
+    summarySettle = scope.launch {
+      delay(SUMMARY_SETTLE_MILLIS)
+      val current = this@LagoonController.state.value
+      val settled = current.server
+      // 复核期间又活跃起来时，上面的 ACTIVE 分支已经取消了这个任务。
+      if (settled?.id == profile.id) notifications.showSummary(settled, current.summary, current.summaryTargetId)
+    }
   }
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()
@@ -266,7 +287,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedSections = store.collapsedSections(id), pinned = store.pinnedSessions(id),
-      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id), backgroundRunning = store.backgroundRunning(id),
+      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -502,15 +523,6 @@ class LagoonController private constructor(private val appContext: Context) {
   /** The app left the foreground: keep live events only while the monitoring service runs. */
   fun onBackground() {
     foreground = false
-    backgroundedOnce = true
-    // 退到后台的这一刻就把仍在运行的根会话记入“后台运行中”，回到前台后保留到该轮结束。
-    val server = state.value.serverId
-    val active = state.value.activeRootTasks.keys
-    if (server != null && active.isNotEmpty()) {
-      val next = state.value.backgroundRunning + active
-      store.rememberBackgroundRunning(server, next)
-      mutable.update { if (it.serverId == server) it.copy(backgroundRunning = next) else it }
-    }
     backgroundStop?.cancel()
     backgroundStop = scope.launch {
       delay(BACKGROUND_GRACE_MILLIS)
@@ -1165,7 +1177,7 @@ class LagoonController private constructor(private val appContext: Context) {
     if (op.isCurrent(this)) onDeleted?.invoke()
     if (session.id == op.snapshot.sessionId) op.commit { it.copy(sessionId = null, messages = emptyList()) }
     if (session.id in op.snapshot.pinned) store.rememberPinnedSessions(op.serverId, op.snapshot.pinned - session.id)
-    op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id) }
+    op.commitConnection { withSummary(it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id)) }
     if (op.connectionCurrent(this)) reload()
   }
   /** Archives (or restores) [target]; the home list hides archived sessions, 已归档 lists them. */
