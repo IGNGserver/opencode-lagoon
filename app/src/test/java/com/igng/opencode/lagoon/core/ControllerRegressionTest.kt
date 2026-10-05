@@ -167,8 +167,10 @@ class ControllerRegressionTest {
       val child = Session("child", "/repo", "Child", 20, parentId = "root", projectId = "p")
       val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true, sessions = listOf(root, child)))
       refresh(controller, controlOnly = true)
-      assertEquals(SessionStatus.RUNNING, state.value.sessionStatus(root))
+      // 主线程（root 自身）没有在跑，只有子任务在跑 → 后台运行中（而不是普通运行中）。
+      assertEquals(SessionStatus.BACKGROUND_RUNNING, state.value.sessionStatus(root))
       assertEquals(1, state.value.summary.running)
+      assertEquals(1, state.value.summary.background)
       running = false
       refresh(controller, controlOnly = true)
       assertEquals(listOf("root"), state.value.notices.map { it.sessionId })

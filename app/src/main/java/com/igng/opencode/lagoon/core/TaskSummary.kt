@@ -122,6 +122,15 @@ data class TaskSummary(
       )
     }
 
+    /**
+     * 根会话里“主线程没在跑、只有它派生的任务在跑”的那些：这才是“后台运行中”（主线程在等后台任务）。
+     * 不用“应用是否退到过后台”判断，否则前台正常运行的会话会被误标成后台。
+     */
+    fun backgroundRoots(tasks: Map<String, TaskState>, parents: Map<String, String>): Set<String> {
+      val activeRoots = aggregate(tasks.filterValues { it.active }, parents)
+      return activeRoots.keys.filter { root -> tasks[root]?.active != true }.toSet()
+    }
+
     fun aggregate(tasks: Map<String, TaskState>, parents: Map<String, String>): Map<String, TaskState> {
       fun root(id: String): String {
         var current = id

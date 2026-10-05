@@ -122,10 +122,9 @@ class LagoonController private constructor(private val appContext: Context) {
     state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
     val titles = state.sessions.associate { it.id to state.title(it) }
     val active = state.activeRootTasks
-    // 曾在后台运行：应用处于后台时把当前活跃根会话记入，回到前台后保留到该轮结束（intersect 活跃集）。
-    val observed = if (!foreground && backgroundedOnce) state.backgroundRunning + active.keys else state.backgroundRunning
-    val background = observed intersect active.keys
-    if (background != state.backgroundRunning) state.serverId?.let { store.rememberBackgroundRunning(it, background) }
+    // “后台运行中”= 根会话自身没有在跑，只有它派生的后台/子任务在跑（主线程在等后台任务），
+    // 而不是“应用退到过后台”。后者会把所有正在运行的会话都误标成后台运行中。
+    val background = TaskSummary.backgroundRoots(state.tasks, state.parents)
     val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles, background)
     return state.copy(
     summary = summary,
@@ -172,8 +171,6 @@ class LagoonController private constructor(private val appContext: Context) {
   @Volatile private var foreground = false
   /** [TaskMonitorService] keeps the process alive for running tasks; the stream may then run in background. */
   @Volatile private var monitoring = false
-  /** 应用是否真的退到过后台；用于把“后台期间仍在运行”的会话标成“后台运行中”。 */
-  @Volatile private var backgroundedOnce = false
   private var backgroundStop: Job? = null
   private var connecting: Job? = null
   @Volatile private var lastFullRefreshAt = 0L
@@ -290,7 +287,7 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedSections = store.collapsedSections(id), pinned = store.pinnedSessions(id),
-      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id), backgroundRunning = store.backgroundRunning(id),
+      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -526,15 +523,6 @@ class LagoonController private constructor(private val appContext: Context) {
   /** The app left the foreground: keep live events only while the monitoring service runs. */
   fun onBackground() {
     foreground = false
-    backgroundedOnce = true
-    // 退到后台的这一刻就把仍在运行的根会话记入“后台运行中”，回到前台后保留到该轮结束。
-    val server = state.value.serverId
-    val active = state.value.activeRootTasks.keys
-    if (server != null && active.isNotEmpty()) {
-      val next = state.value.backgroundRunning + active
-      store.rememberBackgroundRunning(server, next)
-      mutable.update { if (it.serverId == server) it.copy(backgroundRunning = next) else it }
-    }
     backgroundStop?.cancel()
     backgroundStop = scope.launch {
       delay(BACKGROUND_GRACE_MILLIS)
@@ -1189,7 +1177,7 @@ class LagoonController private constructor(private val appContext: Context) {
     if (op.isCurrent(this)) onDeleted?.invoke()
     if (session.id == op.snapshot.sessionId) op.commit { it.copy(sessionId = null, messages = emptyList()) }
     if (session.id in op.snapshot.pinned) store.rememberPinnedSessions(op.serverId, op.snapshot.pinned - session.id)
-    op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id) }
+    op.commitConnection { withSummary(it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id)) }
     if (op.connectionCurrent(this)) reload()
   }
   /** Archives (or restores) [target]; the home list hides archived sessions, 已归档 lists them. */
