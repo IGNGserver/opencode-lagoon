@@ -113,9 +113,15 @@ class ServerStore internal constructor(private val preferences: SharedPreference
   fun viewNotices(server: String, session: String, ids: Set<String>): List<SessionNotice> = synchronized(taskLock) {
     sessionNotices(server).viewObserved(session, ids).also { writeNotices(server, it) }
   }
-  fun collapsedProjects(server: String): Set<String> = preferences.getStringSet("collapsedProjects:$server", emptySet()).orEmpty().toSet()
-  fun rememberCollapsedProjects(server: String, keys: Set<String>) {
-    preferences.edit().putStringSet("collapsedProjects:$server", keys.toSet()).apply()
+  /** Keys of collapsed home sections (今天 / a project / 运行中 …) on this device. */
+  fun collapsedSections(server: String): Set<String> = preferences.getStringSet("collapsedSections:$server", emptySet()).orEmpty().toSet()
+  fun rememberCollapsedSections(server: String, keys: Set<String>) {
+    preferences.edit().putStringSet("collapsedSections:$server", keys.toSet()).apply()
+  }
+  /** Sessions pinned to the top of the home list. Pinning is this device's choice; the server has no such field. */
+  fun pinnedSessions(server: String): Set<String> = preferences.getStringSet("pinned:$server", emptySet()).orEmpty().toSet()
+  fun rememberPinnedSessions(server: String, ids: Set<String>) {
+    preferences.edit().putStringSet("pinned:$server", ids.toSet()).apply()
   }
 
   fun selectedId(): String? = preferences.getString("selected", null)
@@ -270,7 +276,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
-    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedProjects:$id")
+    val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedSections:$id").remove("collapsedProjects:$id").remove("pinned:$id")
       .remove("modelVisibility:$id").remove("recentModels:$id").remove("scope:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)

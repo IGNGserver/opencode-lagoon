@@ -45,7 +45,6 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   var sheet by remember { mutableStateOf<ChatSheet?>(null) }
   var menu by remember { mutableStateOf(false) }
   var rename by rememberSaveable { mutableStateOf(false) }
-  var title by rememberSaveable(session?.id) { mutableStateOf(session?.title.orEmpty()) }
   var delete by rememberSaveable { mutableStateOf(false) }
   var composerModal by remember { mutableStateOf(false) }
   var requestModal by remember { mutableStateOf(false) }
@@ -65,7 +64,8 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       add(MenuAction("Agent：${state.agent ?: "默认"}", MiuixIcons.ContactsCircle) { sheet = ChatSheet.AGENTS })
     }),
     MenuSection(buildList {
-      if (state.capabilities.supports(SessionAction.RENAME)) add(MenuAction("重命名", MiuixIcons.Rename) { title = state.title(session); rename = true })
+      add(MenuAction(if (session.id in state.pinned) "取消置顶" else "置顶", if (session.id in state.pinned) MiuixIcons.Unpin else MiuixIcons.Pin) { controller.togglePin(session.id) })
+      if (state.capabilities.supports(SessionAction.RENAME)) add(MenuAction("重命名", MiuixIcons.Rename) { rename = true })
       add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
     })
   )
@@ -108,11 +108,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       }
     }
   }
-  if (rename) SuperDialog(title = "重命名会话", show = true, onDismissRequest = { if (!state.pending("rename")) rename = false }) {
-    Column { TextField(title, { title = it }, label = "会话名称", modifier = Modifier.fillMaxWidth()); ActionError(state, "rename")
-      DialogActions("取消", { rename = false }, if (state.pending("rename")) "保存中…" else "保存", !state.pending("rename") && title.isNotBlank()) { controller.rename(title) { rename = false } }
-    }
-  }
+  if (rename) RenameSessionDialog(state, controller, session) { rename = false }
   if (delete) SuperDialog(title = "删除此会话？", show = true, onDismissRequest = { if (!state.pending("delete")) delete = false }) {
     Column { Text("会话消息将从服务器永久删除。\n${state.title(session)}"); ActionError(state, "delete")
       DialogActions("取消", { delete = false }, if (state.pending("delete")) "删除中…" else "永久删除", !state.pending("delete"), danger = true) { controller.deleteSession { delete = false; onBack() } }

@@ -12,7 +12,7 @@
 - `core/KeystoreCipher.kt`: `ServerStore`/`OfflineCache` 共用的 AndroidKeyStore AES-GCM 加解密。
 - `core/PairLink.kt`: 官方 `opencode pair` 链接解析（强制 HTTPS）。
 - `core/Http.kt` / `core/Diagnostics.kt`: 进程级 OkHttp 连接池/调度器；轻量日志。
-- `ui/`: 小米 HyperOS / MIUIX 风格页面与不同消息 Part 的渲染；信息架构主线为 Server → Project/Directory → Session → Conversation，一级导航「会话 / 活动 / 设置」，会话首页置顶「需要处理 / 正在运行」并按项目分组，Chat 是会话主界面（工具调用为可展开的紧凑轨迹，待办 / 改动 / 子任务 / 文件是会话上下文弹层入口）；`MainActivity` 负责根导航、预见式返回与深链。
+- `ui/`: 小米 HyperOS / MIUIX 组件页面与不同消息 Part 的渲染；信息架构主线为 Server → Project/Directory → Session → Conversation，结构对齐 Qoder：没有底部 Dock，「会话」首页是唯一根页面（范围标题、服务器胶囊、按日期 / 项目 / 状态分组的列表、悬浮新建按钮），设置等低频页面从首页 ⋯ 整页推入；Chat 是会话主界面（工具调用为可展开的紧凑轨迹，子任务 / 改动 / 文件在右上角 ⋯）。`MainActivity` 负责页面栈、预见式返回（露出真实的上一页）与深链。
 - `system/`: 通知 Channel、Android Live Updates 请求、厂商灵动岛参数、任务前台服务与通知操作。全服务器任务总览沿用统一口径（`core/TaskSummary.kt`）：`TaskNotifications.buildSummary` 生成单条 ongoing 的 Live Update 通知（`setRequestPromotedOngoing` + `setShortCriticalText`），并由 `LagoonController` 在状态变化时统一发布；`system/IslandAdapters.kt` 按「能力探测 + 品牌兜底」把同一通知分发给小米超级岛、vivo 原子岛与标准实时更新通道（品牌矩阵见 `docs/ISLAND_ADAPTATION.md`）。
 - `docs/task-event-contract.json`: Android `TaskReducer` 遵守的任务阶段归约契约。
 

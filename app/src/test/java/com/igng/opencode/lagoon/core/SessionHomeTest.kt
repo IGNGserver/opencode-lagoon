@@ -87,9 +87,9 @@ class SessionHomeTest {
     assertTrue(restored.first().viewed)
     assertFalse(restored.last().viewed)
     assertTrue(store().sessionNotices("other").isEmpty())
-    store().rememberCollapsedProjects("server", setOf("project:p"))
-    assertEquals(setOf("project:p"), store().collapsedProjects("server"))
-    assertTrue(store().collapsedProjects("other").isEmpty())
+    store().rememberCollapsedSections("server", setOf("project:p"))
+    assertEquals(setOf("project:p"), store().collapsedSections("server"))
+    assertTrue(store().collapsedSections("other").isEmpty())
   }
 
   @Test fun ledgerPrunesToTheOfficialAgeAndCountBounds() {

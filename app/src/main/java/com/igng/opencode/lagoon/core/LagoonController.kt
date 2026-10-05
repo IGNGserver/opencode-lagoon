@@ -73,7 +73,7 @@ data class LagoonState(
    * 未读结果账本（对齐官方客户端的通知账本）：只有本机见证“运行中 → 结束”的主会话才会产生一条，
    * 打开会话即标记已读。列表的“已完成 / 失败”、灵动岛计数都只读这里，从不由历史数据推断。
    */
-  val notices: List<SessionNotice> = emptyList(), val collapsedProjects: Set<String> = emptySet(),
+  val notices: List<SessionNotice> = emptyList(), val collapsedSections: Set<String> = emptySet(), val pinned: Set<String> = emptySet(),
   /** 全服务器范围的任务计数，由实时 [tasks] 与未读 [notices] 派生，供灵动岛与系统通知复用。 */
   val summary: TaskSummary = TaskSummary.EMPTY,
   /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
@@ -249,7 +249,7 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { LagoonState(profiles = store.profiles(), serverId = id, loading = true, projectId = rememberedProject, sessionId = rememberedSession,
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
-      tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedProjects = store.collapsedProjects(id),
+      tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedSections = store.collapsedSections(id), pinned = store.pinnedSessions(id),
       modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
@@ -399,7 +399,7 @@ class LagoonController private constructor(private val appContext: Context) {
       withSummary(previous.copy(version = version, capabilities = capabilities, supportsSavedPermissions = capabilities.savedPermissions,
         draftSessions = store.draftSessionIds(serverId), previews = nextSessions.associate { session -> session.id to (previous.previews[session.id] ?: store.sessionPreview(serverId, session.id)) }, connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
         error = null, degraded = degraded, staleDirectories = emptySet(),
-        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, notices = store.sessionNotices(serverId), collapsedProjects = store.collapsedProjects(serverId), sessionCursors = cursors, catalogComplete = cursors.isEmpty(),
+        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, notices = store.sessionNotices(serverId), collapsedSections = store.collapsedSections(serverId), sessionCursors = cursors, catalogComplete = cursors.isEmpty(),
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject(serverId))?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
         scopeProjectId = previous.scopeProjectId?.takeIf { id -> projects.any { it.id == id } },
@@ -730,17 +730,17 @@ class LagoonController private constructor(private val appContext: Context) {
     attempt { notifications.show(profile, session, result) }
   }
 
-  fun toggleProjectGroup(key: String) {
+  fun toggleSection(key: String) {
     val current = state.value; val server = current.serverId ?: return
-    val collapsed = if (key in current.collapsedProjects) current.collapsedProjects - key else current.collapsedProjects + key
-    store.rememberCollapsedProjects(server, collapsed)
-    mutable.update { it.copy(collapsedProjects = collapsed) }
+    val collapsed = if (key in current.collapsedSections) current.collapsedSections - key else current.collapsedSections + key
+    store.rememberCollapsedSections(server, collapsed)
+    mutable.update { it.copy(collapsedSections = collapsed) }
   }
-  fun collapseProjectGroups(collapse: Boolean) {
+  fun togglePin(sessionId: String) {
     val current = state.value; val server = current.serverId ?: return
-    val collapsed = if (collapse) current.collapsedProjects + groupSessions(current.sessions, current.projects).map { it.key } else emptySet()
-    store.rememberCollapsedProjects(server, collapsed)
-    mutable.update { it.copy(collapsedProjects = collapsed) }
+    val pinned = if (sessionId in current.pinned) current.pinned - sessionId else current.pinned + sessionId
+    store.rememberPinnedSessions(server, pinned)
+    mutable.update { it.copy(pinned = pinned) }
   }
 
   private fun notifyAttention(sessionId: String) {
@@ -1138,19 +1138,21 @@ class LagoonController private constructor(private val appContext: Context) {
     client.abort(session)
     op.commitConnection { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止", it.tasks[session.id]?.since ?: System.currentTimeMillis(), System.currentTimeMillis())))) }
   }
-  fun rename(title: String, onRenamed: (() -> Unit)? = null) = withSession("rename") { op, client, session ->
+  /** Renames [target] (a session id from the home list) or, by default, the open session. */
+  fun rename(title: String, target: String? = null, onRenamed: (() -> Unit)? = null) = withSession("rename", target) { op, client, session ->
     check(title.isNotBlank()) { "标题不能为空" }
     client.renameSession(session, title.trim())
     op.commitConnection { it.copy(sessions = it.sessions.map { item -> if (item.id == session.id) item.copy(title = title.trim()) else item }) }
     if (op.isCurrent(this)) onRenamed?.invoke()
   }
-  fun deleteSession(onDeleted: (() -> Unit)? = null) = withSession("delete") { op, client, session ->
+  fun deleteSession(target: String? = null, onDeleted: (() -> Unit)? = null) = withSession("delete", target) { op, client, session ->
     client.deleteSession(session)
     cache.deleteMessages(op.serverId, session.id)
     store.forgetSession(op.serverId, session.id)
     if (op.isCurrent(this)) onDeleted?.invoke()
-    op.commit { it.copy(sessionId = null, messages = emptyList()) }
-    op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id) }
+    if (session.id == op.snapshot.sessionId) op.commit { it.copy(sessionId = null, messages = emptyList()) }
+    if (session.id in op.snapshot.pinned) store.rememberPinnedSessions(op.serverId, op.snapshot.pinned - session.id)
+    op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id, pinned = it.pinned - session.id) }
     if (op.connectionCurrent(this)) reload()
   }
   fun fork(onForked: ((Session) -> Unit)? = null) = withSession("fork") { op, client, session ->
@@ -1250,8 +1252,8 @@ class LagoonController private constructor(private val appContext: Context) {
     op.client.revokePermission(rule.id)
     op.commit { it.copy(savedPermissions = it.savedPermissions?.filterNot { old -> old.id == rule.id }) }
   }
-  private fun withSession(action: String, block: suspend (OperationContext, OpenCodeApi, Session) -> Unit) = act(action) { op ->
-    val session = op.snapshot.session ?: error("先打开会话")
+  private fun withSession(action: String, target: String? = null, block: suspend (OperationContext, OpenCodeApi, Session) -> Unit) = act(action) { op ->
+    val session = (if (target == null) op.snapshot.session else op.snapshot.sessions.firstOrNull { it.id == target }) ?: error("先打开会话")
     block(op, op.client, session)
   }
   private fun act(action: String = "", directory: String? = null, block: suspend (OperationContext) -> Unit): Job {
