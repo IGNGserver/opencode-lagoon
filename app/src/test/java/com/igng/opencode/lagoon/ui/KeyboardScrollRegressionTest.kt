@@ -42,4 +42,11 @@ class KeyboardScrollRegressionTest {
     assertTrue("会话页应有底部运行指示", text.contains("WorkingIndicator(task)"))
     assertTrue("运行指示用“运行中”文案", text.contains("运行中 · "))
   }
+
+  /** 加载更早历史消息时应记录可见项作为锚点并在数据插入后恢复滚动偏移，防止跳跃至最早数据。 */
+  @Test fun loadingOlderMessagesPreservesScrollAnchor() {
+    val text = source("TranscriptView.kt")
+    assertTrue("加载更早历史前应记录可见项作为锚点", text.contains("anchorKey = visibleItem.key"))
+    assertTrue("加载更早历史后应恢复滚动偏移", text.contains("list.scrollBy(diff.toFloat())"))
+  }
 }
