@@ -1,15 +1,19 @@
 package com.igng.opencode.lagoon.ui
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -19,12 +23,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import com.igng.opencode.lagoon.core.*
 import kotlinx.coroutines.Dispatchers
@@ -50,7 +58,11 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
   var delete by rememberSaveable { mutableStateOf(false) }
   var composerModal by remember { mutableStateOf(false) }
   var requestModal by remember { mutableStateOf(false) }
-  val modal = sheet != null || menu || rename || delete || composerModal || requestModal
+  var activityGroup by remember(state.serverId, state.sessionId) { mutableStateOf<TranscriptRow?>(null) }
+  var activityItem by remember(state.serverId, state.sessionId) { mutableStateOf<TranscriptRow?>(null) }
+  val focusManager = LocalFocusManager.current
+  val keyboard = LocalSoftwareKeyboardController.current
+  val modal = sheet != null || menu || rename || delete || composerModal || requestModal || activityGroup != null
   DisposableEffect(modal) { onModal(modal); onDispose { onModal(false) } }
   fun openFile(path: String) { sheet = ChatSheet.FILES; controller.readFile(path) }
   if (session == null) {
@@ -74,15 +86,39 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
     })
   )
-  Column(Modifier.fillMaxSize()) {
-    PageTopBar(state.title(session), onBack, subtitle = { SessionSubtitle(state, session) }) {
-      Box {
-        CircleIconButton(MiuixIcons.More, "会话操作", { menu = true })
-        MenuPopup(menu, { menu = false }, menuSections)
+  QoderChatTheme {
+    Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
+      Column(Modifier.fillMaxSize()) {
+        QoderChatTopBar(state.title(session), onBack, subtitle = { SessionSubtitle(state, session) }) {
+          Box {
+            QoderCircleButton(QoderGlyph.MORE, "会话操作", { menu = true }, background = Color.Transparent)
+            MenuPopup(menu, { menu = false }, menuSections)
+          }
+        }
+        Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it }, onOpenChild,
+          onActivityGroup = {
+            focusManager.clearFocus(); keyboard?.hide()
+            activityGroup = it
+            activityItem = it.takeIf { row -> row.kind == "tool" }
+          })
+        ChatComposer(state, controller, interactive, onModal = { composerModal = it }, onServerFile = { sheet = ChatSheet.FILES; controller.listFiles() })
+      }
+      activityGroup?.let { group ->
+        QoderActivityOverlay(
+          messages = state.messages,
+          group = group,
+          selected = activityItem,
+          working = state.tasks[state.sessionId]?.active == true,
+          revertMessageId = session.revertMessageId,
+          interactive = interactive,
+          onOpenChild = { activityItem = null; activityGroup = null; onOpenChild(it) },
+          onFile = { activityItem = null; activityGroup = null; openFile(it) },
+          onSelected = { activityItem = it },
+          onBack = { activityItem = null },
+          onDismiss = { activityItem = null; activityGroup = null }
+        )
       }
     }
-    Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it }, onOpenChild)
-    ChatComposer(state, controller, interactive, onModal = { composerModal = it }, onServerFile = { sheet = ChatSheet.FILES; controller.listFiles() })
   }
   sheet?.let { which ->
     val resource = when (which) { ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children" }
@@ -112,6 +148,107 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
       DialogActions("取消", { delete = false }, if (state.pending("delete")) "删除中…" else "永久删除", !state.pending("delete"), danger = true) { controller.deleteSession { delete = false; onBack() } }
     }
   }
+}
+
+/** Chat-level overlay: it covers the composer as in Qoder, while preserving the transcript behind it. */
+@Composable
+private fun QoderActivityOverlay(
+  messages: List<Message>,
+  group: TranscriptRow,
+  selected: TranscriptRow?,
+  working: Boolean,
+  revertMessageId: String?,
+  interactive: Boolean,
+  onOpenChild: (String) -> Unit,
+  onFile: (String) -> Unit,
+  onSelected: (TranscriptRow) -> Unit,
+  onBack: () -> Unit,
+  onDismiss: () -> Unit
+) {
+  val content by produceState(group to emptyList<TranscriptRow>(), group.key, messages, working, revertMessageId) {
+    value = withContext(Dispatchers.Default) {
+      val latest = TranscriptRows.build(messages, working = working, revertMessageId = revertMessageId).firstOrNull { it.key == group.key } ?: group
+      latest to TranscriptRows.details(messages, group.key, working, revertMessageId)
+    }
+  }
+  val (latestGroup, details) = content
+  val sections = remember(details) { qoderSections(details) }
+  // Kept outside the list/detail branch: returning from a detail must restore the reader's place.
+  val activityListState = rememberLazyListState()
+  val latestSelected = selected?.let { item -> if (item.key == group.key) latestGroup else details.firstOrNull { it.key == item.key } ?: item }
+  BackHandler(enabled = interactive) { if (latestSelected != null && latestSelected.key != group.key) onBack() else onDismiss() }
+  Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.58f))
+      .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss))
+    Column(Modifier.fillMaxWidth().fillMaxHeight(0.74f).align(Alignment.BottomCenter)
+      .clip(androidx.compose.foundation.shape.RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+      .background(QoderColors.sheetColor).pointerInput(Unit) { detectTapGestures { } }.navigationBarsPadding()) {
+      QoderSheetHandle()
+      if (latestSelected == null) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+          Spacer(Modifier.width(44.dp))
+          Text(latestGroup.title.ifBlank { "操作记录" }, Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            style = MiuixTheme.textStyles.title3.copy(fontWeight = FontWeight.Bold))
+          QoderCircleButton(QoderGlyph.CLOSE, "关闭操作列表", onDismiss, background = QoderColors.codeColor, foreground = QoderColors.secondary)
+        }
+        LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 22.dp), state = activityListState, contentPadding = PaddingValues(bottom = 28.dp)) {
+          itemsIndexed(sections, key = { _, section -> section.header.key }) { index, section ->
+            QoderActivityItem(section.header, section.bodies, onSelected, onFile, hasNext = index < sections.lastIndex)
+          }
+        }
+      } else {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+          QoderCircleButton(QoderGlyph.BACK, "返回操作列表", if (latestSelected.key == group.key) onDismiss else onBack, background = QoderColors.codeColor, foreground = QoderColors.secondary)
+          Text(latestSelected.title.ifBlank { "详情" }, Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            style = MiuixTheme.textStyles.title3.copy(fontWeight = FontWeight.Bold))
+          QoderCircleButton(QoderGlyph.CLOSE, "关闭详情", onDismiss, background = QoderColors.codeColor, foreground = QoderColors.secondary)
+        }
+        key(latestSelected.key) {
+          LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 22.dp), contentPadding = PaddingValues(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            val bodies = details.filter { it.bodyOf == latestSelected.key }
+            // Projected chunks are the sole body source, including reasoning: never repeat source.text.
+            items(bodies, key = { it.key }) { body ->
+              when (body.kind) {
+                "reasoning-body", "process-output" -> DetailMarkdown(body.text)
+                "tool-body" -> DetailCode(body.title, body.text, readContent = latestSelected.source?.tool == "read" && body.title != "文件路径", copyText = body.copyText)
+                else -> DetailRowView(body)
+              }
+            }
+            items(latestSelected.attachments.distinctBy { it.url }, key = { "attachment:${it.url}" }) { attachment -> AttachmentView(attachment, onFile) }
+            if (bodies.isEmpty() && latestSelected.attachments.isEmpty()) item { Text(if (latestSelected.status in setOf("running", "pending")) "等待服务器输出…" else "此操作没有正文", color = QoderColors.secondary) }
+            latestSelected.target?.let { child -> item { TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }) } }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun QoderChatTopBar(title: String, onBack: () -> Unit, subtitle: @Composable RowScope.() -> Unit, actions: @Composable RowScope.() -> Unit) {
+  Row(Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 64.dp).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    QoderCircleButton(QoderGlyph.BACK, "返回上一级", onBack, background = Color.Transparent)
+    Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+      Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.title4.copy(fontWeight = FontWeight.Medium))
+      Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically, content = subtitle)
+    }
+    actions()
+  }
+}
+
+private fun qoderSections(rows: List<TranscriptRow>): List<DetailSection> {
+  val result = mutableListOf<DetailSection>()
+  var header: TranscriptRow? = null
+  val bodies = mutableListOf<TranscriptRow>()
+  rows.forEach { row ->
+    if (row.bodyOf == null) {
+      header?.let { result += DetailSection(it, bodies.toList()) }
+      header = row
+      bodies.clear()
+    } else bodies += row
+  }
+  header?.let { result += DetailSection(it, bodies.toList()) }
+  return result
 }
 
 /**
@@ -434,7 +571,7 @@ private fun ChatComposer(
   }
   val attach: @Composable () -> Unit = {
     Box {
-      IconButton(onClick = { attachMenu = true }, enabled = !sending && interactive) { Icon(MiuixIcons.Add, "添加图片或文件", Modifier.size(24.dp), tint = MiuixTheme.colorScheme.onSurface) }
+      QoderCircleButton(QoderGlyph.PLUS, "添加图片或文件", { attachMenu = true }, enabled = !sending && interactive, background = Color.Transparent)
       MenuPopup(attachMenu, { attachMenu = false }, listOf(MenuSection(listOfNotNull(
         MenuAction("图片", MiuixIcons.Image) { images.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
         MenuAction("手机文件", MiuixIcons.File) { documents.launch(arrayOf("*/*")) },
@@ -444,16 +581,15 @@ private fun ChatComposer(
   }
   val sendOrStop: @Composable () -> Unit = {
     if (task?.phase in TaskState.RUNNING_PHASES && !hasContent) {
-      RoundAction(null, "停止", { controller.abort() }, enabled = !state.pending("abort"), container = MiuixTheme.colorScheme.error) {
-        Box(Modifier.size(12.dp).background(MiuixTheme.colorScheme.onError, miuixShape(3.dp)))
-      }
-    } else RoundAction(MiuixIcons.Send, "发送", {
+      QoderCircleButton(QoderGlyph.STOP, "停止", { controller.abort() }, enabled = !state.pending("abort") && interactive, background = QoderColors.codeColor)
+    } else QoderCircleButton(QoderGlyph.SEND, "发送", {
       val draft = value.text
       onSend(draft) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue("") } }
-    }, enabled = canSend)
+    }, enabled = canSend && interactive, background = if (canSend) MiuixTheme.colorScheme.onSurface else QoderColors.codeColor,
+      foreground = if (canSend) MiuixTheme.colorScheme.surface else muted)
   }
   Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
-    Column(Modifier.fillMaxWidth().clip(miuixShape(if (expanded) 24.dp else 28.dp)).background(MiuixTheme.colorScheme.secondaryContainer)
+    Column(Modifier.fillMaxWidth().clip(miuixShape(if (expanded) 24.dp else 28.dp)).background(QoderColors.inputColor)
       .animateContentSize().padding(6.dp)) {
       hint?.let { Text(it, Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp), color = if (sending) muted else MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2) }
       if (state.attachments.isNotEmpty() || state.references.isNotEmpty()) Box(Modifier.padding(start = 6.dp, end = 6.dp, top = 6.dp)) { AttachmentTray(state, controller) }

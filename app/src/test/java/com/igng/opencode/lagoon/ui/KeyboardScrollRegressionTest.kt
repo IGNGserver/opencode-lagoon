@@ -36,6 +36,21 @@ class KeyboardScrollRegressionTest {
     assertTrue("分组行仍走半屏明细", text.contains("\"tool-group\" -> Column"))
   }
 
+  @Test fun activityOverlayKeepsListStateAndBackFirstReturnsToTheList() {
+    val text = source("ChatScreen.kt")
+    assertTrue("列表状态必须留在列表和详情分支外", text.indexOf("val activityListState = rememberLazyListState()") < text.indexOf("if (latestSelected == null)"))
+    assertTrue("返回先退出二级详情，再关闭操作层", text.contains("if (latestSelected != null && latestSelected.key != group.key) onBack() else onDismiss()"))
+    assertTrue("操作层必须覆盖输入栏", text.contains("fillMaxHeight(0.74f)"))
+    assertTrue("详情需随服务器消息更新", text.contains("group.key, messages, working, revertMessageId"))
+    assertTrue("工具附件必须显示在二级详情", text.contains("items(latestSelected.attachments"))
+  }
+
+  @Test fun qoderThemeIsScopedToExistingChatNotHomeOrSettings() {
+    assertTrue(source("ChatScreen.kt").contains("QoderChatTheme {"))
+    assertTrue(!source("MainActivity.kt").contains("QoderChatTheme"))
+    assertTrue("输入栏应保留系统导航栏安全距离", source("ChatScreen.kt").contains("navigationBarsPadding()"))
+  }
+
   /** 运行中的会话在底部常驻“运行中”指示，且时间每秒刷新。 */
   @Test fun runningSessionKeepsABottomIndicator() {
     val text = source("TranscriptView.kt")
