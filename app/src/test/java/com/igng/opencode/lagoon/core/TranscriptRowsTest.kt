@@ -46,7 +46,7 @@ class TranscriptRowsTest {
       tool("t4", "read", input = """{"filePath":"b.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("已处理 4 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertEquals(listOf("共处理 4 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
     assertTrue(rows.none { it.kind == "tool" })
   }
 
@@ -61,7 +61,7 @@ class TranscriptRowsTest {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("已处理 5 个操作", group.title)
+    assertEquals("共处理 5 个操作", group.title)
     val details = TranscriptRows.details(messages, group.key)
     assertEquals(3, details.count { it.kind == "tool" })
     assertEquals(2, details.count { it.kind == "reasoning" })
@@ -74,7 +74,7 @@ class TranscriptRowsTest {
       tool("t2", "read", input = """{"filePath":"a.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("已处理 2 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertEquals(listOf("共处理 2 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
   }
 
   @Test fun processOutputStaysChronologicalInTheActivityTimelineAndFinalTextStaysInTranscript() {
@@ -86,7 +86,7 @@ class TranscriptRowsTest {
       part("p3", "text", text = "整理后的最终回答")))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("已处理 2 个操作", group.title)
+    assertEquals("共处理 2 个操作", group.title)
     assertEquals("整理后的最终回答", rows.single { it.kind == "text" }.text)
 
     val details = TranscriptRows.details(messages, group.key)
@@ -123,7 +123,7 @@ class TranscriptRowsTest {
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
     assertEquals(1, rows.count { it.kind == "tool-group" })
-    assertEquals("已处理 1 个操作", rows.first { it.kind == "tool-group" }.title)
+    assertEquals("共处理 1 个操作", rows.first { it.kind == "tool-group" }.title)
   }
 
   @Test fun emptyMessagesProduceNoRows() {
@@ -135,7 +135,7 @@ class TranscriptRowsTest {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *(1..8).map { tool("t$it", "bash", input = """{"command":"cmd$it"}""", output = "ok") }.toTypedArray()))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("已处理 8 个操作", group.title)
+    assertEquals("共处理 8 个操作", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertEquals(8, TranscriptRows.details(messages, group.key).count { it.kind == "tool" })
   }
@@ -172,7 +172,7 @@ class TranscriptRowsTest {
     val base = TranscriptRows.build(messages)
     assertTrue(base.none { it.kind == "tool" })
     val group = base.single { it.kind == "tool-group" }
-    assertEquals("已处理 2 个操作", group.title)
+    assertEquals("共处理 2 个操作", group.title)
     val searchItem = TranscriptRows.details(messages, group.key).first { it.kind == "tool" && it.title == "搜索内容" }
     assertTrue(searchItem.args.contains("include=*.kt"))
   }
@@ -253,7 +253,7 @@ class TranscriptRowsTest {
     val rows = TranscriptRows.build(messages)
     // One group for the whole span between user text and the turn end, even though call ids repeat.
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("已处理 6 个操作", group.title)
+    assertEquals("共处理 6 个操作", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertUniqueKeys(rows)
     val details = TranscriptRows.details(messages, group.key)
@@ -279,21 +279,30 @@ class TranscriptRowsTest {
     assertTrue(rebuilt.any { it.kind == "tool-body" })
   }
 
-  @Test fun liveUpdatesKeepTheGroupAndSelectedToolKeysWhileReplacingOutput() {
+  @Test fun runningTurnShowsProcessAndBatchInlineThenCollapsesOnCompletion() {
     val pending = tool("call_1", "bash", input = """{"command":"pwd"}""", status = "running")
-    val first = listOf(user("u1", t0), assistant("a1", t0 + 500, pending, completedAt = null))
-    val group = TranscriptRows.build(first, working = true).single { it.kind == "tool-group" }
-    val selected = TranscriptRows.details(first, group.key, working = true).single { it.kind == "tool" }
+    val running = listOf(user("u1", t0), assistant("a1", t0 + 500, part("p1", "text", text = "先确认目录"), pending, completedAt = null))
+    val live = TranscriptRows.build(running, working = true)
+    // 运行中：过程回复内联，调用组成「正在进行第 1 轮调用」并保留调用本身可见。
+    assertEquals("先确认目录", live.single { it.kind == "process-output" }.text)
+    val batch = live.single { it.kind == "activity-batch" }
+    assertTrue(batch.title.contains("正在进行第 1 轮调用"))
+    assertEquals("running", batch.status)
+    assertEquals(pending, live.single { it.kind == "activity-tool" }.source)
+
     val finishedTool = pending.copy(status = "completed", output = "/workspace")
-    val finished = listOf(user("u1", t0), assistant("a1", t0 + 500, finishedTool),
+    val finished = listOf(user("u1", t0), assistant("a1", t0 + 500, part("p1", "text", text = "先确认目录"), finishedTool),
       assistant("a2", t0 + 1_500, part("answer", "text", text = "已确认工作目录")))
     val rows = TranscriptRows.build(finished)
-    assertEquals(group.key, rows.single { it.kind == "tool-group" }.key)
-    assertEquals("completed", rows.single { it.kind == "tool-group" }.status)
+    // 完成后：整轮折叠为「共处理 N 个操作」+ 最终回复，过程不再内联。
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("共处理 1 个操作", group.title)
+    assertEquals("completed", group.status)
+    assertEquals("已确认工作目录", rows.single { it.kind == "text" }.text)
+    assertTrue(rows.none { it.kind == "process-output" })
+    assertTrue(rows.none { it.kind == "activity-batch" })
     val details = TranscriptRows.details(finished, group.key)
-    assertEquals(selected.key, details.single { it.kind == "tool" }.key)
     assertEquals(finishedTool, details.single { it.kind == "tool" }.source)
-    assertTrue(details.any { it.bodyOf == selected.key && it.title == "输出" && it.text == "/workspace" })
   }
 
   @Test fun openingOneGroupDoesNotIncludeAnotherTurnsDetailsOrNotices() {

@@ -2,6 +2,9 @@ package com.igng.opencode.lagoon.core
 
 import org.json.JSONObject
 
+/** One server-provided thinking-strength / reasoning variant of a model. */
+data class ModelVariant(val id: String, val label: String)
+
 /**
  * One selectable model with the catalog metadata needed to decide its default visibility.
  * [released] is epoch milliseconds; 0 means the catalog carries no release date (custom models).
@@ -13,7 +16,9 @@ data class ModelInfo(
   val released: Long = 0,
   /** Whether the model accepts image input; null when the catalog does not say. */
   val imageInput: Boolean? = null,
-  val deprecated: Boolean = false
+  val deprecated: Boolean = false,
+  /** Thinking-strength variants the server offers for this model; empty when it has none. */
+  val variants: List<ModelVariant> = emptyList()
 ) {
   val key: String get() = modelKey(choice)
 }
@@ -68,8 +73,27 @@ internal fun JSONObject.toV2ModelInfo(providerNames: Map<String, String>): Model
     family = str("family").ifBlank { null },
     released = epochMillis(obj("time").optDouble("released", 0.0)),
     imageInput = if (obj("capabilities").has("input")) (0 until inputs.length()).any { inputs.optString(it) == "image" } else null,
-    deprecated = str("status") == "deprecated"
+    deprecated = str("status") == "deprecated",
+    variants = toVariants()
   )
+}
+
+/**
+ * The server's variant list for one model. Accepts either a string array or `{id, name/label}`
+ * objects, and never invents a universal low/medium/high set.
+ */
+private fun JSONObject.toVariants(): List<ModelVariant> {
+  val array = optJSONArray("variants") ?: return emptyList()
+  return (0 until array.length()).mapNotNull { index ->
+    when (val item = array.opt(index)) {
+      is String -> item.takeIf(String::isNotBlank)?.let { ModelVariant(it, it) }
+      is JSONObject -> {
+        val id = item.str("id").ifBlank { item.str("name") }
+        id.takeIf(String::isNotBlank)?.let { ModelVariant(it, item.str("label").ifBlank { item.str("name").ifBlank { it } }) }
+      }
+      else -> null
+    }
+  }.distinctBy { it.id }
 }
 
 /** Accepts epoch seconds or milliseconds; anything non-positive means "no release date". */

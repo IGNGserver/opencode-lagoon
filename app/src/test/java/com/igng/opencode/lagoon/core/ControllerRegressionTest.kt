@@ -203,6 +203,10 @@ class ControllerRegressionTest {
         return MockResponse().setBody(body)
       } }
       val (controller, state) = controller(api(server), LagoonState(serverId = "server", projectId = "q"))
+      // Projects are device-local now: register the two server directories before refreshing.
+      val store = LagoonController::class.java.getDeclaredField("store").apply { isAccessible = true }.get(controller) as ServerStore
+      store.addLocalProject("server", Project("p", "/repo", "Project"))
+      store.addLocalProject("server", Project("q", "/other", "Other"))
       refresh(controller, controlOnly = false)
       val groups = groupSessions(state.value.sessions, state.value.projects)
       assertEquals(listOf("p", "q"), groups.map { it.key })

@@ -157,13 +157,19 @@ object TranscriptRows {
     turn.entries.filter { it.role == "notice" }.forEach { body += noticeRow(turnKey, it) }
     val lastActivity = entries.indexOfLast { (_, part) -> part.type in setOf("tool", "reasoning") }
     val nonFinal = assistants.filter { it.finish in setOf("tool-calls", "tool_calls") }.map { it.id }.toSet()
-    val activities = entries.filterIndexed { index, (ref, part) ->
-      part.type != "text" || index <= lastActivity || nonFinal.any { ref.startsWith("$it/") }
-    }
     val finalParts = entries.filterIndexed { index, (ref, part) ->
       part.type == "text" && index > lastActivity && nonFinal.none { ref.startsWith("$it/") }
     }
-    if (activities.isNotEmpty()) body += toolGroupRows(turnKey, activities, expanded, working)
+    val finalRefs = finalParts.map { it.first }.toSet()
+    val process = entries.filterNot { it.first in finalRefs }
+    if (working) {
+      // A running turn stays transparent: each process reply is shown inline and every consecutive
+      // batch of operations becomes its own group whose calls remain visible while they execute.
+      // Only finished turns collapse into the「共处理 N 个操作」summary.
+      body += runningTurnRows(turnKey, process)
+    } else if (process.isNotEmpty()) {
+      body += toolGroupRows(turnKey, process, expanded, working = false)
+    }
     if (finalParts.isNotEmpty()) {
       val text = finalParts.joinToString("\n\n") { it.second.text.trim() }
       body += TranscriptRow("$turnKey:answer", "text", text = text)
@@ -220,6 +226,66 @@ object TranscriptRows {
   }
 
   /**
+   * A running turn's transparent timeline: process replies inline, then each consecutive batch of
+   * operations as its own group. Mirrors「过程回复 + 一组调用 + 过程回复 + 正在进行的调用」.
+   */
+  private fun runningTurnRows(turnKey: String, entries: List<Pair<String, MessagePart>>): List<TranscriptRow> {
+    val rows = mutableListOf<TranscriptRow>()
+    var index = 0
+    var batch = 0
+    while (index < entries.size) {
+      val (ref, part) = entries[index]
+      if (part.type == "text") {
+        if (part.text.isNotBlank()) rows += TranscriptRow("$turnKey:process:$ref", "process-output", text = part.text, source = part)
+        index++
+        continue
+      }
+      val group = mutableListOf<Pair<String, MessagePart>>()
+      while (index < entries.size && entries[index].second.type != "text") { group += entries[index]; index++ }
+      if (group.isEmpty()) { index++; continue }
+      batch++
+      rows += runningBatchRows(turnKey, batch, group)
+    }
+    return rows
+  }
+
+  /** One executing operation batch: a「正在进行第 N 轮调用」header with its calls and bodies inline. */
+  private fun runningBatchRows(turnKey: String, batch: Int, entries: List<Pair<String, MessagePart>>): List<TranscriptRow> {
+    val key = "$turnKey:batch:$batch"
+    val tools = entries.filter { it.second.type == "tool" }.map { it.second }
+    val reasonings = entries.filter { it.second.type == "reasoning" }.map { it.second }
+    val running = tools.any { it.status in setOf("running", "pending") } || reasonings.any { it.status == "running" }
+    val status = when { running -> "running"; tools.any { it.status == "error" } -> "error"; else -> "completed" }
+    val count = entries.count { it.second.type != "text" }
+    val header = TranscriptRow(key, "activity-batch", title = if (running) "正在进行第 $batch 轮调用 · $count 个操作" else "第 $batch 轮调用 · $count 个操作", status = status)
+    val children = mutableListOf<TranscriptRow>()
+    entries.forEachIndexed { position, (ref, part) ->
+      val occurrence = entries.take(position).count { it.first == ref }
+      val itemKey = "$key:$ref" + if (occurrence == 0) "" else "~${occurrence + 1}"
+      when (part.type) {
+        "reasoning" -> {
+          children += TranscriptRow(itemKey, "activity-reasoning", title = "深度思考", status = part.status, source = part)
+          reasoningBodies(null, itemKey, part.text.trim()).forEach { children += it }
+        }
+        "notice" -> children += TranscriptRow(itemKey, "note", title = part.title, text = part.text, status = part.status, target = part.target)
+        "file" -> children += TranscriptRow(itemKey, "attachment", attachments = listOf(Attachment(part.path, part.mime, part.title)), source = part)
+        else -> {
+          val (title, subtitle) = toolInfo(part)
+          children += TranscriptRow(itemKey, "activity-tool", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status,
+            attachments = part.attachments, target = part.target.takeIf { part.tool in SUBAGENT_TOOLS }, source = part)
+          toolSections(part).flatMap { section ->
+            MarkdownBlocks.chunks(section.text).mapIndexed { index, chunk ->
+              TranscriptRow("$itemKey:${section.label}:$index", "tool-body", title = if (index == 0) section.label else "", text = chunk,
+                copyText = section.copyText?.takeIf { index == 0 }, bodyOf = itemKey)
+            }
+          }.forEach { children += it }
+        }
+      }
+    }
+    return listOf(header) + children
+  }
+
+  /**
    * One stable activity group per user turn, including intermediate text in chronological order.
    * Process output is visible in the activity list; tool/reasoning bodies are second-level details.
    */
@@ -241,7 +307,7 @@ object TranscriptRows {
     val errorText = tools.firstOrNull { it.status == "error" && it.error.isNotBlank() }?.let { unwrapError(it.error) }
     val preview = errorText?.take(140) ?: tools.singleOrNull()?.let { toolInfo(it).second }.orEmpty()
     val count = entries.count { it.second.type != "text" }
-    val row = TranscriptRow(key, "tool-group", title = "已处理 $count 个操作", subtitle = preview, meta = summary, status = status,
+    val row = TranscriptRow(key, "tool-group", title = "共处理 $count 个操作", subtitle = preview, meta = summary, status = status,
       target = tools.singleOrNull()?.takeIf { it.tool in SUBAGENT_TOOLS }?.target)
     if (key !in expanded) return listOf(row)
     val children = mutableListOf<TranscriptRow>()
@@ -273,8 +339,8 @@ object TranscriptRows {
     return listOf(row) + children
   }
 
-  /** 半屏窗口里「思考」条目的正文，默认折叠，点击条目头才显示。 */
-  private fun reasoningBodies(groupKey: String, itemKey: String, text: String): List<TranscriptRow> =
+  /** 半屏窗口里「思考」条目的正文，默认折叠，点击条目头才显示；运行中的内联思考直接展开。 */
+  private fun reasoningBodies(groupKey: String?, itemKey: String, text: String): List<TranscriptRow> =
     MarkdownBlocks.chunks(text).mapIndexed { index, chunk ->
       TranscriptRow("$itemKey:body:$index", "reasoning-body", text = chunk, detailOf = groupKey, bodyOf = itemKey)
     }

@@ -70,4 +70,16 @@ class ModelVisibilityTest {
     assertEquals(0L, epochMillis(0.0))
     assertFalse(ModelVisibility.latest(listOf(info), info.released + day).isEmpty())
   }
+
+  @Test fun parsesServerProvidedVariantsWithoutInventingAUniversalSet() {
+    val objects = JSONObject("""{"id":"m","providerID":"p","name":"M","enabled":true,"variants":[{"id":"low","name":"Low"},{"id":"high","label":"High"}]}""")
+      .toV2ModelInfo(emptyMap())!!
+    assertEquals(listOf(ModelVariant("low", "Low"), ModelVariant("high", "High")), objects.variants)
+    val strings = JSONObject("""{"id":"m","providerID":"p","name":"M","enabled":true,"variants":["low","high"]}""")
+      .toV2ModelInfo(emptyMap())!!
+    assertEquals(listOf(ModelVariant("low", "low"), ModelVariant("high", "high")), strings.variants)
+    // No variants means the strength selector stays disabled rather than assuming low/medium/high.
+    val none = JSONObject("""{"id":"m","providerID":"p","name":"M","enabled":true}""").toV2ModelInfo(emptyMap())!!
+    assertTrue(none.variants.isEmpty())
+  }
 }

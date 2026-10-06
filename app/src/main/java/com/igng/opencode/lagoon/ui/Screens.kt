@@ -350,9 +350,6 @@ fun SettingsScreen(
   var crashReport by remember { mutableStateOf<String?>(null) }
   LaunchedEffect(Unit) { crashReport = withContext(Dispatchers.IO) { CrashLog.read(context) } }
 
-
-  var showModels by remember { mutableStateOf(false) }
-
   // MIUIX settings: white cards on the grey page surface.
   Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
   PageTopBar("设置", onBack)
@@ -398,22 +395,6 @@ fun SettingsScreen(
           items = RefreshMode.entries.map { it.label },
           selectedIndex = RefreshMode.entries.indexOf(refreshMode),
           onSelectedIndexChange = { onRefreshMode(RefreshMode.entries[it]) }
-        )
-      }
-    }
-
-    item {
-      SmallTitle("模型")
-      Card(Modifier.fillMaxWidth()) {
-        SuperArrow(
-          title = "管理模型",
-          summary = when {
-            !state.connected -> "连接服务器后可选择显示哪些模型"
-            state.modelCatalog.isEmpty() -> "正在读取服务器模型…"
-            else -> "显示 ${state.visibleModels.size} / ${state.modelCatalog.size} 个模型"
-          },
-          enabled = state.connected,
-          onClick = { showModels = true }
         )
       }
     }
@@ -484,5 +465,4 @@ fun SettingsScreen(
   }
 
   }
-  if (showModels) ManageModelsSheet(state, controller) { showModels = false }
 }

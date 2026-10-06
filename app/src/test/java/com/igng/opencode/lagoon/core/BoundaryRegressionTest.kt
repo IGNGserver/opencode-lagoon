@@ -124,4 +124,33 @@ class BoundaryRegressionTest {
       assertTrue(failure is IOException)
     }
   }
+
+  @Test fun localProjectsAreDedupedByCanonicalDirectoryAndSurviveReload() {
+    val p=memoryPreferences();val s=store(p)
+    s.addLocalProject("srv", Project("p","/repo","Repo"))
+    // The same canonical folder under a different id must replace, never duplicate.
+    s.addLocalProject("srv", Project("p2","/repo/","Repo again"))
+    assertEquals(listOf("/repo"), s.localProjects("srv").map { it.directory }.map(::normalizedDirectory).distinct())
+    assertEquals(1, s.localProjects("srv").size)
+    assertEquals("p2", s.localProjects("srv").single().id)
+    val fresh=ServerStore(p,memoryPreferences(),{"encrypted:$it"},{require(it.startsWith("encrypted:"));it.removePrefix("encrypted:")})
+    assertEquals("p2", fresh.localProjects("srv").single().id)
+    s.removeLocalProject("srv","p2")
+    assertTrue(s.localProjects("srv").isEmpty())
+  }
+
+  @Test fun migrationClearsOnlyTheOldServerDerivedProjectSelection() {
+    val p=memoryPreferences()
+    p.edit().putString("selectedProject","old").putString("location:srv:project","old")
+      .putString("location:srv:session","keep").putString("scope:srv","old").putString("directories:srv","[]").apply()
+    val s=store(p)
+    s.migrateLocalProjects()
+    assertNull(p.getString("selectedProject",null))
+    assertNull(p.getString("location:srv:project",null))
+    assertEquals("keep",p.getString("location:srv:session",null))
+    assertNull(p.getString("scope:srv",null))
+    // A second run is a no-op and never touches the (now device-local) registrations.
+    s.migrateLocalProjects()
+    assertEquals(2, p.getInt("projectCatalogVersion",0))
+  }
 }

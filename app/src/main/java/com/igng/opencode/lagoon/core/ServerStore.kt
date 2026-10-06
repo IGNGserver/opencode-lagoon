@@ -169,6 +169,46 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     preferences.edit().putString("scope:$id", project.orEmpty()).apply()
   }
 
+  /**
+   * Project directories registered on this device, newest first. The server's own project list is
+   * never imported automatically: the user adds a project by resolving a remote directory.
+   */
+  fun localProjects(id: String): List<Project> = runCatching {
+    JSONArray(preferences.getString("directories:$id", "[]")).objects().mapNotNull { item ->
+      val directory = item.str("directory").ifBlank { item.str("path") }
+      if (directory.isBlank()) null else Project(item.str("id").ifBlank { normalizedDirectory(directory) }, directory,
+        item.str("name").ifBlank { directory.trimEnd('/').substringAfterLast('/').ifBlank { directory } })
+    }
+  }.getOrDefault(emptyList())
+  fun rememberLocalProjects(id: String, projects: List<Project>) {
+    preferences.edit().putString("directories:$id", JSONArray().apply {
+      projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) }
+    }.toString()).apply()
+  }
+  /** Registers a server-resolved project, replacing any entry with the same canonical directory. */
+  fun addLocalProject(id: String, project: Project): List<Project> {
+    val canonical = normalizedDirectory(project.directory)
+    val next = (listOf(project) + localProjects(id).filterNot { normalizedDirectory(it.directory) == canonical }).take(50)
+    rememberLocalProjects(id, next)
+    return next
+  }
+  fun removeLocalProject(id: String, projectId: String): List<Project> {
+    val next = localProjects(id).filterNot { it.id == projectId }
+    rememberLocalProjects(id, next)
+    return next
+  }
+  /**
+   * One-time reset to device-local projects. Earlier releases auto-imported the server's project list
+   * and persisted the selection; drop only that local selection, never any server data.
+   */
+  fun migrateLocalProjects() {
+    if (preferences.getInt("projectCatalogVersion", 0) >= 2) return
+    val editor = preferences.edit()
+    preferences.all.keys.filter { it.startsWith("location:") && it.endsWith(":project") }.forEach(editor::remove)
+    preferences.all.keys.filter { it.startsWith("scope:") }.forEach(editor::remove)
+    editor.remove("selectedProject").putInt("projectCatalogVersion", 2).apply()
+  }
+
   fun sessionPreview(server: String, session: String): SessionPreview = runCatching {
     val raw = secrets.getString("preview:$server:$session", null)?.let(decryptValue)
       ?: preferences.getString("preview:$server:$session", "{}").orEmpty()
@@ -187,7 +227,8 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     SessionConfiguration(value.str("agent").ifBlank { null }, value.obj("model").toModelChoice(), value.optBoolean("agentChanged"), value.optBoolean("modelChanged"))
   }.getOrDefault(SessionConfiguration())
   fun rememberConfiguration(server: String, session: String, configuration: SessionConfiguration) {
-    val model = configuration.model?.let { JSONObject().put("providerID", it.providerId).put("modelID", it.modelId).put("name", it.label) }
+    val model = configuration.model?.let { JSONObject().put("providerID", it.providerId).put("modelID", it.modelId).put("name", it.label)
+      .apply { it.variant?.let { variant -> put("variant", variant) } } }
     preferences.edit().putString("configuration:$server:$session", JSONObject().put("agent", configuration.agent).put("model", model).put("agentChanged", configuration.agentChanged).put("modelChanged", configuration.modelChanged).toString()).apply()
   }
   fun references(server: String, session: String): List<FileReference> = runCatching {

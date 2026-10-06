@@ -291,6 +291,20 @@ class OpenCodeApi(
   }
   suspend fun session(id: String): Session = dataObject(obj(sessionPath(id))).toSession()
 
+  /**
+   * Resolve [directory] to the server's canonical project, like the desktop client's `project.current()`.
+   * Passing the directory through `location[directory]` lets the server do the path normalization, so
+   * the phone stores the canonical directory and never spawns a duplicate project for the same folder.
+   */
+  suspend fun projectAt(directory: String): Project? {
+    val location = dataObject(obj("api/location", locationQuery(directory)))
+    val project = location.obj("project")
+    val canonical = project.str("canonical").ifBlank { project.str("worktree") }.ifBlank { location.str("directory") }.ifBlank { directory }
+    if (canonical.isBlank()) return null
+    val id = project.str("id").ifBlank { canonical }
+    return Project(id, canonical, project.str("name").ifBlank { canonical.trimEnd('/').substringAfterLast('/').ifBlank { canonical } }, project.arr("sandboxes").strings())
+  }
+
   /** Home catalog: like the official home index, global root sessions newest first (`parentID=null`). */
   suspend fun rootSessionsPage(directory: String? = null, cursor: String? = null, size: Int = 100): ApiPage<Session> = withContext(Dispatchers.IO) {
     val query = mutableMapOf("limit" to size.toString(), "parentID" to "null")

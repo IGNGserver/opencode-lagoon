@@ -62,6 +62,6 @@ class KeyboardScrollRegressionTest {
   @Test fun loadingOlderMessagesPreservesScrollAnchor() {
     val text = source("TranscriptView.kt")
     assertTrue("加载更早历史前应记录可见项作为锚点", text.contains("anchorKey = visibleItem.key"))
-    assertTrue("加载更早历史后应恢复滚动偏移", text.contains("list.scrollBy(diff.toFloat())"))
+    assertTrue("加载更早历史后应按锚点行的新位置恢复滚动偏移", text.contains("list.scrollToItem(leading + position, anchorOffset)"))
   }
 }

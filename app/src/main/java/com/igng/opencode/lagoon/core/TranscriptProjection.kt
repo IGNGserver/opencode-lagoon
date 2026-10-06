@@ -10,6 +10,22 @@ import org.json.JSONObject
  * loaded is dropped, exactly like the official client. [Result.reconcile] asks for an authoritative
  * re-read where the official client also re-syncs (a run ending with tools still in flight).
  */
+/**
+ * Merges a freshly fetched page into the loaded transcript by message id, keeping ascending
+ * `created` order. A tail refresh must never drop pages the reader already pulled in, and an
+ * optimistic/streaming entry the server page has not caught up with yet must survive too. The
+ * server copy wins for the same id; [pending] items are only added when absent.
+ */
+internal fun mergeTranscript(existing: List<Message>, fetched: List<Message>, pending: List<Message> = emptyList()): List<Message> {
+  if (existing.isEmpty()) return (fetched + pending).distinctBy { it.id }
+  val merged = LinkedHashMap<String, Message>(existing.size + fetched.size)
+  existing.forEach { merged[it.id] = it }
+  fetched.forEach { merged[it.id] = it }
+  pending.forEach { if (!merged.containsKey(it.id)) merged[it.id] = it }
+  // Stable sort: equal timestamps keep their insertion order (older pages first, then fresh tail).
+  return merged.values.sortedBy { it.created }
+}
+
 object TranscriptProjection {
   data class Result(val messages: List<Message>, val reconcile: Boolean = false)
 
