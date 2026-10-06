@@ -503,6 +503,8 @@ class OpenCodeApi(
   companion object {
     /** Official initial page size (`messagePageLimit`). */
     const val MESSAGE_PAGE = 20
+    /** Older-history page size: the official client and the server both cap a page at 200. */
+    const val HISTORY_PAGE = 200
     private const val MAX_RESPONSE_CHARS = 8_000_000
     private const val MAX_FILE_BYTES = 8_000_000L
     private const val MAX_PAGES = 40

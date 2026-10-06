@@ -26,6 +26,19 @@ internal fun mergeTranscript(existing: List<Message>, fetched: List<Message>, pe
   return merged.values.sortedBy { it.created }
 }
 
+/**
+ * Mirrors the official client's `needsOlderTurnRoot`: true when the oldest loaded boundary is an
+ * assistant message, i.e. the window starts in the middle of a turn. The initial load then pulls one
+ * more page so the first screen begins on a whole turn instead of a half reply.
+ */
+internal fun needsOlderTurnRoot(messages: List<Message>): Boolean {
+  val boundary = messages.firstOrNull { message ->
+    message.role == "user" || message.role == "shell" || message.role == "assistant" ||
+      (message.type == "synthetic" && (message.notice?.detail?.isNotBlank() == true || message.notice?.label?.isNotBlank() == true))
+  }
+  return boundary?.role == "assistant"
+}
+
 object TranscriptProjection {
   data class Result(val messages: List<Message>, val reconcile: Boolean = false)
 

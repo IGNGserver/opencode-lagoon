@@ -68,6 +68,8 @@ data class LagoonState(
   val draftSessions: Set<String> = emptySet(), val draft: String = "", val references: List<FileReference> = emptyList(),
   val cacheComplete: Boolean = true, val sessionCursors: Map<String, String> = emptyMap(), val messagesCursor: String? = null,
   val catalogComplete: Boolean = true, val loadedOlderMessages: Boolean = false,
+  /** Increments once per successfully prepended older page; the transcript anchors on this, never on a streaming rebuild. */
+  val historyRevision: Int = 0,
   /**
    * 未读结果账本（对齐官方客户端的通知账本）：只有本机见证“运行中 → 结束”的主会话才会产生一条，
    * 打开会话即标记已读。列表的“已完成 / 失败”、灵动岛计数都只读这里，从不由历史数据推断。
@@ -116,6 +118,8 @@ class LagoonController private constructor(private val appContext: Context) {
     }
     /** Upper bound of running sessions whose pending permissions are read in one reconciliation. */
     private const val MAX_REQUEST_SESSIONS = 24
+    /** Extra pages the initial load may pull so the first screen starts on a whole turn (official behaviour). */
+    private const val MAX_INITIAL_PAGES = 5
   }
   /**
    * Recomputes the server-wide island summary and persists live task state. Persisted running states are
@@ -521,9 +525,10 @@ class LagoonController private constructor(private val appContext: Context) {
   }
   fun loadOlderMessages() = withSession("messages-more") { op, client, session ->
     val cursor = op.snapshot.messagesCursor ?: return@withSession
-    val page = client.messagesPage(session.id, cursor)
+    val page = client.messagesPage(session.id, cursor, OpenCodeApi.HISTORY_PAGE)
     check(page.next != cursor) { "服务器返回了重复分页游标" }
-    op.commit { it.copy(messages = (page.items + it.messages).distinctBy { m -> m.id }, messagesCursor = page.next, loadedOlderMessages = true) }
+    op.commit { it.copy(messages = (page.items + it.messages).distinctBy { m -> m.id }, messagesCursor = page.next,
+      loadedOlderMessages = true, historyRevision = it.historyRevision + 1) }
   }
   fun reload(): Job {
     val token = generation
@@ -978,6 +983,7 @@ class LagoonController private constructor(private val appContext: Context) {
     val requestSequence = ++messageSequence
     fun current() = token == generation && revision == selectionRevision && state.value.sessionId == session.id && state.value.executionDirectory == session.directory && requestSequence == messageSequence
     if (current() && state.value.messages.isEmpty()) mutable.update { it.copy(resources = it.resources + ("messages" to ResourceStatus(ResourceState.LOADING))) }
+    val initialWindow = state.value.messages.isEmpty() && !state.value.loadedOlderMessages
     var nextCursor: String? = null
     // The newest page of the projected timeline plus admitted-but-undelivered input, like the official
     // client's message and pending syncs.
@@ -988,7 +994,23 @@ class LagoonController private constructor(private val appContext: Context) {
     }
     if (token != generation) return
     val previousMessages = state.value.messages
-    val messages = result.map { fetched ->
+    val messages = result.map { first ->
+      // Official initial window: keep pulling older pages until the oldest boundary is a whole turn,
+      // so the first screen never starts mid-reply. Bounded so a refresh cannot burst unbounded.
+      val fetched = if (!initialWindow) first else {
+        val merged = first.toMutableList()
+        var cursor = nextCursor
+        var extra = 0
+        while (cursor != null && extra < MAX_INITIAL_PAGES && needsOlderTurnRoot(merged) && current()) {
+          val older = attempt { client.messagesPage(session.id, cursor, OpenCodeApi.MESSAGE_PAGE) }.getOrElse { break }
+          if (older.items.isEmpty()) { nextCursor = older.next; break }
+          merged.addAll(0, older.items)
+          nextCursor = older.next
+          cursor = older.next
+          extra++
+        }
+        merged
+      }
       // Merge by id so a tail refresh keeps older pages the reader already loaded and any
       // streaming/optimistic entry the server page has not caught up with yet.
       mergeTranscript(previousMessages.takeIf { current() }.orEmpty(), fetched, pending)

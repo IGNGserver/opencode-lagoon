@@ -106,7 +106,8 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   // collapsing a row never scrolls, so the row the reader is looking at keeps its place.
   LaunchedEffect(contentKey, expectedItems, state.pending("send")) {
     if (state.pending("send")) follow = true
-    if (!follow) { if (state.messages.isNotEmpty()) newContent = true; return@LaunchedEffect }
+    // Never fight the reader's own drag/fling; only follow when they are at the bottom and idle.
+    if (!follow || dragged) { if (state.messages.isNotEmpty()) newContent = true; return@LaunchedEffect }
     newContent = false
     scrollBottom()
   }
@@ -125,27 +126,33 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   var anchorKey by remember(state.sessionId) { mutableStateOf<Any?>(null) }
   var anchorOffset by remember(state.sessionId) { mutableIntStateOf(0) }
   var pendingRestoreAnchor by remember(state.sessionId) { mutableStateOf(false) }
+  var anchorRevision by remember(state.sessionId) { mutableIntStateOf(0) }
 
   LaunchedEffect(firstVisibleIndex) { if (firstVisibleIndex > 0) olderArmed = true }
   LaunchedEffect(firstVisibleIndex, olderArmed, state.messagesCursor, loadingOlder, state.connected, state.cached, follow) {
-    if (firstVisibleIndex == 0 && olderArmed && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
+    // Trigger a little before the very top so the next page is already there when the reader arrives.
+    if (firstVisibleIndex <= 1 && olderArmed && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
       val visibleItem = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key != "older-loader" }
       if (visibleItem != null) {
         anchorKey = visibleItem.key
         anchorOffset = visibleItem.offset
+        anchorRevision = state.historyRevision
         pendingRestoreAnchor = true
       }
       olderArmed = false
       controller.loadOlderMessages()
     }
   }
+  // A failed page must not leave a stale anchor that a later streaming rebuild would restore.
+  LaunchedEffect(loadingOlder) {
+    if (!loadingOlder && pendingRestoreAnchor && state.historyRevision == anchorRevision) { pendingRestoreAnchor = false; anchorKey = null }
+  }
 
-  // Preserve the reader's place when an older page is prepended. Reading the live layout here is
-  // racy: the rebuilt rows may not be laid out yet, so the anchor would look unmoved and the view
-  // would jump to the oldest item. Resolve the anchor row's index in the rebuilt list and scroll to
-  // it directly; this also keeps the top trigger re-arming instead of getting stuck at index 0.
-  LaunchedEffect(mainRows, state.messagesCursor) {
-    if (!pendingRestoreAnchor || anchorKey == null) return@LaunchedEffect
+  // Restore only after the older page actually landed. Keying on the rebuilt rows (and gating on the
+  // history revision) means a streaming update during the request can no longer clear the anchor —
+  // that premature clear was what made scrolling to the top stop working during a running turn.
+  LaunchedEffect(mainRows) {
+    if (!pendingRestoreAnchor || anchorKey == null || state.historyRevision == anchorRevision) return@LaunchedEffect
     val position = mainRows.indexOfFirst { it.key == anchorKey }
     if (position < 0) { pendingRestoreAnchor = false; anchorKey = null; return@LaunchedEffect }
     val leading = (if (state.cached) 1 else 0) + (if (state.sessionId in state.backgroundRunning) 1 else 0) + (if (state.messagesCursor != null) 1 else 0)
