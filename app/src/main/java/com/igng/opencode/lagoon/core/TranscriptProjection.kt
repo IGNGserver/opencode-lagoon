@@ -27,6 +27,12 @@ object TranscriptProjection {
       if (index < 0) return Result(messages)
       return result(messages.toMutableList().also { it[index] = change(it[index]) })
     }
+    /** Like [editAssistant], but asks for an authoritative re-read when the target message was never loaded. */
+    fun editAssistantOrReconcile(change: (Message) -> Message): Result {
+      val index = messages.indexOfFirst { it.id == assistantId && it.role == "assistant" }
+      if (index < 0) return Result(messages, reconcile = true)
+      return result(messages.toMutableList().also { it[index] = change(it[index]) })
+    }
     fun editLast(kind: String, change: (MessagePart) -> MessagePart) = editAssistant { message ->
       val index = message.parts.indexOfLast { it.type == kind && (kind != "reasoning" || it.status == "running") }
       if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
@@ -55,7 +61,7 @@ object TranscriptProjection {
         }
       }
       "session.step.ended" -> editAssistant { it.copy(completedAt = at, finish = p.str("finish").ifBlank { "stop" }) }
-      "session.step.failed" -> editAssistant {
+      "session.step.failed" -> editAssistantOrReconcile {
         val error = p.obj("error")
         it.copy(completedAt = at, finish = p.str("finish").ifBlank { "error" }, error = error.str("message").ifBlank { "执行失败" },
           errorType = error.str("type").ifBlank { null }, retry = null)
@@ -102,7 +108,10 @@ object TranscriptProjection {
         val cleared = if (active < 0) messages else messages.toMutableList().also { it[active] = it[active].copy(retry = null) }
         // Official: a run that ends with tools still streaming/running is re-read from the server.
         val dangling = cleared.any { message -> message.role == "assistant" && message.parts.any { it.type == "tool" && it.status in setOf("pending", "running") } }
-        Result(cleared, reconcile = dangling)
+        // A failed run whose error never landed on a loaded assistant message (the step event was missed) is
+        // re-read so the red error row is shown instead of silently dropping it.
+        val missingError = event.type == "session.execution.failed" && cleared.none { it.role == "assistant" && !it.error.isNullOrBlank() }
+        Result(cleared, reconcile = dangling || missingError)
       }
       "session.instructions.updated" -> if (!p.has("text")) null else insert(record("system", JSONObject()
         .put("text", p.str("text")).put("description", "Instructions updated: ${p.obj("delta").keys().asSequence().joinToString(", ")}")

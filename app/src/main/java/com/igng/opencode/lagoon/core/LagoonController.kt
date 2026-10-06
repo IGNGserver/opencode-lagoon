@@ -106,6 +106,8 @@ class LagoonController private constructor(private val appContext: Context) {
     private const val BACKGROUND_GRACE_MILLIS = 30_000L
     /** 总览读完为非活跃后，先等这么久复核再拆岛，避免多步任务步骤间隙导致息屏超级岛反复重弹。 */
     private const val SUMMARY_SETTLE_MILLIS = 4_000L
+    /** 进入“待处理”后先等这么久再发通知：权限/表单瞬时出现又消失时不打扰用户。 */
+    private const val ATTENTION_DEBOUNCE_MILLIS = 1_500L
     @Volatile private var instance: LagoonController? = null
     fun get(context: Context): LagoonController = instance ?: synchronized(this) {
       instance ?: LagoonController(context.applicationContext).also { instance = it }
@@ -178,6 +180,11 @@ class LagoonController private constructor(private val appContext: Context) {
   @Volatile private var refreshMode: RefreshMode = RefreshMode.FAST
   /** Root sessions already handed to [TaskMonitorService] during this run. */
   private val monitorRequested = mutableSetOf<String>()
+  /** 待处理事项通知的去抖任务：进入等待态后短暂延迟再发，期间被处理就不打扰。 */
+  private val attentionJobs = mutableMapOf<String, Job>()
+  /** 等待态事件的单调序号：对账只在读取期间没有新的等待事件时才清除等待态，避免事件/对读竞态造成抖动。 */
+  private var waitingEventSeq = 0L
+  private val waitingEventSeqAt = mutableMapOf<String, Long>()
 
   init {
     refreshMode = store.refreshMode()
@@ -345,6 +352,10 @@ class LagoonController private constructor(private val appContext: Context) {
   private suspend fun loadAll(token: Int, controlOnly: Boolean = false, followUp: Boolean = true) {
     val client = api ?: return
     val requestSequence = ++catalogSequence
+    // 读取开始时的等待态事件序号：读取期间到达的 permission/form 事件不能被这次（更早的）读取结果清除。
+    val readWaitingSeq = waitingEventSeq
+    // 本设备认为仍在运行的会话；读取后用于判断哪些需要重新拉取会话信息（取得权威 outcome/time.idle）。
+    val previousActiveIds = state.value.tasks.filterValues { it.active }.keys.toSet()
     val version = client.health()
     val capabilities = client.discoverCapabilities()
     val serverId = state.value.serverId ?: return
@@ -362,8 +373,11 @@ class LagoonController private constructor(private val appContext: Context) {
     // Active sessions (often subagent children) may be older than the first page. Keep their identity and parent chain.
     val missingIds = (active.orEmpty() + listOfNotNull(state.value.sessionId, store.selectedSession(serverId)))
       .filter { id -> sessions.none { it.id == id } && state.value.sessions.none { it.id == id } }.distinct()
+    // 本设备认为仍在运行、但既不在前台活跃集合、也不在本页目录里的会话：重新读取其会话信息，取得
+    // 服务端持久化的 outcome/time.idle，用来给漏掉终止事件的一轮做权威收尾（含转入后台的子代理）。
+    val staleActiveIds = previousActiveIds.filter { id -> active.orEmpty().none { it == id } && sessions.none { it.id == id } }.distinct()
     val extraSessions = mutableListOf<Session>()
-    missingIds.take(100).chunked(4).forEach { batch ->
+    (missingIds + staleActiveIds).distinct().take(100).chunked(4).forEach { batch ->
       extraSessions += coroutineScope { batch.map { id -> async { attempt { findSession(client, id) }.getOrNull() } }.awaitAll().filterNotNull() }
       if (token != generation || requestSequence != catalogSequence) return
     }
@@ -410,8 +424,18 @@ class LagoonController private constructor(private val appContext: Context) {
       // Only live state is carried; finished runs live in the unread ledger, never as a permanent phase.
       val states = mutableMapOf<String, TaskState>()
       nextSessions.forEach { session ->
-        val next = if (active == null) previousTasks[session.id]
-        else TaskReducer.status(session.id, session.id in active, previousTasks[session.id]?.takeIf { it.active })
+        val task = previousTasks[session.id]
+        val next = when {
+          active == null -> task
+          session.id in active -> TaskReducer.status(session.id, true, task, session.idle)
+          // 不在前台活跃集合（/api/session/active）不等于本轮结束：转入后台的阻塞工具/子代理会让会话
+          // 继续存活。只有服务端持久化的 time.idle 越过本轮基线时才权威收尾（见 TaskReducer.terminal）。
+          task?.active == true && task.activeAt >= 0 && session.idle > 0 && session.idle > task.activeAt ->
+            TaskReducer.terminal(session.id, session.outcome, task)
+          task?.active == true -> task
+          // 非活跃的任务不再作为常驻相位保留：终态结果只存在于未读账本（notices）。
+          else -> null
+        }
         if (next != null && next.phase != TaskPhase.IDLE) states[session.id] = next
       }
       // A successful read is authoritative; a failed one keeps the previous requests so a pending
@@ -420,14 +444,20 @@ class LagoonController private constructor(private val appContext: Context) {
       val nextPermissions = (permissions + keptPermissions).distinctBy { it.id }
       val keptQuestions = previous.questions.filter { active == null || normalizedDirectory(it.directory) in failedFormDirs }
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
-      nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
-      nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previousTasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
+      fun waitingState(sessionId: String, phase: TaskPhase, detail: String): TaskState {
+        val previousTask = previousTasks[sessionId]
+        return TaskState(sessionId, phase, detail, previousTask?.since ?: System.currentTimeMillis(),
+          activeAt = previousTask?.activeAt ?: -1L, background = previousTask?.background == true)
+      }
+      nextPermissions.forEach { states[it.sessionId] = waitingState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认") }
+      nextQuestions.forEach { states[it.sessionId] = waitingState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答") }
       // 权威清除等待态：只有本次成功读取过该会话对应的权限/表单、且确认没有待处理项时才结束等待。
-      // 读取失败、或该会话根本没被读取时一律保留，避免“等待输入 ↔ 运行中”的假切换（A04）。
+      // 读取失败、该会话没被读取、或读取期间又来了新的等待事件时一律保留，避免“等待输入 ↔ 运行中”的假切换（A04）。
       val readPermissionIds = waitingCandidates.map { it.id }.filterNot { it in failedPermissionSessions }.toSet()
       val readFormDirs = formDirectories.map(::normalizedDirectory).filterNot { it in failedFormDirs }.toSet()
       val resolvedWaiting = states.values.filter { it.phase in TaskState.WAITING_PHASES }.mapNotNull { task ->
         val session = nextSessions.firstOrNull { it.id == task.sessionId } ?: return@mapNotNull null
+        if ((waitingEventSeqAt[task.sessionId] ?: 0L) > readWaitingSeq) return@mapNotNull null
         val resolved = when (task.phase) {
           TaskPhase.WAITING_PERMISSION -> task.sessionId in readPermissionIds && nextPermissions.none { it.sessionId == task.sessionId }
           TaskPhase.WAITING_QUESTION -> normalizedDirectory(session.directory) in readFormDirs && nextQuestions.none { it.sessionId == task.sessionId }
@@ -435,7 +465,10 @@ class LagoonController private constructor(private val appContext: Context) {
         }
         task.sessionId.takeIf { resolved }
       }
-      resolvedWaiting.forEach { id -> states[id] = TaskState(id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, states[id]!!.since) }
+      resolvedWaiting.forEach { id ->
+        val waiting = states[id]!!
+        states[id] = TaskState(id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, waiting.since, activeAt = waiting.activeAt, background = waiting.background)
+      }
       // Roots whose family this device saw running and that an authoritative read now shows idle.
       val parentMap = store.taskParents(serverId) + nextSessions.mapNotNull { s -> s.parentId?.let { s.id to it } }
       val wasActive = TaskSummary.aggregate(previousTasks.filterValues { it.active }, parentMap)
@@ -643,9 +676,10 @@ class LagoonController private constructor(private val appContext: Context) {
         val pendingPermission = mutable.value.permissions.any { it.sessionId == sessionId && !(event.type == "permission.replied" && it.id == resolved) } || event.type == "permission.asked"
         val pendingQuestion = mutable.value.questions.any { it.sessionId == sessionId && !(event.type in setOf("form.replied", "form.cancelled") && it.id == resolved) } || event.type == "form.created"
         val pending = pendingPermission || pendingQuestion
-        if (pending && after.phase !in setOf(TaskPhase.FAILED, TaskPhase.ABORTED, TaskPhase.COMPLETED)) after = TaskState(sessionId,
+        if (pending && after.phase !in TaskState.TERMINAL_PHASES) after = TaskState(sessionId,
           if (pendingPermission) TaskPhase.WAITING_PERMISSION else TaskPhase.WAITING_QUESTION,
-          if (pendingPermission) "等待权限确认" else "等待你的回答", before?.since ?: System.currentTimeMillis())
+          if (pendingPermission) "等待权限确认" else "等待你的回答", before?.since ?: System.currentTimeMillis(),
+          activeAt = before?.activeAt ?: -1L, background = before?.background == true)
         val next = after
         val enteringTerminal = next.phase in TERMINAL_PHASES && before?.phase !in TERMINAL_PHASES
         mutable.update { current -> withSummary(current.copy(tasks = current.tasks + (sessionId to next))) }
@@ -659,21 +693,25 @@ class LagoonController private constructor(private val appContext: Context) {
     when (event.type) {
       "permission.asked" -> {
         val request = props.toPermission(directory)
+        waitingEventSeqAt[request.sessionId] = ++waitingEventSeq
         mutable.update { it.copy(permissions = (it.permissions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
       "form.created" -> {
         val request = props.obj("form").toForm(directory)
+        waitingEventSeqAt[request.sessionId] = ++waitingEventSeq
         mutable.update { it.copy(questions = (it.questions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
       "permission.replied" -> {
         val requestId = props.str("requestID")
         mutable.update { it.copy(permissions = it.permissions.filterNot { old -> old.id == requestId }) }
+        cancelAttention(sessionId)
       }
       "form.replied", "form.cancelled" -> {
         val requestId = props.str("id")
         mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
+        cancelAttention(sessionId)
       }
       "session.created" -> {
         val created = JSONObject(props.toString()).put("id", sessionId)
@@ -704,6 +742,8 @@ class LagoonController private constructor(private val appContext: Context) {
         }
       }
       "session.deleted" -> {
+        attentionJobs.remove(sessionId)?.cancel()
+        waitingEventSeqAt.remove(sessionId)
         state.value.serverId?.let { store.forgetSession(it, sessionId) }
         mutable.update { it.copy(sessions = it.sessions.filterNot { session -> session.id == sessionId }, notices = it.notices.filterNot { notice -> notice.sessionId == sessionId }) }
       }
@@ -714,7 +754,7 @@ class LagoonController private constructor(private val appContext: Context) {
       // A run started or ended: official `session.sync` of that one session (outcome, idle, updated).
       "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted" -> refreshSession(sessionId)
     }
-    if (event.type in setOf("session.execution.succeeded", "session.execution.failed")) recordResultNotice(event, sessionId)
+    if (event.type in setOf("session.execution.succeeded", "session.execution.failed") && !familyActive(sessionId)) recordResultNotice(event, sessionId)
     if (sessionId.isNotBlank() && sessionId == mutable.value.sessionId) {
       val projected = TranscriptProjection.apply(mutable.value.messages, event) ?: return
       if (projected.messages !== mutable.value.messages) mutable.update { it.copy(messages = projected.messages, resources = it.resources + ("messages" to ResourceStatus(ResourceState.READY))) }
@@ -745,6 +785,22 @@ class LagoonController private constructor(private val appContext: Context) {
       // A child whose root is outside the catalog page: resolve the ancestry so its state rolls up.
       fresh.parentId?.takeIf { parent -> state.value.sessions.none { it.id == parent } }?.let(::refreshSession)
     }
+  }
+
+  /**
+   * 一个会话所属根家族里是否仍有活跃任务（根自身或任一子孙）。后台化的阻塞工具/子代理会让根执行
+   * settle 但家族仍活跃，此时不应记录完成结果、也不应通知，等后台完成重新唤醒 AI 后再收尾。
+   */
+  private fun familyActive(sessionId: String): Boolean {
+    if (sessionId.isBlank()) return false
+    val current = mutable.value
+    var root = sessionId
+    val seen = mutableSetOf<String>()
+    while (seen.add(root)) {
+      val parent = current.knownParents[root] ?: break
+      root = parent
+    }
+    return TaskSummary.aggregate(current.tasks.filterValues { it.active }, current.parents)[root]?.active == true
   }
 
   private fun recordResultNotice(event: ServerEvent, sessionId: String) {
@@ -797,12 +853,36 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { it.copy(pinned = pinned) }
   }
 
+  /**
+   * 进入“待处理”后去抖再通知：权限/表单瞬时出现又消失（事件与对账竞态、另一客户端已处理）时不打扰。
+   * 去抖窗口内请求被清除则什么都不发。
+   */
   private fun notifyAttention(sessionId: String) {
+    if (sessionId.isBlank()) return
+    attentionJobs.remove(sessionId)?.cancel()
+    attentionJobs[sessionId] = scope.launch {
+      delay(ATTENTION_DEBOUNCE_MILLIS)
+      val current = mutable.value
+      val profile = current.server ?: return@launch
+      val session = current.sessions.firstOrNull { it.id == sessionId } ?: return@launch
+      if (!profile.notifications) return@launch
+      val task = current.tasks[sessionId] ?: return@launch
+      // 期间已被处理（事件或对账清除）则不再打扰。
+      val stillWaiting = task.phase in TaskState.WAITING_PHASES &&
+        (current.permissions.any { it.sessionId == sessionId } || current.questions.any { it.sessionId == sessionId })
+      if (!stillWaiting) return@launch
+      notifications.show(profile, session, task, current.permissions.firstOrNull { p -> p.sessionId == sessionId })
+    }
+  }
+
+  /** 请求被处理/清除后取消待处理通知：会话已无任何待处理项时才撤下。 */
+  private fun cancelAttention(sessionId: String) {
+    if (sessionId.isBlank()) return
+    attentionJobs.remove(sessionId)?.cancel()
     val current = mutable.value
-    val profile = current.server ?: return
-    val session = current.sessions.firstOrNull { it.id == sessionId } ?: return
-    if (!profile.notifications) return
-    current.tasks[sessionId]?.let { notifications.show(profile, session, it, current.permissions.firstOrNull { p -> p.sessionId == sessionId }) }
+    val server = current.serverId ?: return
+    if (current.permissions.any { it.sessionId == sessionId } || current.questions.any { it.sessionId == sessionId }) return
+    attempt { notifications.cancel(server, sessionId) }
   }
   fun selectProject(id: String) {
     val project = mutable.value.projects.firstOrNull { it.id == id } ?: return
@@ -1150,7 +1230,7 @@ class LagoonController private constructor(private val appContext: Context) {
         accepted?.invoke()
       }
       op.commitConnection { current -> withSummary(current.copy(
-        tasks = if (current.tasks[session.id]?.active == true) current.tasks else current.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL)),
+        tasks = if (current.tasks[session.id]?.active == true) current.tasks else current.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, activeAt = session.idle)),
         previews = current.previews + (session.id to SessionPreview(SessionContent.CONTENT, text.take(300))))) }
       op.commit { it.copy(agentChanged = false, modelChanged = false, references = emptyList()) }
     }
@@ -1205,6 +1285,7 @@ class LagoonController private constructor(private val appContext: Context) {
     check(request in op.snapshot.permissions) { "权限请求已变化，请刷新" }
     op.client.replyPermission(request, reply)
     op.commitConnection { it.copy(permissions = it.permissions.filterNot { p -> p.id == request.id }) }
+    cancelAttention(request.sessionId)
   }
   /** Notification execution uses its own immutable client. Only reconcile matching UI state. */
   fun notificationCompleted(serverId: String) {
@@ -1214,11 +1295,13 @@ class LagoonController private constructor(private val appContext: Context) {
     check(request in op.snapshot.questions) { "问题已变化，请刷新" }
     op.client.replyQuestion(request, answers)
     op.commitConnection { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
+    cancelAttention(request.sessionId)
   }
   fun rejectQuestion(request: QuestionRequest) = act("question:${request.id}", request.directory) { op ->
     check(request in op.snapshot.questions) { "问题已变化，请刷新" }
     op.client.rejectQuestion(request)
     op.commitConnection { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
+    cancelAttention(request.sessionId)
   }
   fun listFiles(path: String = "."): Job {
     val request = ++fileSequence

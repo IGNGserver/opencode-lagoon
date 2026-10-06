@@ -39,12 +39,41 @@ class SessionExperienceTest {
     val result = TaskReducer.event("s", "session.tool.called", JSONObject("""{"name":"shell","input":{"command":"ls"}}"""), previous)
     assertEquals(previous, result)
   }
-  @Test fun finishingRecordsFinishTimeWithoutDiscardingRunStart() {
-    val completed = TaskReducer.status("s", false, TaskState("s", TaskPhase.THINKING, since = 10))
+  @Test fun aForegroundMissNeverFinishesABackgroundedRunButAuthoritativeIdleDoes() {
+    val running = TaskState("s", TaskPhase.THINKING, since = 10, activeAt = 15)
+    // 不在 /api/session/active 不等于本轮结束：后台任务仍在跑时保留运行态。
+    assertEquals(running, TaskReducer.status("s", false, running))
+    // 服务端 time.idle 越过本轮起点时才权威收尾，且保留运行起点。
+    val completed = TaskReducer.terminal("s", "succeeded", running)
     assertEquals(10L, completed.since)
-    assertNotNull(completed.finishedAt)
-    val resumed = TaskReducer.status("s", true, TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10))
-    assertEquals(10L, resumed.since)
+    assertEquals(15L, completed.finishedAt)
+    // 前台读取仍会保留“等待输入”的粘性。
+    val permission = TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10)
+    assertEquals(permission, TaskReducer.status("s", true, permission))
+  }
+
+  @Test fun backgroundedWorkKeepsTheSessionRunningUntilItWakesTheAgentAgain() {
+    val started = TaskReducer.event("s", "session.execution.started", JSONObject("{}"), null, 100)!!
+    assertTrue(started.active)
+    val backgrounded = TaskReducer.event("s", "session.synthetic",
+      JSONObject("""{"sessionID":"s","text":"The backgrounded work is still unfinished. Move on to other work."}"""), started, 120)!!
+    assertTrue(backgrounded.background)
+    // 根执行 settle 不代表会话结束：后台工作还在跑。
+    val settled = TaskReducer.event("s", "session.execution.succeeded", JSONObject("{}"), backgrounded, 130)!!
+    assertTrue(settled.active)
+    assertTrue(settled.background)
+    // 后台完成重新唤醒 AI（新的 execution.started）后清除后台标记，最终正常收尾。
+    val resumed = TaskReducer.event("s", "session.execution.started", JSONObject("{}"), settled, 200)!!
+    assertFalse(resumed.background)
+    assertEquals(TaskPhase.COMPLETED, TaskReducer.event("s", "session.execution.succeeded", JSONObject("{}"), resumed, 240)!!.phase)
+  }
+
+  @Test fun aSessionWithBackgroundedWorkCountsAsBackgroundRunning() {
+    val parents = mapOf("child" to "root")
+    val childRunning = mapOf("root" to TaskState("root", TaskPhase.COMPLETED), "child" to TaskState("child", TaskPhase.THINKING))
+    assertEquals(setOf("root"), TaskSummary.backgroundRoots(childRunning, parents))
+    val sameSession = mapOf("root" to TaskState("root", TaskPhase.THINKING, background = true))
+    assertEquals(setOf("root"), TaskSummary.backgroundRoots(sameSession, emptyMap()))
   }
 
   @Test fun anActiveReadNeverDowngradesAPendingPrompt() {

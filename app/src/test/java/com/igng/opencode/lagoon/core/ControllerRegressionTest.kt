@@ -53,7 +53,7 @@ class ControllerRegressionTest {
     put(c,"mutable", mutable); put(c,"state",mutable); put(c,"generation",1); put(c,"api",api)
     put(c,"operationScope",CoroutineScope(SupervisorJob()+Dispatchers.Unconfined))
     put(c,"scope",CoroutineScope(Job().apply { cancel() }+Dispatchers.Default))
-    put(c,"store",ServerStore(preferences(),preferences(),{it},{it}));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex()); put(c,"referenceMutex",kotlinx.coroutines.sync.Mutex()); put(c,"monitorRequested",mutableSetOf<String>()); put(c,"draftWrites",mutableMapOf<String,Job>())
+    put(c,"store",ServerStore(preferences(),preferences(),{it},{it}));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex()); put(c,"referenceMutex",kotlinx.coroutines.sync.Mutex()); put(c,"monitorRequested",mutableSetOf<String>()); put(c,"draftWrites",mutableMapOf<String,Job>()); put(c,"attentionJobs",mutableMapOf<String,Job>()); put(c,"waitingEventSeqAt",mutableMapOf<String,Long>())
     return c to mutable
   }
   private fun api(s:MockWebServer) = OpenCodeApi(ServerProfile("server","Server",s.url("/").toString(),allowCleartext=true), "fixture")
@@ -105,10 +105,12 @@ class ControllerRegressionTest {
     assertEquals(SessionStatus.COMPLETED, state.value.sessionStatus(session))
   }
 
-  private fun v2Server(paths: MutableList<String>, sessionsBody: () -> String, active: () -> String): Dispatcher = object : Dispatcher() {
+  private fun v2Server(paths: MutableList<String>, sessionsBody: () -> String, active: () -> String, sessionBody: (String) -> String? = { null }): Dispatcher = object : Dispatcher() {
     override fun dispatch(request: RecordedRequest): MockResponse {
       paths += request.path.orEmpty()
-      val body = when (request.requestUrl!!.encodedPath) {
+      val path = request.requestUrl!!.encodedPath
+      sessionBody(path)?.let { return MockResponse().setBody(it) }
+      val body = when (path) {
         "/openapi.json" -> return MockResponse().setResponseCode(404)
         "/api/info" -> """{"version":"2.0.22"}"""
         // The published V2 contract returns Project[] as a bare array.
@@ -124,11 +126,13 @@ class ControllerRegressionTest {
   @Test fun aRunThisDeviceSawEndWhileEventsWereMissedBecomesOneUnreadResult() = runBlocking {
     MockWebServer().use { server ->
       val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
-      // The finished worktree session has dropped out of the first page and out of the active list.
-      server.dispatcher = v2Server(paths, { """{"data":[{"id":"old","projectID":"p","location":{"directory":"/repo"},"time":{"created":1,"updated":1}}],"cursor":{}}""" }, { """{"data":{}}""" })
+      // The finished worktree session has dropped out of the first page and out of the active list;
+      // its authoritative re-read reports outcome/time.idle, which settles the run.
+      server.dispatcher = v2Server(paths, { """{"data":[{"id":"old","projectID":"p","location":{"directory":"/repo"},"time":{"created":1,"updated":1}}],"cursor":{}}""" }, { """{"data":{}}""" },
+        { path -> if (path == "/api/session/root") """{"data":{"id":"root","projectID":"p","outcome":"succeeded","location":{"directory":"/trees/task"},"time":{"created":1,"updated":200,"idle":200}}}""" else null })
       val root = Session("root", "/trees/task", "Worktree task", 50, projectId = "p")
       val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true, sessions = listOf(root),
-        tasks = mapOf("root" to TaskState("root", TaskPhase.TOOL, since = 100))))
+        tasks = mapOf("root" to TaskState("root", TaskPhase.TOOL, since = 100, activeAt = 150))))
       refresh(controller, controlOnly = false)
       assertTrue("a session seen running must not vanish when it finishes", state.value.sessions.any { it.id == "root" })
       assertEquals(SessionStatus.COMPLETED, state.value.sessionStatus(root))
@@ -149,7 +153,7 @@ class ControllerRegressionTest {
         {"id":"done","projectID":"p","outcome":"succeeded","location":{"directory":"/repo"},"time":{"created":1,"updated":9,"idle":9}},
         {"id":"stopped","projectID":"p","outcome":"interrupted","location":{"directory":"/repo"},"time":{"created":1,"updated":8,"idle":8}}],"cursor":{}}""" }, { """{"data":{}}""" })
       val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true,
-        tasks = mapOf("stopped" to TaskState("stopped", TaskPhase.THINKING, since = 5))))
+        tasks = mapOf("stopped" to TaskState("stopped", TaskPhase.THINKING, since = 5, activeAt = 6))))
       refresh(controller, controlOnly = false)
       assertTrue(state.value.notices.isEmpty())
       assertTrue(state.value.sessions.all { state.value.sessionStatus(it) == SessionStatus.NONE })
@@ -162,7 +166,8 @@ class ControllerRegressionTest {
       val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
       var running = true
       server.dispatcher = v2Server(paths, { """{"data":[{"id":"root","projectID":"p","location":{"directory":"/repo"},"time":{"created":1,"updated":20}}],"cursor":{}}""" },
-        { if (running) """{"data":{"child":{"type":"running"}}}""" else """{"data":{}}""" })
+        { if (running) """{"data":{"child":{"type":"running"}}}""" else """{"data":{}}""" },
+        { path -> if (path == "/api/session/child" && !running) """{"data":{"id":"child","projectID":"p","parentID":"root","location":{"directory":"/repo"},"time":{"created":1,"updated":30,"idle":30}}}""" else null })
       val root = Session("root", "/repo", "Root", 20, projectId = "p")
       val child = Session("child", "/repo", "Child", 20, parentId = "root", projectId = "p")
       val (controller, state) = controller(api(server), LagoonState(serverId = "server", connected = true, sessions = listOf(root, child)))
