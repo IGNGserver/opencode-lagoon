@@ -477,4 +477,52 @@ class ControllerRegressionTest {
     assertFalse(state.pending("permission:another"))
   }
 
+  @Test fun olderHistoryUsesTheFullOfficialPageSizeAndAdvancesTheRevision() = runBlocking {
+    MockWebServer().use { server ->
+      server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
+        val url = request.requestUrl!!
+        return when (url.encodedPath) {
+          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+          "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
+            MockResponse().setBody("""{"data":[{"id":"m2","type":"user","time":{"created":2},"text":"b"}],"cursor":{"next":"older"}}""")
+          else MockResponse().setBody("""{"data":[{"id":"m1","type":"user","time":{"created":1},"text":"a"}],"cursor":{}}""")
+          else -> MockResponse().setBody("""{"data":[]}""")
+        }
+      } }
+      val api = api(server); api.health()
+      val session = Session("s", "/repo", "T", 0)
+      val (controller, state) = controller(api, LagoonState(serverId = "server", connected = true,
+        sessions = listOf(session), sessionId = "s", messages = listOf(Message("m2", "user", 2, emptyList())), messagesCursor = "older"))
+      controller.loadOlderMessages().join()
+      assertEquals(listOf("m1", "m2"), state.value.messages.map { it.id })
+      assertEquals(1, state.value.historyRevision)
+      val older = List(server.requestCount) { server.takeRequest() }.first { it.requestUrl!!.queryParameter("cursor") == "older" }
+      assertEquals("200", older.requestUrl!!.queryParameter("limit"))
+    }
+  }
+
+  @Test fun initialLoadPullsOlderPagesUntilTheWindowStartsOnAWholeTurn() = runBlocking {
+    MockWebServer().use { server ->
+      val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+      server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
+        val url = request.requestUrl!!; requests += url.toString()
+        return when (url.encodedPath) {
+          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+          "/api/session/s/inbox" -> MockResponse().setBody("""{"data":[]}""")
+          "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
+            MockResponse().setBody("""{"data":[{"id":"a1","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"mid"}]}],"cursor":{"next":"older"}}""")
+          else MockResponse().setBody("""{"data":[{"id":"u1","type":"user","time":{"created":1},"text":"hi"}],"cursor":{}}""")
+          else -> MockResponse().setBody("""{"data":[]}""")
+        }
+      } }
+      val api = api(server); api.health()
+      val session = Session("s", "/repo", "T", 0)
+      val (controller, state) = controller(api, LagoonState(serverId = "server", connected = true, sessions = listOf(session), sessionId = "s"))
+      readTranscript(controller, api, session)
+      // The newest page began mid-turn, so one older page was pulled to start on the user turn.
+      assertEquals(listOf("u1", "a1"), state.value.messages.map { it.id })
+      assertEquals(2, requests.count { it.contains("/api/session/s/message") })
+    }
+  }
+
 }

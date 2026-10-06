@@ -115,4 +115,11 @@ class TranscriptProjectionTest {
     val merged = mergeTranscript(existing, listOf(Message("m1", "user", 1, emptyList())), listOf(Message("queued", "user", 3, emptyList())))
     assertEquals(listOf("m1", "local", "queued"), merged.map { it.id })
   }
+
+  @Test fun needsOlderTurnRootOnlyWhenTheWindowStartsMidTurn() {
+    assertTrue(needsOlderTurnRoot(listOf(Message("a", "assistant", 2, emptyList()))))
+    assertFalse(needsOlderTurnRoot(listOf(Message("u", "user", 1, emptyList()), Message("a", "assistant", 2, emptyList()))))
+    assertFalse(needsOlderTurnRoot(listOf(Message("s", "shell", 1, emptyList()), Message("a", "assistant", 2, emptyList()))))
+    assertFalse(needsOlderTurnRoot(emptyList()))
+  }
 }

@@ -26,7 +26,7 @@ class KeyboardScrollRegressionTest {
     val text = source("TranscriptView.kt")
     assertTrue("首次进入应默认跟随最新消息", text.contains("mutableStateOf(true)"))
     assertTrue("回底前应等列表布局到预期条目数", text.contains("totalItemsCount }.first { it >= expectedItems"))
-    assertTrue("自动加载更早消息必须以用户上滑（!follow）为前提", text.contains("firstVisibleIndex == 0 && olderArmed && !follow"))
+    assertTrue("自动加载更早消息必须以用户上滑（!follow）为前提", text.contains("firstVisibleIndex <= 1 && olderArmed && !follow"))
     assertTrue("离开顶部后才重新武装", text.contains("if (firstVisibleIndex > 0) olderArmed = true"))
   }
 
@@ -63,5 +63,6 @@ class KeyboardScrollRegressionTest {
     val text = source("TranscriptView.kt")
     assertTrue("加载更早历史前应记录可见项作为锚点", text.contains("anchorKey = visibleItem.key"))
     assertTrue("加载更早历史后应按锚点行的新位置恢复滚动偏移", text.contains("list.scrollToItem(leading + position, anchorOffset)"))
+    assertTrue("锚点恢复必须以历史页真正落地为条件，流式重建不得提前清锚点", text.contains("state.historyRevision == anchorRevision"))
   }
 }
