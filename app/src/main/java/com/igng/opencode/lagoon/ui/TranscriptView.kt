@@ -117,10 +117,10 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
     newContent = false
     scrollBottom()
   }
-  // 键盘弹出时列表视口变矮，最后几条会落到键盘后面；这一刻自动回到底部（等布局收敛后再滚）。
+  // 键盘弹出时列表视口变矮，最后几条会落到键盘后面；只有处于底部跟随模式时才自动回到底部（等布局收敛后再滚）。
   val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
   LaunchedEffect(imeBottom > 0) {
-    if (imeBottom > 0) { follow = true; delay(120); scrollBottom() }
+    if (imeBottom > 0 && follow) { delay(120); scrollBottom() }
   }
   // Standard history paging: reaching the very top pulls exactly ONE page, then stays disarmed until the
   // reader scrolls away from the top and comes back. Anchoring by key keeps the viewport steady while the
@@ -129,11 +129,37 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   val loadingOlder = state.pending("messages-more")
   val firstVisibleIndex by remember { derivedStateOf { list.firstVisibleItemIndex } }
   var olderArmed by remember(state.sessionId) { mutableStateOf(true) }
+  var anchorKey by remember(state.sessionId) { mutableStateOf<Any?>(null) }
+  var anchorOffset by remember(state.sessionId) { mutableIntStateOf(0) }
+  var pendingRestoreAnchor by remember(state.sessionId) { mutableStateOf(false) }
+
   LaunchedEffect(firstVisibleIndex) { if (firstVisibleIndex > 0) olderArmed = true }
   LaunchedEffect(firstVisibleIndex, olderArmed, state.messagesCursor, loadingOlder, state.connected, state.cached, follow) {
     if (firstVisibleIndex == 0 && olderArmed && !follow && state.connected && !state.cached && !loadingOlder && state.messagesCursor != null) {
+      val visibleItem = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key != "older-loader" }
+      if (visibleItem != null) {
+        anchorKey = visibleItem.key
+        anchorOffset = visibleItem.offset
+        pendingRestoreAnchor = true
+      }
       olderArmed = false
       controller.loadOlderMessages()
+    }
+  }
+
+  // Preserve scroll position when older messages are loaded into the timeline, preventing jump to the oldest item.
+  LaunchedEffect(rows) {
+    if (pendingRestoreAnchor && anchorKey != null) {
+      val targetKey = anchorKey
+      val foundItem = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetKey }
+      if (foundItem != null) {
+        val diff = foundItem.offset - anchorOffset
+        if (diff != 0) {
+          list.scrollBy(diff.toFloat())
+        }
+        pendingRestoreAnchor = false
+        anchorKey = null
+      }
     }
   }
   Box(modifier) {
