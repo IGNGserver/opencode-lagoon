@@ -238,7 +238,8 @@ object TranscriptRows {
       counts.forEach { (label, count) -> add("$count 个$label") }
       if (reasonings.isNotEmpty()) add("${reasonings.size} 个思考")
     }.joinToString("、")
-    val preview = tools.singleOrNull()?.let { toolInfo(it).second }.orEmpty()
+    val errorText = tools.firstOrNull { it.status == "error" && it.error.isNotBlank() }?.let { unwrapError(it.error) }
+    val preview = errorText?.take(140) ?: tools.singleOrNull()?.let { toolInfo(it).second }.orEmpty()
     val count = entries.count { it.second.type != "text" }
     val row = TranscriptRow(key, "tool-group", title = "已处理 $count 个操作", subtitle = preview, meta = summary, status = status,
       target = tools.singleOrNull()?.takeIf { it.tool in SUBAGENT_TOOLS }?.target)

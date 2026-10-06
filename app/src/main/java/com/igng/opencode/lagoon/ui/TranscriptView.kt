@@ -313,11 +313,12 @@ private fun GroupRow(row: TranscriptRow, onClick: () -> Unit) {
 @Composable
 private fun QoderSummaryRow(row: TranscriptRow, onClick: () -> Unit) {
   val running = row.status in setOf("running", "pending")
+  val error = row.status == "error"
   Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 2.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
     Column(Modifier.weight(1f)) {
-      Text(row.title, style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+      Text(row.title, style = MiuixTheme.textStyles.body1.copy(color = if (error) MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurfaceVariantSummary))
       if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        style = MiuixTheme.textStyles.footnote1.copy(color = if (error) MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
     if (running) { InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp); Spacer(Modifier.width(8.dp)) }
     QoderIcon(QoderGlyph.CHEVRON, Modifier.size(18.dp), MiuixTheme.colorScheme.onSurfaceVariantSummary)

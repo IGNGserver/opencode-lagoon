@@ -263,13 +263,16 @@ class OpenCodeApiTest {
   @Test fun taskReducerRequiresPriorActivityBeforeIdleBecomesCompletion() {
     val idle = TaskReducer.status("id", false)
     assertEquals(TaskPhase.IDLE, idle.phase)
-    val busy = TaskReducer.status("id", true, idle)
+    val busy = TaskReducer.status("id", true, idle, idleBaseline = 0)
     assertEquals(TaskPhase.THINKING, busy.phase)
-    val tool = TaskReducer.event("id", "session.tool.called", JSONObject("""{"name":"shell","input":{"command":"gradle test"}}"""), busy)
+    val tool = TaskReducer.event("id", "session.tool.called", JSONObject("""{"name":"shell","input":{"command":"gradle test"}}"""), busy, 100)
     assertEquals(TaskPhase.TESTING, tool!!.phase)
     // Every running sub-phase shares one user-facing label.
     assertEquals(TaskState.RUNNING_DETAIL, tool.detail)
-    val completed = TaskReducer.status("id", false, tool)
+    // 不在前台活跃集合（active miss）不等于本轮结束：后台任务可能仍在跑。
+    assertEquals(TaskPhase.TESTING, TaskReducer.status("id", false, tool).phase)
+    // 服务端 time.idle 越过本轮基线时才是权威结束（对账兜底）。
+    val completed = TaskReducer.terminal("id", "succeeded", tool)
     assertEquals(TaskPhase.COMPLETED, completed.phase)
     assertEquals(TaskPhase.COMPLETED, TaskReducer.status("id", false, completed).phase)
     assertEquals(TaskPhase.THINKING, TaskReducer.status("id", true, completed).phase)
