@@ -101,4 +101,18 @@ class TranscriptProjectionTest {
     val hidden = emptyList<Message>().apply("session.synthetic", """{"sessionID":"s","text":"model-only context"}""")
     assertFalse(hidden.single().isDisplayable)
   }
+
+  @Test fun mergeKeepsOlderPagesAndLetsTheServerCopyWinForTheSameId() {
+    val older = (1..3).map { Message("m$it", "user", it.toLong(), emptyList()) }
+    val tail = listOf(Message("m3", "user", 3, emptyList(), error = "updated"), Message("m4", "user", 4, emptyList()))
+    val merged = mergeTranscript(older, tail)
+    assertEquals(listOf("m1", "m2", "m3", "m4"), merged.map { it.id })
+    assertEquals("updated", merged.first { it.id == "m3" }.error)
+  }
+
+  @Test fun mergeKeepsAnOptimisticEntryTheServerHasNotSeen() {
+    val existing = listOf(Message("m1", "user", 1, emptyList()), Message("local", "user", 2, emptyList()))
+    val merged = mergeTranscript(existing, listOf(Message("m1", "user", 1, emptyList())), listOf(Message("queued", "user", 3, emptyList())))
+    assertEquals(listOf("m1", "local", "queued"), merged.map { it.id })
+  }
 }

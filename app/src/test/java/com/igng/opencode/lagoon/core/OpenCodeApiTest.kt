@@ -124,6 +124,17 @@ class OpenCodeApiTest {
     }
   }
 
+  @Test fun projectAtResolvesTheCanonicalProjectForADirectory() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":{"directory":"/repo/sub","project":{"id":"p","canonical":"/repo","name":"Repo","sandboxes":["/trees/task"]}}}"""))
+      val project = api(server).projectAt("/repo/sub")
+      assertEquals(Project("p", "/repo", "Repo", listOf("/trees/task")), project)
+      val request = server.takeRequest().requestUrl!!
+      assertEquals("/api/location", request.encodedPath)
+      assertEquals("/repo/sub", request.queryParameter("location[directory]"))
+    }
+  }
+
   @Test fun pendingInboxInputBecomesUserRows() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setBody("""{"data":[

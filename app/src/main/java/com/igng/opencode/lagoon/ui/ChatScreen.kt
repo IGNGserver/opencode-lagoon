@@ -548,13 +548,12 @@ private fun ChatComposer(
   onServerFile: (() -> Unit)? = null
 ) {
   var value by rememberSaveable(state.serverId, state.sessionId, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(state.draft)) }
-  var picker by remember { mutableStateOf<String?>(null) }
   var attachMenu by remember { mutableStateOf(false) }
   var focused by remember { mutableStateOf(false) }
   val images = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(6)) { controller.addLocalAttachments(it) }
   val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { controller.addLocalAttachments(it) }
   LaunchedEffect(state.draft) { if (value.text != state.draft) value = TextFieldValue(state.draft, androidx.compose.ui.text.TextRange(state.draft.length)) }
-  DisposableEffect(picker, attachMenu) { onModal(picker != null || attachMenu); onDispose { onModal(false) } }
+  DisposableEffect(attachMenu) { onModal(attachMenu); onDispose { onModal(false) } }
   val task = state.tasks[state.sessionId]
   val sending = busy
   val hasContent = value.text.isNotBlank() || state.references.isNotEmpty() || state.attachments.isNotEmpty()
@@ -594,7 +593,7 @@ private fun ChatComposer(
       hint?.let { Text(it, Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp), color = if (sending) muted else MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2) }
       if (state.attachments.isNotEmpty() || state.references.isNotEmpty()) Box(Modifier.padding(start = 6.dp, end = 6.dp, top = 6.dp)) { AttachmentTray(state, controller) }
       Row(verticalAlignment = Alignment.CenterVertically) {
-        if (!expanded) { attach(); AgentButton(state, enabled = !sending && interactive) { picker = "agents" } }
+        if (!expanded) { attach(); AgentSelector(state, controller, enabled = !sending && interactive, iconOnly = true) }
         Box(Modifier.weight(1f).heightIn(min = 44.dp, max = 168.dp).padding(horizontal = if (expanded) 10.dp else 2.dp, vertical = 11.dp),
           contentAlignment = Alignment.CenterStart) {
           if (value.text.isEmpty()) Text("描述你的任务…", color = muted, style = MiuixTheme.textStyles.body1, maxLines = 1)
@@ -606,12 +605,14 @@ private fun ChatComposer(
       }
       if (expanded) Row(verticalAlignment = Alignment.CenterVertically) {
         attach()
-        // Agent names are short; the model label takes whatever is left, and send stays at the end.
+        // Three compact dropdowns: agent, model, thinking strength. They take the remaining width;
+        // send stays at the end.
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-          CapsuleSelector(state.agent ?: "默认", { picker = "agents" }, enabled = !sending && interactive, maxTextWidth = 72.dp,
-            leading = { Icon(MiuixIcons.ContactsCircle, null, Modifier.size(16.dp), tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else muted) })
+          AgentSelector(state, controller, enabled = !sending && interactive)
           Spacer(Modifier.width(6.dp))
-          CapsuleSelector(state.model?.label ?: "默认模型", { picker = "models" }, Modifier.weight(1f, fill = false), enabled = !sending && interactive)
+          ModelSelector(state, controller, Modifier.weight(1f, fill = false), enabled = !sending && interactive)
+          Spacer(Modifier.width(6.dp))
+          VariantSelector(state, controller, enabled = !sending && interactive)
         }
         Spacer(Modifier.width(6.dp))
         sendOrStop()
@@ -619,20 +620,6 @@ private fun ChatComposer(
       }
     }
     ActionError(state, actionKey)
-  }
-  when (picker) {
-    "agents" -> AgentPickerSheet(state, controller) { picker = null }
-    "models" -> ModelPickerSheet(state, controller, { picker = null }) { picker = "manage" }
-    "manage" -> ManageModelsSheet(state, controller) { picker = null }
-  }
-}
-
-/** The pill's Agent glyph; primary while this session overrides the agent. */
-@Composable
-private fun AgentButton(state: LagoonState, enabled: Boolean, onClick: () -> Unit) {
-  IconButton(onClick = onClick, enabled = enabled) {
-    Icon(MiuixIcons.ContactsCircle, "Agent：${state.agent ?: "默认"}", Modifier.size(22.dp),
-      tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary)
   }
 }
 
@@ -688,15 +675,31 @@ private fun RemoveBadge(modifier: Modifier, onRemove: () -> Unit) {
 @Composable
 private fun FilesPanel(state: LagoonState, controller: LagoonController, onReference: (String) -> Unit) {
   var query by rememberSaveable { mutableStateOf("") }
+  val searching = query.trim().length >= 2
+  val path = state.filePath
+  val crumbs = remember(path) { if (path == "." || path.isBlank()) emptyList() else HomeScope.crumbs(path) }
+  val nodes = remember(state.files, state.searchResults, searching) {
+    (if (searching) state.searchResults.map { FileNode(it, "file") } else state.files).distinctBy { it.path }
+      .sortedWith(compareBy({ it.type != "directory" }, { it.path.lowercase() }))
+  }
   Column(Modifier.fillMaxSize()) {
     TextField(query, { query = it; controller.searchFiles(it) }, label = "搜索工程文件", useLabelAsPlaceholder = true, modifier = Modifier.fillMaxWidth())
-    Row(verticalAlignment = Alignment.CenterVertically) { TextButton(text = "上一级", onClick = { controller.listFiles(state.filePath.substringBeforeLast('/', ".")) }); Spacer(Modifier.width(8.dp)); Text(state.filePath, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2) }
-    ResourceHint(state.resource(if (query.length >= 2) "search" else "files"), "此目录没有文件", retry = { if (query.length >= 2) controller.searchFiles(query) else controller.listFiles() })
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text("项目", Modifier.clickable { controller.listFiles(".") },
+        style = MiuixTheme.textStyles.footnote2.copy(color = if (path == "." || path.isBlank()) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary))
+      crumbs.forEachIndexed { index, (label, target) ->
+        Text("/", Modifier.padding(horizontal = 4.dp), style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        Text(label, Modifier.clickable { controller.listFiles(target) },
+          style = MiuixTheme.textStyles.footnote2.copy(color = if (index == crumbs.lastIndex) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary))
+      }
+    }
+    ResourceHint(state.resource(if (searching) "search" else "files"), "此目录没有文件", retry = { if (searching) controller.searchFiles(query) else controller.listFiles() })
     if (state.fileBinary) { Text("当前无法预览此二进制文件"); TextButton(text = "引用到消息", enabled = !state.pending("send"), onClick = { onReference(state.filePath) }) }
     state.fileText?.let { text -> TextButton(text = "引用到消息", onClick = { onReference(state.filePath) }); VirtualText(text, Modifier.weight(1f), highlight = false) }
-      ?: LazyColumn { items((if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files).distinctBy { it.path }, key = { it.path }) { node ->
-        BasicComponent(title = node.path.substringAfterLast('/').ifBlank { node.path }, summary = if (node.type == "directory") "文件夹" else node.path,
-          onClick = { if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path) })
+      ?: LazyColumn { items(nodes, key = { it.path }) { node ->
+        val directory = node.type == "directory"
+        BasicComponent(title = node.path.substringAfterLast('/').ifBlank { node.path }, summary = if (directory) "文件夹" else node.path,
+          onClick = { if (directory) controller.listFiles(node.path) else controller.readFile(node.path) })
       } }
   }
 }

@@ -140,20 +140,18 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
     }
   }
 
-  // Preserve scroll position when older messages are loaded into the timeline, preventing jump to the oldest item.
-  LaunchedEffect(rows) {
-    if (pendingRestoreAnchor && anchorKey != null) {
-      val targetKey = anchorKey
-      val foundItem = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetKey }
-      if (foundItem != null) {
-        val diff = foundItem.offset - anchorOffset
-        if (diff != 0) {
-          list.scrollBy(diff.toFloat())
-        }
-        pendingRestoreAnchor = false
-        anchorKey = null
-      }
-    }
+  // Preserve the reader's place when an older page is prepended. Reading the live layout here is
+  // racy: the rebuilt rows may not be laid out yet, so the anchor would look unmoved and the view
+  // would jump to the oldest item. Resolve the anchor row's index in the rebuilt list and scroll to
+  // it directly; this also keeps the top trigger re-arming instead of getting stuck at index 0.
+  LaunchedEffect(mainRows, state.messagesCursor) {
+    if (!pendingRestoreAnchor || anchorKey == null) return@LaunchedEffect
+    val position = mainRows.indexOfFirst { it.key == anchorKey }
+    if (position < 0) { pendingRestoreAnchor = false; anchorKey = null; return@LaunchedEffect }
+    val leading = (if (state.cached) 1 else 0) + (if (state.sessionId in state.backgroundRunning) 1 else 0) + (if (state.messagesCursor != null) 1 else 0)
+    list.scrollToItem(leading + position, anchorOffset)
+    pendingRestoreAnchor = false
+    anchorKey = null
   }
   Box(modifier) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -249,6 +247,11 @@ private fun TranscriptRowView(row: TranscriptRow, onFile: (String) -> Unit, onOp
       QoderSummaryRow(row) { onActivityGroup(row) }
       row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
     }
+    "activity-batch" -> InlineBatchRow(row)
+    "activity-tool" -> InlineToolRow(row)
+    "activity-reasoning" -> InlineReasoningRow(row)
+    "process-output" -> SelectionContainer { Column(Modifier.fillMaxWidth()) { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
+    "reasoning-body" -> SelectionContainer { Column(Modifier.fillMaxWidth().padding(start = 24.dp)) { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) } } }
     "diff-summary" -> GroupRow(row) { onActivityGroup(row) }
     "context-item" -> Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       Text(row.title, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium))
@@ -322,6 +325,49 @@ private fun QoderSummaryRow(row: TranscriptRow, onClick: () -> Unit) {
     }
     if (running) { InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp); Spacer(Modifier.width(8.dp)) }
     QoderIcon(QoderGlyph.CHEVRON, Modifier.size(18.dp), MiuixTheme.colorScheme.onSurfaceVariantSummary)
+  }
+}
+
+/** Inline batch header for a running turn: a spinner while executing, a status dot once settled. */
+@Composable
+private fun InlineBatchRow(row: TranscriptRow) {
+  Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    if (row.status in setOf("running", "pending")) {
+      InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp)
+      Spacer(Modifier.width(8.dp))
+    } else {
+      ToolStatusDot(row.status)
+      Spacer(Modifier.width(8.dp))
+    }
+    Text(row.title, modifier = Modifier.weight(1f),
+      style = MiuixTheme.textStyles.body1.copy(color = if (row.status == "error") MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurfaceVariantSummary))
+  }
+}
+
+/** Inline tool header shown while a turn runs; its input/output bodies follow as `tool-body` rows. */
+@Composable
+private fun InlineToolRow(row: TranscriptRow) {
+  Column(Modifier.fillMaxWidth().padding(start = 24.dp, top = 6.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      ToolStatusDot(row.status)
+      Spacer(Modifier.width(8.dp))
+      Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+        style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
+      row.args.forEach { arg -> Spacer(Modifier.width(6.dp)); ArgChip(arg) }
+    }
+    if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+      style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+  }
+}
+
+/** Inline reasoning header; its body follows as `reasoning-body` rows while the turn runs. */
+@Composable
+private fun InlineReasoningRow(row: TranscriptRow) {
+  Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    QoderIcon(QoderGlyph.THINK, Modifier.size(15.dp))
+    Spacer(Modifier.width(8.dp))
+    Text(row.title.ifBlank { "深度思考" }, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+    if (row.status in setOf("running", "pending")) { Spacer(Modifier.width(8.dp)); InfiniteProgressIndicator(color = QoderColors.successColor, size = 14.dp, strokeWidth = 1.5.dp) }
   }
 }
 

@@ -1,117 +1,102 @@
 package com.igng.opencode.lagoon.ui
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.igng.opencode.lagoon.core.*
-import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.extra.SuperArrow
-import top.yukonga.miuix.kmp.extra.SuperBottomSheet
-import top.yukonga.miuix.kmp.extra.SuperSwitch
+import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.ContactsCircle
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-private val groupTitleMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-
-/** Model selector: recent picks first, then the visible catalog grouped by provider. */
-@Composable
-internal fun ModelPickerSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit, onManage: () -> Unit) {
-  val visible = state.visibleModels
-  val byKey = state.modelCatalog.associateBy { it.key }
-  val recent = state.recentModels.mapNotNull { byKey[it] }.filter { it in visible }
-  val current = state.model?.let(::modelKey)
-  SuperBottomSheet(title = "选择模型", show = true, onDismissRequest = onDismiss) {
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
-      item { ResourceHint(state.resource("models"), "服务器没有可用模型", retry = controller::reload) }
-      item {
-        Card(Modifier.fillMaxWidth()) {
-          ChoiceRow("跟随会话", state.session?.model?.label ?: "使用会话或服务器默认模型", !state.modelChanged) { controller.chooseModel(null); onDismiss() }
-        }
-      }
-      if (recent.isNotEmpty()) {
-        item { SmallTitle("最近使用", insideMargin = groupTitleMargin) }
-        item { Card(Modifier.fillMaxWidth()) { recent.forEach { model -> ModelRow(model, state.modelChanged && model.key == current) { controller.chooseModel(model.choice); onDismiss() } } } }
-      }
-      visible.groupBy { it.providerName }.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (provider, models) ->
-        item(key = "provider:$provider") { SmallTitle(provider, insideMargin = groupTitleMargin) }
-        item(key = "models:$provider") {
-          Card(Modifier.fillMaxWidth()) {
-            models.sortedBy { it.choice.label.lowercase() }.forEach { model -> ModelRow(model, state.modelChanged && model.key == current) { controller.chooseModel(model.choice); onDismiss() } }
-          }
-        }
-      }
-      if (visible.isEmpty() && state.modelCatalog.isNotEmpty()) item {
-        Text("所有模型都已隐藏，可在“管理模型”里打开。", Modifier.padding(16.dp), style = MiuixTheme.textStyles.footnote1)
-      }
-      item { Spacer(Modifier.height(12.dp)) }
-      item { Card(Modifier.fillMaxWidth()) { SuperArrow(title = "管理模型", summary = "选择这里显示哪些模型", onClick = onManage) } }
-    }
-  }
-}
-
-@Composable
-private fun ModelRow(model: ModelInfo, selected: Boolean, onClick: () -> Unit) {
-  val warning = if (model.imageInput == false) " · 不支持图片" else ""
-  ChoiceRow(model.choice.label, model.choice.modelId + warning, selected, onClick)
-}
-
 /**
- * Same switches as the desktop "管理模型" dialog. The desktop keeps its switches in its own local
- * storage, so the phone cannot read them; untouched models follow the official default rule.
+ * The composer's Agent / Model / thinking-strength selectors. Each is a compact anchored dropdown
+ * (capsule + MIUIX popup), never a half-screen sheet, and none of them expose model management.
  */
+
+/** The only agent choices the phone offers: build and plan, with no descriptions. */
+private val AGENT_OPTIONS = listOf("build", "plan")
+
+/** One row of a compact dropdown; a null [value] means "follow the session / default". */
+internal data class DropdownOption(val label: String, val value: String?, val selected: Boolean)
+
+/** Capsule plus an anchored MIUIX popup. */
 @Composable
-internal fun ManageModelsSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
-  var query by rememberSaveable { mutableStateOf("") }
-  val latest = remember(state.modelCatalog) { ModelVisibility.latest(state.modelCatalog) }
-  val shown = state.modelCatalog.filter { model ->
-    query.isBlank() || listOf(model.choice.label, model.choice.modelId, model.providerName).any { it.contains(query.trim(), ignoreCase = true) }
-  }
-  SuperBottomSheet(title = "管理模型", show = true, onDismissRequest = onDismiss) {
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 600.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
-      item {
-        Text("只影响这台手机。电脑端的开关存在电脑本地，这里读不到；没手动改过的模型按 OpenCode 官方规则显示：各系列半年内的最新款和自定义模型。",
-          Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-          style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-      }
-      item { TextField(query, { query = it }, label = "搜索模型", useLabelAsPlaceholder = true, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) }
-      item { ResourceHint(state.resource("models"), "服务器没有可用模型", retry = controller::reload) }
-      shown.groupBy { it.providerName }.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (provider, models) ->
-        item(key = "provider:$provider") { SmallTitle(provider, insideMargin = groupTitleMargin) }
-        item(key = "models:$provider") {
-          Card(Modifier.fillMaxWidth()) {
-            models.sortedBy { it.choice.label.lowercase() }.forEach { model ->
-              SuperSwitch(
-                checked = ModelVisibility.isVisible(model, latest, state.modelOverrides),
-                onCheckedChange = { controller.setModelVisible(model, it) },
-                title = model.choice.label,
-                summary = model.choice.modelId
-              )
-            }
-          }
-        }
-      }
-    }
+private fun Dropdown(
+  text: String,
+  options: List<DropdownOption>,
+  onSelect: (String?) -> Unit,
+  modifier: Modifier = Modifier,
+  enabled: Boolean = true,
+  leading: (@Composable () -> Unit)? = null,
+  maxTextWidth: Dp = 200.dp
+) {
+  var open by remember { mutableStateOf(false) }
+  Box(modifier) {
+    CapsuleSelector(text, { open = true }, enabled = enabled, leading = leading, maxTextWidth = maxTextWidth)
+    MenuPopup(open, { open = false }, listOf(MenuSection(options.map { option ->
+      MenuAction(option.label, selected = option.selected) { onSelect(option.value) }
+    })), alignment = PopupPositionProvider.Align.Start)
   }
 }
 
-/** Agent for the next message, chosen from the composer: follow the session or pick one of the server's agents. */
+/** Agent selector: 默认 / build / plan. [iconOnly] is the collapsed pill's glyph button. */
 @Composable
-internal fun AgentPickerSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
-  SuperBottomSheet(title = "选择 Agent", show = true, onDismissRequest = onDismiss) {
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
-      item { ResourceHint(state.resource("agents"), "服务器没有可用 Agent", retry = controller::reload) }
-      item { Card(Modifier.fillMaxWidth()) { ChoiceRow("跟随会话", "使用会话当前的 Agent", !state.agentChanged) { controller.chooseAgent(null); onDismiss() } } }
-      if (state.agents.isNotEmpty()) item {
-        Spacer(Modifier.height(12.dp))
-        Card(Modifier.fillMaxWidth()) { state.agents.forEach { agent ->
-          ChoiceRow(agent.name, agent.description.takeIf(String::isNotBlank), state.agentChanged && state.agent == agent.name) { controller.chooseAgent(agent.name); onDismiss() }
-        } }
+internal fun AgentSelector(
+  state: LagoonState,
+  controller: LagoonController,
+  modifier: Modifier = Modifier,
+  enabled: Boolean = true,
+  iconOnly: Boolean = false
+) {
+  var open by remember { mutableStateOf(false) }
+  val options = AGENT_OPTIONS.map { DropdownOption(it, it, state.agentChanged && state.agent == it) }
+  Box(modifier) {
+    if (iconOnly) IconButton(onClick = { open = true }, enabled = enabled) {
+      Icon(MiuixIcons.ContactsCircle, "Agent：${state.agent ?: "默认"}", Modifier.size(22.dp),
+        tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary)
+    } else CapsuleSelector(state.agent ?: "默认", { open = true }, enabled = enabled, maxTextWidth = 72.dp,
+      leading = { Icon(MiuixIcons.ContactsCircle, null, Modifier.size(16.dp), tint = if (state.agentChanged) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary) })
+    MenuPopup(open, { open = false }, listOf(MenuSection(options.map { option ->
+      MenuAction(option.label, selected = option.selected) { controller.chooseAgent(option.value) }
+    })), alignment = PopupPositionProvider.Align.Start)
+  }
+}
+
+/** Model selector: the session default or one of the server's visible models. */
+@Composable
+internal fun ModelSelector(state: LagoonState, controller: LagoonController, modifier: Modifier = Modifier, enabled: Boolean = true) {
+  var open by remember { mutableStateOf(false) }
+  val visible = state.visibleModels
+  val currentKey = state.model?.let(::modelKey)
+  val options = buildList {
+    add(DropdownOption("默认模型", null, !state.modelChanged))
+    visible.forEach { model -> add(DropdownOption(model.choice.label, model.key, state.modelChanged && model.key == currentKey)) }
+  }
+  Box(modifier) {
+    CapsuleSelector(state.model?.label ?: "默认模型", { open = true }, enabled = enabled, maxTextWidth = 180.dp)
+    MenuPopup(open, { open = false }, listOf(MenuSection(options.map { option ->
+      MenuAction(option.label, selected = option.selected) {
+        controller.chooseModel(option.value?.let { key -> visible.firstOrNull { it.key == key }?.choice })
       }
-    }
+    })), alignment = PopupPositionProvider.Align.Start)
+  }
+}
+
+/** Thinking-strength selector, backed only by the variants the server lists for the chosen model. */
+@Composable
+internal fun VariantSelector(state: LagoonState, controller: LagoonController, modifier: Modifier = Modifier, enabled: Boolean = true) {
+  var open by remember { mutableStateOf(false) }
+  val variants = state.modelCatalog.firstOrNull { it.key == state.model?.let(::modelKey) }?.variants.orEmpty()
+  val current = state.model?.variant
+  val label = variants.firstOrNull { it.id == current }?.label ?: "默认"
+  Box(modifier) {
+    CapsuleSelector("思考强度：$label", { open = true }, enabled = enabled && variants.isNotEmpty(), maxTextWidth = 120.dp)
+    if (variants.isNotEmpty()) MenuPopup(open, { open = false }, listOf(MenuSection(buildList {
+      add(MenuAction("默认", selected = current == null) { state.model?.let { controller.chooseModel(it.copy(variant = null)) } })
+      variants.forEach { variant -> add(MenuAction(variant.label, selected = current == variant.id) { state.model?.let { controller.chooseModel(it.copy(variant = variant.id)) } }) }
+    })), alignment = PopupPositionProvider.Align.Start)
   }
 }

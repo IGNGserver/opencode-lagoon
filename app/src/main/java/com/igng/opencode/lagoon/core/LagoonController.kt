@@ -58,6 +58,8 @@ data class LagoonState(
   val pendingAttachments: Map<String, List<LocalAttachment>> = emptyMap(),
   val agent: String? = null, val model: ModelChoice? = null,
   val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
+  /** 添加项目用的远程目录选择器：当前绝对路径、目录项与搜索结果；[browsePath] 为 null 表示未打开。 */
+  val browsePath: String? = null, val browseEntries: List<FileNode> = emptyList(), val browseSearch: List<String> = emptyList(),
   val searchResults: List<String> = emptyList(),
   val capabilities: ApiCapabilities = ApiCapabilities(),
   val previews: Map<String, SessionPreview> = emptyMap(), val resources: Map<String, ResourceStatus> = emptyMap(),
@@ -187,6 +189,7 @@ class LagoonController private constructor(private val appContext: Context) {
   private val waitingEventSeqAt = mutableMapOf<String, Long>()
 
   init {
+    store.migrateLocalProjects()
     refreshMode = store.refreshMode()
     // Single publisher for the server-wide island summary, so the system notification never drifts
     // from the in-app island: both read the same derived `summary` on every state emission.
@@ -359,8 +362,9 @@ class LagoonController private constructor(private val appContext: Context) {
     val version = client.health()
     val capabilities = client.discoverCapabilities()
     val serverId = state.value.serverId ?: return
-    // Projects are authoritative from the server; this client never invents one from a folder.
-    val projects = if (controlOnly && state.value.projects.isNotEmpty()) state.value.projects else client.projects()
+    // The project list is device-local: the user registers a server directory, and the server's own
+    // list is never auto-imported. A control-only refresh keeps the current list to avoid flicker.
+    val projects = if (controlOnly && state.value.projects.isNotEmpty()) state.value.projects else store.localProjects(serverId)
     // Official home index: one global, newest-first listing of root sessions (directory filters are
     // exact, so per-project queries would miss worktrees). Reconciliation re-reads its first page too,
     // so a session created elsewhere while an event was missed still appears.
@@ -985,8 +989,9 @@ class LagoonController private constructor(private val appContext: Context) {
     if (token != generation) return
     val previousMessages = state.value.messages
     val messages = result.map { fetched ->
-      val older = if (current() && state.value.loadedOlderMessages && fetched.isNotEmpty()) previousMessages.filter { it.created < fetched.first().created } else emptyList()
-      (older + fetched + pending.filter { item -> fetched.none { it.id == item.id } }).distinctBy { it.id }
+      // Merge by id so a tail refresh keeps older pages the reader already loaded and any
+      // streaming/optimistic entry the server page has not caught up with yet.
+      mergeTranscript(previousMessages.takeIf { current() }.orEmpty(), fetched, pending)
     }.getOrElse { error ->
       // Shown in place (“保留上次数据 · …”); a transcript read failure is not a global error toast.
       Diagnostics.warn("LagoonController", "会话消息读取失败", error)
@@ -1097,6 +1102,71 @@ class LagoonController private constructor(private val appContext: Context) {
     store.rememberScope(server, scope)
     mutable.update { it.copy(scopeProjectId = scope) }
     if (scope != null && scope != state.value.projectId) selectProject(scope)
+  }
+
+  // ---- Device-local projects ----
+  /** Resolve [directory] on the server and register the canonical project on this device. */
+  fun addProject(directory: String): Job = act("project-add", directory) { op ->
+    val project = op.client.projectAt(directory) ?: error("服务器没有解析出这个目录对应的项目")
+    val existing = state.value.projects.firstOrNull { normalizedDirectory(it.directory) == normalizedDirectory(project.directory) }
+    val resolved = existing ?: project
+    val projects = store.addLocalProject(op.serverId, resolved)
+    op.commit { withSummary(it.copy(projects = projects, projectId = resolved.id,
+      browsePath = null, browseEntries = emptyList(), browseSearch = emptyList(),
+      resources = it.resources + ("browse" to ResourceStatus(ResourceState.READY)))) }
+    store.rememberLocation(resolved.id, null)
+    loadChoices(resolved.directory, generation)
+  }
+  fun removeProject(projectId: String) {
+    val server = state.value.serverId ?: return
+    val projects = store.removeLocalProject(server, projectId)
+    mutable.update { withSummary(it.copy(projects = projects,
+      projectId = it.projectId?.takeIf { id -> projects.any { p -> p.id == id } } ?: projects.firstOrNull()?.id,
+      scopeProjectId = it.scopeProjectId?.takeIf { id -> projects.any { p -> p.id == id } })) }
+  }
+
+  // ---- Remote directory browser (used to add a project) ----
+  fun openDirectoryBrowser(): Job = operationScope.launch {
+    val op = attempt { beginOperation(state.value.homeDirectory) }.getOrElse { error ->
+      mutable.update { it.copy(error = error.message ?: "无法打开目录", resources = it.resources + ("browse" to ResourceStatus(ResourceState.ERROR, error.message))) }
+      return@launch
+    }
+    mutable.update { it.copy(browsePath = "", browseEntries = emptyList(), browseSearch = emptyList(), resources = it.resources + ("browse" to ResourceStatus(ResourceState.LOADING))) }
+    val root = attempt { op.client.projectAt("") }.getOrNull()?.directory?.takeIf(String::isNotBlank)
+      ?: state.value.homeDirectory ?: "/"
+    loadBrowse(op, root)
+  }
+  fun browseDirectory(path: String): Job = operationScope.launch {
+    val op = attempt { beginOperation(path) }.getOrElse { error ->
+      mutable.update { it.copy(resources = it.resources + ("browse" to ResourceStatus(ResourceState.ERROR, error.message))) }
+      return@launch
+    }
+    mutable.update { it.copy(resources = it.resources + ("browse" to ResourceStatus(ResourceState.LOADING)), browseSearch = emptyList()) }
+    loadBrowse(op, path)
+  }
+  private suspend fun loadBrowse(op: OperationContext, path: String) {
+    val entries = attempt { op.client.files(path, ".") }.getOrElse { error ->
+      op.commit { it.copy(resources = it.resources + ("browse" to ResourceStatus(ResourceState.ERROR, error.message))) }
+      return
+    }
+    op.commit { it.copy(browsePath = path,
+      browseEntries = entries.sortedWith(compareBy({ it.type != "directory" }, { it.path.lowercase() })), browseSearch = emptyList(),
+      resources = it.resources + ("browse" to ResourceStatus(if (entries.isEmpty()) ResourceState.EMPTY else ResourceState.READY))) }
+  }
+  fun searchDirectories(query: String): Job = operationScope.launch {
+    val text = query.trim()
+    if (text.length < 2) { mutable.update { it.copy(browseSearch = emptyList()) }; return@launch }
+    val path = state.value.browsePath ?: return@launch
+    val op = attempt { beginOperation(path) }.getOrElse { return@launch }
+    delay(250)
+    val results = attempt { op.client.searchFiles(path, text) }.getOrElse { error ->
+      op.commit { it.copy(resources = it.resources + ("browse-search" to ResourceStatus(ResourceState.ERROR, error.message))) }
+      return@launch
+    }
+    op.commit { it.copy(browseSearch = results, resources = it.resources + ("browse-search" to ResourceStatus(if (results.isEmpty()) ResourceState.EMPTY else ResourceState.READY))) }
+  }
+  fun closeDirectoryBrowser() {
+    mutable.update { it.copy(browsePath = null, browseEntries = emptyList(), browseSearch = emptyList()) }
   }
   /** Leaves any open session for a blank draft that starts in the scope's (or latest) project. */
   fun beginDraft() {
