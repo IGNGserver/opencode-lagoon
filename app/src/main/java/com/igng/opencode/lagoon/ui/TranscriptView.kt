@@ -8,6 +8,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
@@ -17,15 +18,14 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
@@ -45,7 +45,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import top.yukonga.miuix.kmp.basic.*
-import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.Copy
@@ -61,21 +60,15 @@ private fun parsed(key: String, text: String): List<MarkdownBlock> = synchronize
 
 @Composable
 internal fun Conversation(state: LagoonState, controller: LagoonController, modifier: Modifier = Modifier, onFile: (String) -> Unit, onModal: (Boolean) -> Unit,
-  onOpenChild: (String) -> Unit = {}) {
+  onOpenChild: (String) -> Unit = {}, onActivityGroup: (TranscriptRow) -> Unit = {}) {
   val list = rememberLazyListState()
   val scope = rememberCoroutineScope()
-  // 点击分组行后在半屏窗口查看明细；明细由同一套投影按分组 key 重建，主时间线保持折叠。
-  var detail by remember(state.sessionId) { mutableStateOf<TranscriptRow?>(null) }
-  DisposableEffect(detail) { onModal(detail != null); onDispose { if (detail != null) onModal(false) } }
-  // 「思考过程」等仍按行内展开；工具组改为半屏窗口，不再写入这里。
-  val expanded = rememberSaveable(saver = mapSaver(save = { it.toMap() }, restore = { map -> mutableStateMapOf<String, Boolean>().apply { map.forEach { (k, v) -> put(k, v as Boolean) } } })) { mutableStateMapOf<String, Boolean>() }
-  val expansions = expanded.filterValues { it }.keys
   val task = state.tasks[state.sessionId]
   val working = task?.active == true
   val revert = state.session?.revertMessageId
-  val rows by produceState(emptyList<TranscriptRow>(), state.messages, expansions, working, revert) {
+  val rows by produceState(emptyList<TranscriptRow>(), state.messages, working, revert) {
     delay(32)
-    value = withContext(Dispatchers.Default) { TranscriptRows.build(state.messages, expansions, working, revert) }
+    value = withContext(Dispatchers.Default) { TranscriptRows.build(state.messages, working = working, revertMessageId = revert) }
   }
   // A brand-new conversation opens at the newest message; only a deliberate drag up opts out of following.
   var follow by rememberSaveable { mutableStateOf(true) }
@@ -174,20 +167,14 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
         }
       }
       if (rows.isEmpty()) item { ResourceHint(state.resource("messages"), "会话尚无消息", "在下方输入第一项任务。", controller::reload) }
-      items(rows.filter { it.detailOf == null }, key = { it.key }, contentType = { it.kind }) { row -> TranscriptRowView(row, expanded, onFile, onOpenChild, onDetail = { detail = it }) }
+      items(rows.filter { it.detailOf == null }, key = { it.key }, contentType = { it.kind }) { row ->
+        TranscriptRowView(row, onFile, onOpenChild, onActivityGroup)
+      }
       items(permissions, key = { "permission:${it.id}" }) { MiuixPermissionCard(it, controller, onModal) }
       items(questions, key = { "question:${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
     Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
       horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      if (expansions.isNotEmpty()) {
-        Row(Modifier.clip(miuixCapsuleShape()).background(MiuixTheme.colorScheme.secondaryContainer)
-          .clickable { expanded.clear() }.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-          Icon(MiuixIcons.ChevronForward, "收起全部", Modifier.size(16.dp).rotate(-90f), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          Spacer(Modifier.width(6.dp))
-          Text("收起全部", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        }
-      }
       AnimatedVisibility(!nearBottom && rows.isNotEmpty()) {
         Box(Modifier.size(36.dp).clip(miuixCapsuleShape()).background(MiuixTheme.colorScheme.secondaryContainer)
           .clickable { follow = true; newContent = false; scope.launch { scrollBottom() } }, contentAlignment = Alignment.Center) {
@@ -196,19 +183,6 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
         }
       }
       if (task?.active == true) WorkingIndicator(task)
-    }
-  }
-  detail?.let { row ->
-    val details by produceState(emptyList<TranscriptRow>(), row.key, state.messages, working, revert) {
-      value = withContext(Dispatchers.Default) { TranscriptRows.details(state.messages, row.key, working, revert) }
-    }
-    val sections = remember(details) { detailSections(details) }
-    val expandedItems = remember(row.key) { mutableStateMapOf<String, Boolean>() }
-    SuperBottomSheet(title = row.title.ifBlank { "详情" }, show = true, onDismissRequest = { detail = null }) {
-      LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (sections.isEmpty()) item { Text("没有可显示的明细", style = MiuixTheme.textStyles.footnote1) }
-        items(sections, key = { it.header.key }) { section -> DetailSectionView(section, expandedItems) }
-      }
     }
   }
 }
@@ -242,7 +216,7 @@ private fun elapsedText(seconds: Long): String = when {
 }
 
 @Composable
-private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<String, Boolean>, onFile: (String) -> Unit, onOpenChild: (String) -> Unit, onDetail: (TranscriptRow) -> Unit) {
+private fun TranscriptRowView(row: TranscriptRow, onFile: (String) -> Unit, onOpenChild: (String) -> Unit, onActivityGroup: (TranscriptRow) -> Unit) {
   when (row.kind) {
     "time" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
       Text(row.text, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
@@ -251,10 +225,6 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
     // One selection container per reply so a long press can select across paragraphs; the turn's final
     // answer is also copyable as a whole from the meta row below it.
     "text" -> SelectionContainer { Column { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
-    "reasoning" -> ExpandableRow(row, expanded)
-    "reasoning-body" -> SelectionContainer { Column(Modifier.padding(start = 10.dp)) {
-      parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) }
-    } }
     "meta" -> Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       row.copyText?.let { text ->
         val clipboard = LocalClipboardManager.current
@@ -272,14 +242,14 @@ private fun TranscriptRowView(row: TranscriptRow, expanded: SnapshotStateMap<Str
     }
     "note" -> NoticeRow(row, onOpenChild)
     "tool" -> Column {
-      GroupRow(row) { onDetail(row) }
+      GroupRow(row) { onActivityGroup(row) }
       row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
     }
     "tool-group" -> Column {
-      GroupRow(row) { onDetail(row) }
+      QoderSummaryRow(row) { onActivityGroup(row) }
       row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
     }
-    "diff-summary" -> GroupRow(row) { onDetail(row) }
+    "diff-summary" -> GroupRow(row) { onActivityGroup(row) }
     "context-item" -> Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
       Text(row.title, style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium))
       if (row.subtitle.isNotBlank()) {
@@ -309,7 +279,7 @@ private fun UserMessageRow(row: TranscriptRow, onFile: (String) -> Unit) {
     }
     if (row.text.isNotBlank()) {
       Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Column(Modifier.widthIn(max = bubbleMax).background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(12.dp)).padding(horizontal = 14.dp, vertical = 10.dp)) {
+        Column(Modifier.widthIn(max = bubbleMax).background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(22.dp)).padding(horizontal = 16.dp, vertical = 12.dp)) {
           SelectionContainer {
             BasicText(row.text, style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface, lineHeight = 24.sp))
           }
@@ -323,69 +293,140 @@ private fun UserMessageRow(row: TranscriptRow, onFile: (String) -> Unit) {
   }
 }
 
-/** 行内可展开行，用于「思考过程」等由 [expanded] 控制的内容（工具组改用 [GroupRow] + 半屏窗口）。 */
-@Composable
-private fun ExpandableRow(row: TranscriptRow, expanded: SnapshotStateMap<String, Boolean>) {
-  val open = expanded[row.key] == true
-  val running = row.status in setOf("running", "pending")
-  Column(Modifier.fillMaxWidth().background(if (open) MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else Color.Transparent, miuixSquircleShape(10.dp))) {
-    Row(Modifier.fillMaxWidth().clickable { expanded[row.key] = !open }.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-      if (row.kind == "tool") {
-        ToolStatusDot(row.status)
-        Spacer(Modifier.width(8.dp))
-      }
-      Column(Modifier.weight(1f)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium, color = if (row.status == "error") MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurface))
-          row.args.forEach { arg -> Spacer(Modifier.width(6.dp)); ArgChip(arg) }
-        }
-        if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-      }
-      if (running) {
-        Spacer(Modifier.width(8.dp))
-        Text("执行中", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixColorTokens.Primary))
-      }
-      Spacer(Modifier.width(6.dp))
-      Text(if (open) "⌄" else "›", style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-    }
-  }
-}
-
 /** 分组行：点击后打开半屏窗口查看明细（不再内联展开）。 */
 @Composable
 private fun GroupRow(row: TranscriptRow, onClick: () -> Unit) {
   val running = row.status in setOf("running", "pending")
-  Row(Modifier.fillMaxWidth()
-    .background(MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f), miuixSquircleShape(10.dp))
-    .clickable(onClick = onClick)
-    .padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-    if (row.kind in setOf("tool", "tool-group")) {
-      ToolStatusDot(row.status)
-      Spacer(Modifier.width(8.dp))
-    }
+  Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 2.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+    if (row.kind in setOf("tool", "tool-group")) { ToolStatusDot(row.status); Spacer(Modifier.width(10.dp)) }
     Column(Modifier.weight(1f)) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-          style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium, color = if (row.status == "error") MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurface))
-        row.args.forEach { arg -> Spacer(Modifier.width(6.dp)); ArgChip(arg) }
-      }
+      Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        style = MiuixTheme.textStyles.body1.copy(fontWeight = FontWeight.Medium, color = if (row.status == "error") MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurface))
       if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
-    if (running) {
-      Spacer(Modifier.width(8.dp))
-      Text("执行中", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixColorTokens.Primary))
+    if (running) { InfiniteProgressIndicator(color = MiuixColorTokens.Primary, size = 15.dp, strokeWidth = 1.5.dp); Spacer(Modifier.width(8.dp)) }
+    Text("›", style = MiuixTheme.textStyles.title4.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+  }
+}
+
+@Composable
+private fun QoderSummaryRow(row: TranscriptRow, onClick: () -> Unit) {
+  val running = row.status in setOf("running", "pending")
+  Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 2.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.weight(1f)) {
+      Text(row.title, style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+      if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
     }
-    Spacer(Modifier.width(6.dp))
-    Text("›", style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+    if (running) { InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp); Spacer(Modifier.width(8.dp)) }
+    QoderIcon(QoderGlyph.CHEVRON, Modifier.size(18.dp), MiuixTheme.colorScheme.onSurfaceVariantSummary)
+  }
+}
+
+@Composable
+internal fun QoderActivityItem(
+  header: TranscriptRow,
+  bodies: List<TranscriptRow>,
+  onOpenActivity: (TranscriptRow) -> Unit,
+  onFile: (String) -> Unit,
+  hasNext: Boolean = true
+) {
+  val isProcess = header.kind == "process-output"
+  val clickable = !isProcess && (header.kind in setOf("reasoning", "tool", "tool-group", "diff-file") || bodies.isNotEmpty())
+  Column(Modifier.fillMaxWidth()) {
+    Row(
+      Modifier.fillMaxWidth()
+        .height(IntrinsicSize.Min)
+        .then(if (clickable) Modifier.clickable { onOpenActivity(header) } else Modifier),
+      verticalAlignment = Alignment.Top
+    ) {
+      TimelineMarker(header.status, header.kind, hasNext)
+      Spacer(Modifier.width(12.dp))
+      if (isProcess) {
+        SelectionContainer(Modifier.weight(1f).padding(top = 7.dp, bottom = 20.dp)) {
+          Column {
+            parsed(header.key, header.text).forEach { block -> MarkdownBlockView(block, selectable = false) }
+          }
+        }
+      } else if (header.kind == "attachment") {
+        Column(Modifier.weight(1f).padding(top = 7.dp, bottom = 20.dp)) {
+          header.attachments.forEach { attachment -> AttachmentView(attachment, onFile) }
+        }
+      } else {
+        Column(Modifier.weight(1f).padding(top = 7.dp, bottom = 22.dp)) {
+          Text(
+            header.title.ifBlank { "操作" },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MiuixTheme.textStyles.body1.copy(fontWeight = FontWeight.Medium)
+          )
+          if (header.subtitle.isNotBlank()) Text(
+            header.subtitle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+          )
+        }
+        if (clickable) QoderIcon(QoderGlyph.CHEVRON, Modifier.padding(top = 9.dp).size(18.dp), MiuixTheme.colorScheme.onSurfaceVariantSummary)
+      }
+    }
+  }
+}
+
+@Composable
+private fun TimelineMarker(status: String, kind: String, hasNext: Boolean) {
+  val railColor = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.42f)
+  Box(Modifier.width(26.dp).fillMaxHeight()) {
+    if (hasNext) Canvas(Modifier.align(Alignment.TopCenter).padding(top = 34.dp).width(2.dp).fillMaxHeight()) {
+      drawLine(railColor, androidx.compose.ui.geometry.Offset(size.width / 2, 0f),
+        androidx.compose.ui.geometry.Offset(size.width / 2, size.height), strokeWidth = 1.dp.toPx(),
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 4.dp.toPx())))
+    }
+    Box(Modifier.padding(top = 6.dp).size(26.dp), contentAlignment = Alignment.Center) {
+      when {
+        status == "error" -> QoderIcon(QoderGlyph.ERROR, color = QoderColors.error)
+        status in setOf("running", "pending") -> InfiniteProgressIndicator(color = QoderColors.successColor, size = 20.dp, strokeWidth = 2.dp)
+        kind == "reasoning" -> QoderIcon(QoderGlyph.THINK)
+        else -> QoderIcon(QoderGlyph.CHECK, color = QoderColors.successColor)
+      }
+    }
+  }
+}
+
+@Composable
+internal fun QoderSheetHandle() {
+  Box(
+    Modifier.fillMaxWidth().padding(top = 9.dp),
+    contentAlignment = Alignment.Center
+  ) {
+    Box(Modifier.width(64.dp).height(4.dp).background(MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.45f), miuixCapsuleShape()))
+  }
+}
+
+@Composable
+internal fun DetailMarkdown(text: String) {
+  SelectionContainer { Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) { parsed("detail:$text", text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
+}
+
+@Composable
+internal fun DetailCode(title: String, text: String, readContent: Boolean = false, copyText: String? = null) {
+  val clipboard = LocalClipboardManager.current
+  Column(Modifier.fillMaxWidth()) {
+    if (title.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+      Text(title, Modifier.weight(1f), style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
+      if (copyText != null) IconButton(onClick = { clipboard.setText(AnnotatedString(copyText)) }, minWidth = 32.dp, minHeight = 32.dp) {
+        Icon(MiuixIcons.Copy, "复制$title", Modifier.size(16.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+      }
+    }
+    Spacer(Modifier.height(4.dp))
+    CodePanel(text, background = if (readContent) QoderColors.readContent else QoderColors.codeColor)
   }
 }
 
 /** 半屏窗口里的一行明细：代码/输出走带高亮的等宽面板，其余是文件头、上下文项或分组小标题。 */
 @Composable
-private fun DetailRowView(row: TranscriptRow) {
+internal fun DetailRowView(row: TranscriptRow) {
   when (row.kind) {
     "tool-body" -> Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
       if (row.title.isNotBlank()) Text(row.title, Modifier.padding(bottom = 4.dp),
@@ -428,42 +469,8 @@ private fun DetailRowView(row: TranscriptRow) {
   }
 }
 
-/**
- * 半屏窗口里的一条调用记录：一行条目头（如“命令行 / ls -la · 已完成”）+ 可折叠的正文。点击条目头
- * 才展开命令 / 输出 / 思考，未展开时整个分组只显示一行行记录，和电脑端一致。
- */
-private data class DetailSection(val header: TranscriptRow, val bodies: List<TranscriptRow>)
-
-/** 按 [TranscriptRow.bodyOf] 把明细行折成「条目头 + 正文」的段落，保持原始顺序。 */
-private fun detailSections(rows: List<TranscriptRow>): List<DetailSection> {
-  val sections = mutableListOf<DetailSection>()
-  var header: TranscriptRow? = null
-  var bodies = mutableListOf<TranscriptRow>()
-  rows.forEach { row ->
-    if (row.bodyOf == null) {
-      header?.let { sections += DetailSection(it, bodies) }
-      header = row
-      bodies = mutableListOf()
-    } else bodies += row
-  }
-  header?.let { sections += DetailSection(it, bodies) }
-  return sections
-}
-
-@Composable
-private fun DetailSectionView(section: DetailSection, expandedItems: SnapshotStateMap<String, Boolean>) {
-  val expandable = section.bodies.isNotEmpty()
-  val open = expandedItems[section.header.key] == true
-  Column(Modifier.fillMaxWidth()) {
-    Row(Modifier.fillMaxWidth().clickable(enabled = expandable) { if (expandable) expandedItems[section.header.key] = !open },
-      verticalAlignment = Alignment.CenterVertically) {
-      Box(Modifier.weight(1f)) { DetailRowView(section.header) }
-      if (expandable) Text(if (open) "⌄" else "›", modifier = Modifier.padding(start = 6.dp),
-        style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-    }
-    if (open) section.bodies.forEach { body -> DetailRowView(body) }
-  }
-}
+/** Chronological operation header and its second-level detail bodies. */
+internal data class DetailSection(val header: TranscriptRow, val bodies: List<TranscriptRow>)
 
 /** Official notice row: a one-line label (agent change, instructions updated, subagent result…), never a reply bubble. */
 @Composable
@@ -515,7 +522,7 @@ private fun rememberCodeColors(): CodeColors = CodeColors(
 )
 
 @Composable
-private fun CodePanel(text: String, highlight: Boolean = true) {
+private fun CodePanel(text: String, highlight: Boolean = true, background: Color = MiuixTheme.colorScheme.secondaryContainer) {
   val colors = rememberCodeColors()
   val annotated = remember(text, colors, highlight) {
     buildAnnotatedString {
@@ -533,7 +540,7 @@ private fun CodePanel(text: String, highlight: Boolean = true) {
       }
     }
   }
-  Column(Modifier.fillMaxWidth().background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(8.dp)).padding(8.dp)) {
+  Column(Modifier.fillMaxWidth().background(background, miuixSquircleShape(12.dp)).padding(12.dp)) {
     SelectionContainer {
       BasicText(annotated, Modifier.horizontalScroll(rememberScrollState()),
         style = MiuixTheme.textStyles.body2.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp))
@@ -642,7 +649,7 @@ internal fun VirtualText(text: String, modifier: Modifier = Modifier, highlight:
 }
 
 @Composable
-private fun AttachmentView(attachment: Attachment, onFile: (String) -> Unit) {
+internal fun AttachmentView(attachment: Attachment, onFile: (String) -> Unit) {
   val uriHandler = LocalUriHandler.current
   val dataImage = attachment.url.startsWith("data:image/") && attachment.url.length < 8_000_000
   val bitmap by produceState<android.graphics.Bitmap?>(null, attachment.url) {

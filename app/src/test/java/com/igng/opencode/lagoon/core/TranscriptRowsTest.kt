@@ -46,7 +46,7 @@ class TranscriptRowsTest {
       tool("t4", "read", input = """{"filePath":"b.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("使用了 2 个读取、2 个搜索"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertEquals(listOf("已处理 4 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
     assertTrue(rows.none { it.kind == "tool" })
   }
 
@@ -61,20 +61,58 @@ class TranscriptRowsTest {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray()))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("使用了 1 个搜索、2 个Shell、2 个思考", group.title)
+    assertEquals("已处理 5 个操作", group.title)
     val details = TranscriptRows.details(messages, group.key)
     assertEquals(3, details.count { it.kind == "tool" })
     assertEquals(2, details.count { it.kind == "reasoning" })
   }
 
-  @Test fun textSplitsRunsIntoTwoGroups() {
+  @Test fun textAndOperationsStayInOnePromptGroup() {
     val parts = listOf(
       tool("t1", "bash", input = """{"command":"ls"}"""),
       part("x1", "text", text = "先执行了第一步"),
       tool("t2", "read", input = """{"filePath":"a.kt"}""")
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
-    assertEquals(listOf("使用了 1 个Shell", "使用了 1 个读取"), rows.filter { it.kind == "tool-group" }.map { it.title })
+    assertEquals(listOf("已处理 2 个操作"), rows.filter { it.kind == "tool-group" }.map { it.title })
+  }
+
+  @Test fun processOutputStaysChronologicalInTheActivityTimelineAndFinalTextStaysInTranscript() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500,
+      part("p1", "text", text = "先检查现状"),
+      tool("t1", "grep", input = """{"pattern":"TODO"}"""),
+      part("p2", "text", text = "找到待办项，继续读取"),
+      tool("t2", "read", input = """{"filePath":"src/Main.kt"}"""),
+      part("p3", "text", text = "整理后的最终回答")))
+    val rows = TranscriptRows.build(messages)
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("已处理 2 个操作", group.title)
+    assertEquals("整理后的最终回答", rows.single { it.kind == "text" }.text)
+
+    val details = TranscriptRows.details(messages, group.key)
+    val timeline = details.filter { it.bodyOf == null }
+    assertEquals(listOf("process-output", "tool", "process-output", "tool"), timeline.map { it.kind })
+    assertEquals(listOf("先检查现状", "找到待办项，继续读取"), timeline.filter { it.kind == "process-output" }.map { it.text })
+  }
+
+  @Test fun toolAttachmentsRemainAvailableInTheActivityDetails() {
+    val image = Attachment("data:image/png;base64,AA==", "image/png", "screenshot.png")
+    val imageTool = tool("t1", "read", input = """{"filePath":"/tmp/screenshot.png"}""").copy(attachments = listOf(image))
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, imageTool))
+    val group = TranscriptRows.build(messages).single { it.kind == "tool-group" }
+    val detail = TranscriptRows.details(messages, group.key).single { it.kind == "tool" }
+    assertEquals(listOf(image), detail.attachments)
+    assertEquals(imageTool, detail.source)
+  }
+
+  @Test fun textFromToolCallAssistantMessageIsProcessOutputNotFinalAnswer() {
+    val messages = listOf(user("u1", t0),
+      assistant("a1", t0 + 500, part("p1", "text", text = "即将调用工具"), tool("t1", "bash", input = """{"command":"pwd"}""")).copy(finish = "tool-calls"),
+      assistant("a2", t0 + 900, part("p2", "text", text = "最终结果")))
+    val rows = TranscriptRows.build(messages)
+    val group = rows.single { it.kind == "tool-group" }
+    assertEquals("最终结果", rows.single { it.kind == "text" }.text)
+    assertTrue(TranscriptRows.details(messages, group.key).any { it.kind == "process-output" && it.text == "即将调用工具" })
   }
 
   @Test fun hiddenAndPendingToolsProduceNoRows() {
@@ -85,7 +123,7 @@ class TranscriptRowsTest {
     )
     val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500, *parts.toTypedArray())))
     assertEquals(1, rows.count { it.kind == "tool-group" })
-    assertEquals("使用了 1 个提问", rows.first { it.kind == "tool-group" }.title)
+    assertEquals("已处理 1 个操作", rows.first { it.kind == "tool-group" }.title)
   }
 
   @Test fun emptyMessagesProduceNoRows() {
@@ -97,7 +135,7 @@ class TranscriptRowsTest {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 500, *(1..8).map { tool("t$it", "bash", input = """{"command":"cmd$it"}""", output = "ok") }.toTypedArray()))
     val rows = TranscriptRows.build(messages)
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("使用了 8 个Shell", group.title)
+    assertEquals("已处理 8 个操作", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertEquals(8, TranscriptRows.details(messages, group.key).count { it.kind == "tool" })
   }
@@ -114,8 +152,9 @@ class TranscriptRowsTest {
     assertTrue(body.isNotEmpty())
     // The body is attached to the item header so the sheet can keep it collapsed until tapped.
     assertEquals(item.key, body.first().bodyOf)
-    assertTrue(body.first().text.contains("$ ls -la"))
-    assertTrue(body.first().text.contains("file1"))
+    assertEquals("命令", body.first().title)
+    assertEquals("ls -la", body.first().text)
+    assertTrue(body.any { it.title == "输出" && it.text.contains("file1") })
   }
 
   @Test fun readToolUsesFilenameAsSubtitle() {
@@ -133,7 +172,7 @@ class TranscriptRowsTest {
     val base = TranscriptRows.build(messages)
     assertTrue(base.none { it.kind == "tool" })
     val group = base.single { it.kind == "tool-group" }
-    assertEquals("使用了 1 个读取、1 个搜索", group.title)
+    assertEquals("已处理 2 个操作", group.title)
     val searchItem = TranscriptRows.details(messages, group.key).first { it.kind == "tool" && it.title == "搜索内容" }
     assertTrue(searchItem.args.contains("include=*.kt"))
   }
@@ -189,15 +228,19 @@ class TranscriptRowsTest {
       "content":[{"type":"reasoning","text":"想一想"},{"type":"text","text":"答案"},{"type":"text","text":"补充"}]}""").toMessage()
     assertEquals(listOf("msg_a:reasoning:0", "msg_a:text:0", "msg_a:text:1"), message.parts.map { it.id })
     val rows = TranscriptRows.build(listOf(user("u1", t0), message))
-    assertEquals(1, rows.count { it.kind == "reasoning" })
-    assertEquals(2, rows.count { it.kind == "text" })
+    assertEquals(1, rows.count { it.kind == "tool-group" })
+    assertEquals(1, TranscriptRows.details(listOf(user("u1", t0), message), rows.single { it.kind == "tool-group" }.key).count { it.kind == "reasoning" })
+    assertEquals(1, rows.count { it.kind == "text" })
+    assertEquals("答案\n\n补充", rows.single { it.kind == "text" }.text)
     assertUniqueKeys(rows)
   }
 
   @Test fun idlessPartsAreKeyedByPositionWhenTheParserDidNotAssignIds() {
     val rows = TranscriptRows.build(listOf(user("u1", t0),
       assistant("a1", t0 + 500, part("", "reasoning", text = "r"), part("", "text", text = "x"), part("", "text", text = "y"))))
-    assertEquals(3, rows.count { it.kind == "reasoning" || it.kind == "text" })
+    assertEquals(1, rows.count { it.kind == "text" })
+    assertEquals("x\n\ny", rows.single { it.kind == "text" }.text)
+    assertEquals(1, rows.count { it.kind == "tool-group" })
     assertUniqueKeys(rows)
   }
 
@@ -210,7 +253,7 @@ class TranscriptRowsTest {
     val rows = TranscriptRows.build(messages)
     // One group for the whole span between user text and the turn end, even though call ids repeat.
     val group = rows.single { it.kind == "tool-group" }
-    assertEquals("使用了 2 个搜索、2 个Shell、2 个思考", group.title)
+    assertEquals("已处理 6 个操作", group.title)
     assertTrue(rows.none { it.kind == "tool" })
     assertUniqueKeys(rows)
     val details = TranscriptRows.details(messages, group.key)
@@ -234,6 +277,45 @@ class TranscriptRowsTest {
     val rebuilt = TranscriptRows.build(grown, setOf(groupKey))
     assertEquals(groupKey, rebuilt.single { it.kind == "tool-group" }.key)
     assertTrue(rebuilt.any { it.kind == "tool-body" })
+  }
+
+  @Test fun liveUpdatesKeepTheGroupAndSelectedToolKeysWhileReplacingOutput() {
+    val pending = tool("call_1", "bash", input = """{"command":"pwd"}""", status = "running")
+    val first = listOf(user("u1", t0), assistant("a1", t0 + 500, pending, completedAt = null))
+    val group = TranscriptRows.build(first, working = true).single { it.kind == "tool-group" }
+    val selected = TranscriptRows.details(first, group.key, working = true).single { it.kind == "tool" }
+    val finishedTool = pending.copy(status = "completed", output = "/workspace")
+    val finished = listOf(user("u1", t0), assistant("a1", t0 + 500, finishedTool),
+      assistant("a2", t0 + 1_500, part("answer", "text", text = "已确认工作目录")))
+    val rows = TranscriptRows.build(finished)
+    assertEquals(group.key, rows.single { it.kind == "tool-group" }.key)
+    assertEquals("completed", rows.single { it.kind == "tool-group" }.status)
+    val details = TranscriptRows.details(finished, group.key)
+    assertEquals(selected.key, details.single { it.kind == "tool" }.key)
+    assertEquals(finishedTool, details.single { it.kind == "tool" }.source)
+    assertTrue(details.any { it.bodyOf == selected.key && it.title == "输出" && it.text == "/workspace" })
+  }
+
+  @Test fun openingOneGroupDoesNotIncludeAnotherTurnsDetailsOrNotices() {
+    val messages = listOf(user("u1", t0), assistant("a1", t0 + 1, tool("t1", "bash", input = """{"command":"pwd"}""")),
+      notice("n1", t0 + 2, "skill", """"skill":"test","name":"testing","text":"private instructions" """),
+      user("u2", t0 + 3), assistant("a2", t0 + 4, tool("t2", "read", input = """{"filePath":"b.kt"}""")))
+    val groups = TranscriptRows.build(messages).filter { it.kind == "tool-group" }
+    val details = TranscriptRows.details(messages, groups.first().key)
+    assertTrue(details.all { it.detailOf == groups.first().key })
+    assertEquals(listOf("命令行"), details.filter { it.kind == "tool" }.map { it.title })
+    assertTrue(details.none { it.kind == "note" })
+  }
+
+  @Test fun readAndEditDetailsKeepPathsAndOriginalAndReplacementText() {
+    val read = tool("t1", "read", input = """{"filePath":"src/Main.kt"}""", output = "val x = 1")
+    assertEquals(listOf("文件路径", "内容"), TranscriptRows.toolSections(read).map { it.label })
+    assertEquals("src/Main.kt", TranscriptRows.toolSections(read).first().text)
+    val edit = tool("t2", "edit", input = """{"path":"src/Main.kt","oldString":"val x = 1","newString":"val x = 2"}""")
+    assertEquals(listOf("文件路径", "原内容", "新内容"), TranscriptRows.toolSections(edit).map { it.label })
+    assertEquals(listOf("src/Main.kt", "val x = 1", "val x = 2"), TranscriptRows.toolSections(edit).map { it.text })
+    val write = tool("t3", "write", input = """{"path":"src/New.kt","content":"val y = 3"}""")
+    assertEquals(listOf("文件路径", "内容"), TranscriptRows.toolSections(write).map { it.label })
   }
 
   @Test fun workingPlaceholderSaysRunningNotThinking() {
