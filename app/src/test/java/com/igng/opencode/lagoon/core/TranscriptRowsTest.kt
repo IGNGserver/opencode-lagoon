@@ -279,28 +279,40 @@ class TranscriptRowsTest {
     assertTrue(rebuilt.any { it.kind == "tool-body" })
   }
 
-  @Test fun runningTurnShowsProcessAndBatchInlineThenCollapsesOnCompletion() {
+  @Test fun runningTurnShowsOnlyProcessReportsAndCollapsedToolGroups() {
     val pending = tool("call_1", "bash", input = """{"command":"pwd"}""", status = "running")
     val running = listOf(user("u1", t0), assistant("a1", t0 + 500, part("p1", "text", text = "先确认目录"), pending, completedAt = null))
     val live = TranscriptRows.build(running, working = true)
-    // 运行中：过程回复内联，调用组成「正在进行第 1 轮调用」并保留调用本身可见。
+    // 运行中只内联过程报告；调用与思考折叠成一个小字分组，不再展开。
     assertEquals("先确认目录", live.single { it.kind == "process-output" }.text)
-    val batch = live.single { it.kind == "activity-batch" }
-    assertTrue(batch.title.contains("正在进行第 1 轮调用"))
+    val batch = live.single { it.kind == "tool-group" }
+    assertEquals("调用了 1 次工具", batch.title)
     assertEquals("running", batch.status)
-    assertEquals(pending, live.single { it.kind == "activity-tool" }.source)
+    assertTrue(live.none { it.kind == "tool" })
+    assertEquals(pending, TranscriptRows.details(running, batch.key, working = true).single { it.kind == "tool" }.source)
+
+    // 两段过程报告之间的所有调用合并为一组。
+    val mixed = listOf(user("u1", t0), assistant("a1", t0 + 500,
+      part("p1", "text", text = "第一段"),
+      tool("t1", "grep", input = """{"pattern":"a"}"""),
+      tool("t2", "read", input = """{"filePath":"a.kt"}"""),
+      part("p2", "text", text = "第二段"),
+      tool("t3", "bash", input = """{"command":"ls"}"""),
+      completedAt = null))
+    val split = TranscriptRows.build(mixed, working = true)
+    assertEquals(listOf("第一段", "第二段"), split.filter { it.kind == "process-output" }.map { it.text })
+    assertEquals(listOf("调用了 2 次工具", "调用了 1 次工具"), split.filter { it.kind == "tool-group" }.map { it.title })
 
     val finishedTool = pending.copy(status = "completed", output = "/workspace")
     val finished = listOf(user("u1", t0), assistant("a1", t0 + 500, part("p1", "text", text = "先确认目录"), finishedTool),
       assistant("a2", t0 + 1_500, part("answer", "text", text = "已确认工作目录")))
     val rows = TranscriptRows.build(finished)
-    // 完成后：整轮折叠为「共处理 N 个操作」+ 最终回复，过程不再内联。
+    // 完成后：整轮折叠为「共处理 N 个操作」+ 最终回复。
     val group = rows.single { it.kind == "tool-group" }
     assertEquals("共处理 1 个操作", group.title)
     assertEquals("completed", group.status)
     assertEquals("已确认工作目录", rows.single { it.kind == "text" }.text)
     assertTrue(rows.none { it.kind == "process-output" })
-    assertTrue(rows.none { it.kind == "activity-batch" })
     val details = TranscriptRows.details(finished, group.key)
     assertEquals(finishedTool, details.single { it.kind == "tool" }.source)
   }

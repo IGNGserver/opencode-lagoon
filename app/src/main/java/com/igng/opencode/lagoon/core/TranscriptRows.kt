@@ -166,7 +166,7 @@ object TranscriptRows {
       // A running turn stays transparent: each process reply is shown inline and every consecutive
       // batch of operations becomes its own group whose calls remain visible while they execute.
       // Only finished turns collapse into the「共处理 N 个操作」summary.
-      body += runningTurnRows(turnKey, process)
+      body += runningTurnRows(turnKey, process, expanded)
     } else if (process.isNotEmpty()) {
       body += toolGroupRows(turnKey, process, expanded, working = false)
     }
@@ -226,10 +226,11 @@ object TranscriptRows {
   }
 
   /**
-   * A running turn's transparent timeline: process replies inline, then each consecutive batch of
-   * operations as its own group. Mirrors「过程回复 + 一组调用 + 过程回复 + 正在进行的调用」.
+   * A running turn's transparent timeline: process replies inline, and each consecutive batch of
+   * operations collapsed into one small「调用了 N 次工具」group. Calls and thinking stay folded —
+   * only the process report is visible, exactly like a finished turn, and a group opens on tap.
    */
-  private fun runningTurnRows(turnKey: String, entries: List<Pair<String, MessagePart>>): List<TranscriptRow> {
+  private fun runningTurnRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> {
     val rows = mutableListOf<TranscriptRow>()
     var index = 0
     var batch = 0
@@ -244,53 +245,22 @@ object TranscriptRows {
       while (index < entries.size && entries[index].second.type != "text") { group += entries[index]; index++ }
       if (group.isEmpty()) { index++; continue }
       batch++
-      rows += runningBatchRows(turnKey, batch, group)
+      val tools = group.count { it.second.type == "tool" }
+      rows += activityGroupRows("$turnKey:batch:$batch", group, expanded, working = true,
+        title = if (tools > 0) "调用了 $tools 次工具" else "思考中")
     }
     return rows
-  }
-
-  /** One executing operation batch: a「正在进行第 N 轮调用」header with its calls and bodies inline. */
-  private fun runningBatchRows(turnKey: String, batch: Int, entries: List<Pair<String, MessagePart>>): List<TranscriptRow> {
-    val key = "$turnKey:batch:$batch"
-    val tools = entries.filter { it.second.type == "tool" }.map { it.second }
-    val reasonings = entries.filter { it.second.type == "reasoning" }.map { it.second }
-    val running = tools.any { it.status in setOf("running", "pending") } || reasonings.any { it.status == "running" }
-    val status = when { running -> "running"; tools.any { it.status == "error" } -> "error"; else -> "completed" }
-    val count = entries.count { it.second.type != "text" }
-    val header = TranscriptRow(key, "activity-batch", title = if (running) "正在进行第 $batch 轮调用 · $count 个操作" else "第 $batch 轮调用 · $count 个操作", status = status)
-    val children = mutableListOf<TranscriptRow>()
-    entries.forEachIndexed { position, (ref, part) ->
-      val occurrence = entries.take(position).count { it.first == ref }
-      val itemKey = "$key:$ref" + if (occurrence == 0) "" else "~${occurrence + 1}"
-      when (part.type) {
-        "reasoning" -> {
-          children += TranscriptRow(itemKey, "activity-reasoning", title = "深度思考", status = part.status, source = part)
-          reasoningBodies(null, itemKey, part.text.trim()).forEach { children += it }
-        }
-        "notice" -> children += TranscriptRow(itemKey, "note", title = part.title, text = part.text, status = part.status, target = part.target)
-        "file" -> children += TranscriptRow(itemKey, "attachment", attachments = listOf(Attachment(part.path, part.mime, part.title)), source = part)
-        else -> {
-          val (title, subtitle) = toolInfo(part)
-          children += TranscriptRow(itemKey, "activity-tool", title = title, subtitle = subtitle, args = toolArgs(part), status = part.status,
-            attachments = part.attachments, target = part.target.takeIf { part.tool in SUBAGENT_TOOLS }, source = part)
-          toolSections(part).flatMap { section ->
-            MarkdownBlocks.chunks(section.text).mapIndexed { index, chunk ->
-              TranscriptRow("$itemKey:${section.label}:$index", "tool-body", title = if (index == 0) section.label else "", text = chunk,
-                copyText = section.copyText?.takeIf { index == 0 }, bodyOf = itemKey)
-            }
-          }.forEach { children += it }
-        }
-      }
-    }
-    return listOf(header) + children
   }
 
   /**
    * One stable activity group per user turn, including intermediate text in chronological order.
    * Process output is visible in the activity list; tool/reasoning bodies are second-level details.
    */
-  private fun toolGroupRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, working: Boolean): List<TranscriptRow> {
-    val key = "$turnKey:activities"
+  private fun toolGroupRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, working: Boolean): List<TranscriptRow> =
+    activityGroupRows("$turnKey:activities", entries, expanded, working, "共处理 ${entries.count { it.second.type != "text" }} 个操作")
+
+  /** A collapsed operation group: a one-line summary, and its calls/bodies only after [expanded]. */
+  private fun activityGroupRows(key: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, working: Boolean, title: String): List<TranscriptRow> {
     val tools = entries.filter { it.second.type == "tool" }.map { it.second }
     val reasonings = entries.filter { it.second.type == "reasoning" }.map { it.second }
     val status = when {
@@ -306,8 +276,7 @@ object TranscriptRows {
     }.joinToString("、")
     val errorText = tools.firstOrNull { it.status == "error" && it.error.isNotBlank() }?.let { unwrapError(it.error) }
     val preview = errorText?.take(140) ?: tools.singleOrNull()?.let { toolInfo(it).second }.orEmpty()
-    val count = entries.count { it.second.type != "text" }
-    val row = TranscriptRow(key, "tool-group", title = "共处理 $count 个操作", subtitle = preview, meta = summary, status = status,
+    val row = TranscriptRow(key, "tool-group", title = title, subtitle = preview, meta = summary, status = status,
       target = tools.singleOrNull()?.takeIf { it.tool in SUBAGENT_TOOLS }?.target)
     if (key !in expanded) return listOf(row)
     val children = mutableListOf<TranscriptRow>()

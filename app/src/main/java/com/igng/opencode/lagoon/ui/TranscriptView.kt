@@ -247,9 +247,6 @@ private fun TranscriptRowView(row: TranscriptRow, onFile: (String) -> Unit, onOp
       QoderSummaryRow(row) { onActivityGroup(row) }
       row.target?.let { child -> TextButton(text = "打开子会话 ›", onClick = { onOpenChild(child) }, modifier = Modifier.padding(start = 16.dp)) }
     }
-    "activity-batch" -> InlineBatchRow(row)
-    "activity-tool" -> InlineToolRow(row)
-    "activity-reasoning" -> InlineReasoningRow(row)
     "process-output" -> SelectionContainer { Column(Modifier.fillMaxWidth()) { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, selectable = false) } } }
     "reasoning-body" -> SelectionContainer { Column(Modifier.fillMaxWidth().padding(start = 24.dp)) { parsed(row.key, row.text).forEach { block -> MarkdownBlockView(block, subdued = true, selectable = false) } } }
     "diff-summary" -> GroupRow(row) { onActivityGroup(row) }
@@ -325,49 +322,6 @@ private fun QoderSummaryRow(row: TranscriptRow, onClick: () -> Unit) {
     }
     if (running) { InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp); Spacer(Modifier.width(8.dp)) }
     QoderIcon(QoderGlyph.CHEVRON, Modifier.size(18.dp), MiuixTheme.colorScheme.onSurfaceVariantSummary)
-  }
-}
-
-/** Inline batch header for a running turn: a spinner while executing, a status dot once settled. */
-@Composable
-private fun InlineBatchRow(row: TranscriptRow) {
-  Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-    if (row.status in setOf("running", "pending")) {
-      InfiniteProgressIndicator(color = QoderColors.successColor, size = 16.dp, strokeWidth = 1.5.dp)
-      Spacer(Modifier.width(8.dp))
-    } else {
-      ToolStatusDot(row.status)
-      Spacer(Modifier.width(8.dp))
-    }
-    Text(row.title, modifier = Modifier.weight(1f),
-      style = MiuixTheme.textStyles.body1.copy(color = if (row.status == "error") MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurfaceVariantSummary))
-  }
-}
-
-/** Inline tool header shown while a turn runs; its input/output bodies follow as `tool-body` rows. */
-@Composable
-private fun InlineToolRow(row: TranscriptRow) {
-  Column(Modifier.fillMaxWidth().padding(start = 24.dp, top = 6.dp)) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      ToolStatusDot(row.status)
-      Spacer(Modifier.width(8.dp))
-      Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
-      row.args.forEach { arg -> Spacer(Modifier.width(6.dp)); ArgChip(arg) }
-    }
-    if (row.subtitle.isNotBlank()) Text(row.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-      style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-  }
-}
-
-/** Inline reasoning header; its body follows as `reasoning-body` rows while the turn runs. */
-@Composable
-private fun InlineReasoningRow(row: TranscriptRow) {
-  Row(Modifier.fillMaxWidth().padding(start = 24.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-    QoderIcon(QoderGlyph.THINK, Modifier.size(15.dp))
-    Spacer(Modifier.width(8.dp))
-    Text(row.title.ifBlank { "深度思考" }, style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-    if (row.status in setOf("running", "pending")) { Spacer(Modifier.width(8.dp)); InfiniteProgressIndicator(color = QoderColors.successColor, size = 14.dp, strokeWidth = 1.5.dp) }
   }
 }
 

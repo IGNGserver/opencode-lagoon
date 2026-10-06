@@ -93,7 +93,7 @@ internal fun VariantSelector(state: LagoonState, controller: LagoonController, m
   val current = state.model?.variant
   val label = variants.firstOrNull { it.id == current }?.label ?: "默认"
   Box(modifier) {
-    CapsuleSelector("思考强度：$label", { open = true }, enabled = enabled && variants.isNotEmpty(), maxTextWidth = 120.dp)
+    CapsuleSelector(label, { open = true }, enabled = enabled && variants.isNotEmpty(), maxTextWidth = 84.dp)
     if (variants.isNotEmpty()) MenuPopup(open, { open = false }, listOf(MenuSection(buildList {
       add(MenuAction("默认", selected = current == null) { state.model?.let { controller.chooseModel(it.copy(variant = null)) } })
       variants.forEach { variant -> add(MenuAction(variant.label, selected = current == variant.id) { state.model?.let { controller.chooseModel(it.copy(variant = variant.id)) } }) }
