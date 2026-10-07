@@ -1,7 +1,7 @@
 package com.igng.opencode.lagoon.core
 
 /**
- * 灵动岛展示的单个具体任务条目（最多提取前 3 个）。
+ * 系统实时更新总览里的单个具体任务条目（最多提取前 3 个）。
  */
 data class TaskSummaryItem(
   val sessionId: String,
@@ -11,7 +11,7 @@ data class TaskSummaryItem(
 )
 
 /**
- * 全服务器范围的任务计数与明细，供灵动岛 / 超级岛 / 实时通知复用同一份口径。
+ * 全服务器范围的任务计数与明细，供系统实时更新与 App 内任务状态复用同一份口径。
  *
  * 计数规则（已确认）：
  * - [running]：正在执行（THINKING / TOOL / SUBAGENT / TESTING）。

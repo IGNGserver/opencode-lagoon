@@ -77,7 +77,7 @@ class LiveUpdateContentTest {
 
   @Test fun transientTaskDetailDoesNotChangeTheIslandContent() {
     // The controller dedupes posts on this content: a running task changes `detail` on every tool step,
-    // and re-posting identical island content makes HyperOS replay its expand animation on the AOD island.
+    // and re-posting identical island content makes some systems replay their expand animation on the AOD island.
     val first = TaskSummary.of(mapOf("a" to TaskState("a", TaskPhase.TOOL, detail = "正在运行 shell", since = 1)), titles = mapOf("a" to "会话a"))
     val second = TaskSummary.of(mapOf("a" to TaskState("a", TaskPhase.TOOL, detail = "正在运行 read", since = 1)), titles = mapOf("a" to "会话a"))
     assertEquals(LiveUpdateContent.of(first), LiveUpdateContent.of(second))

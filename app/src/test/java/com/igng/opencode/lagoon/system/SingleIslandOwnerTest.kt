@@ -13,7 +13,7 @@ class SingleIslandOwnerTest {
   private fun source(path: String): String = listOf(File("app/$path"), File(path)).firstOrNull { it.isFile }?.readText()
     ?: error("找不到源文件：$path（工作目录 ${File(".").absolutePath}）")
 
-  @Test fun onlyTheSummaryRequestsPromotionAndVendorExtras() {
+  @Test fun onlyTheSummaryRequestsPromotion() {
     val text = source("src/main/java/com/igng/opencode/lagoon/system/TaskNotifications.kt")
     val summaryStart = text.indexOf("fun buildSummary(")
     val summaryEnd = text.indexOf("private fun summaryDismissed(")
@@ -21,7 +21,6 @@ class SingleIslandOwnerTest {
     val outside = text.removeRange(summaryStart, summaryEnd)
     assertEquals(1, Regex("setRequestPromotedOngoing").findAll(summaryBody).count())
     assertFalse(outside.contains("setRequestPromotedOngoing"))
-    assertFalse(outside.contains("IslandRegistry.extendAll"))
   }
 
   @Test fun inAppFakeIslandIsGone() {
@@ -29,7 +28,15 @@ class SingleIslandOwnerTest {
     assertFalse(source("src/main/java/com/igng/opencode/lagoon/ui/MainActivity.kt").contains("MiuixTaskIsland"))
   }
 
-  @Test fun xiaomiFocusTemplateIsNotWritten() {
-    assertFalse(source("src/main/java/com/igng/opencode/lagoon/system/IslandAdapters.kt").contains("putString(\"miui.focus.param\""))
+  @Test fun vendorIslandAdaptersAndExtrasAreGone() {
+    val systemDir = listOf(
+      File("app/src/main/java/com/igng/opencode/lagoon/system"),
+      File("src/main/java/com/igng/opencode/lagoon/system")
+    ).first { it.isDirectory }
+    assertFalse(File(systemDir, "IslandAdapters.kt").exists())
+    val text = systemDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.joinToString("\n") { it.readText() }
+    for (key in listOf("notification.superx", "miui.focus", "OppoFluidCloud", "islandHonor", "islandOppoFluidCloud")) {
+      assertFalse("厂商适配残留：$key", text.contains(key))
+    }
   }
 }

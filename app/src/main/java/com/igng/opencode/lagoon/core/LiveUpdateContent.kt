@@ -7,7 +7,7 @@ package com.igng.opencode.lagoon.core
  * - [SETTLED]：没有进行中的任务，只剩未读的完成 / 失败结果，降级为可划掉的普通通知。
  * - [EMPTY]：没有任何需要展示的内容，通知移除。
  *
- * 小米与 Google 的规范都要求实时更新只覆盖“有明确开始和结束、正在进行”的活动，
+ * Google 的规范要求实时更新只覆盖“有明确开始和结束、正在进行”的活动，
  * 所以结束后的结果不再常驻在岛上。
  */
 enum class LiveUpdateStage { ACTIVE, SETTLED, EMPTY }

@@ -93,23 +93,16 @@ class BoundaryRegressionTest {
     assertEquals(2,answer.getInt("count"));assertFalse(answer.has("hidden"))
     assertTrue(runCatching{formAnswer(form,listOf(listOf("fast"),listOf("2.5"),emptyList()))}.isFailure)
   }
-  @Test fun islandVendorSwitchesPersistWithoutTouchingCredentials() {
-    val p=memoryPreferences();val sec=memoryPreferences();val store=store(p,sec)
-    val original=ServerProfile("srv","Server","https://x",username="opencode")
-    store.save(original,"secret-password",credentialUsername="opencode")
-    store.updateIslandVendor(original.copy(islandHonor=true,islandOppoFluidCloud=true))
-    val reloaded=store.profiles().single()
-    assertTrue(reloaded.islandHonor);assertTrue(reloaded.islandOppoFluidCloud)
-    assertEquals("secret-password",store.credentials("srv").password)
-    assertEquals("https://x",reloaded.url)
-    // Values survive a full round-trip through the persisted JSON read by a fresh store instance.
-    val fresh=ServerStore(p,sec,{"encrypted:$it"},{require(it.startsWith("encrypted:"));it.removePrefix("encrypted:")})
-    assertTrue(fresh.profiles().single().islandHonor)
-  }
-  @Test fun islandVendorSwitchesDefaultOffAndRoundTrip() {
-    val store=store();store.save(profile("https://x"),"p",credentialUsername="opencode")
-    val p=store.profiles().single()
-    assertFalse(p.islandHonor);assertFalse(p.islandOppoFluidCloud)
+  @Test fun legacyIslandVendorKeysAreIgnoredAndDroppedOnSave() {
+    val p=memoryPreferences();val sec=memoryPreferences()
+    // 旧版本曾在服务器资料 JSON 里保存厂商通道开关；升级后必须能正常读取，并在下次保存时丢弃这些键。
+    p.edit().putString("profiles","""[{"id":"srv","name":"Server","url":"https://x","username":"opencode","autoConnect":true,"notifications":true,"allowCleartext":false,"islandHonor":true,"islandOppoFluidCloud":true}]""").commit()
+    val store=store(p,sec)
+    val loaded=store.profiles().single()
+    assertEquals("https://x",loaded.url)
+    store.save(loaded,"secret-password",credentialUsername="opencode")
+    val raw=p.getString("profiles","")!!
+    assertFalse(raw.contains("islandHonor"));assertFalse(raw.contains("islandOppoFluidCloud"))
   }
   @Test fun repeatedCursorFailsInsteadOfReturningPartialAuthoritativeData()=runBlocking {
     MockWebServer().use { s ->

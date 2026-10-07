@@ -33,7 +33,7 @@ class TaskMonitorService : Service() {
     val notifications = TaskNotifications(this)
     tracked += serverId to sessionId
     val controller = LagoonController.get(this)
-    // 前台服务复用「服务器总览」通知（灵动岛）本身，不再发第二条“任务监控中”常驻通知。
+    // 前台服务复用「服务器总览」通知（实时更新）本身，不再发第二条“任务监控中”常驻通知。
     // 通知 id 与控制器发布总览时相同，二者更新的是同一条通知。
     val foregroundId = TaskNotifications.summaryId(serverId)
     val summary = controller.state.value.summary
