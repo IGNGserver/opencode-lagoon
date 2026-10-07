@@ -7,7 +7,7 @@
 - 仅支持 OpenCode 2.x 服务端（`/api/*` 接口，以 `/api/info` 识别版本；1.x 已不再支持）；多服务器连接、Basic Auth/官方 pair 链接、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
 - 项目与会话、异步任务（运行中可继续发送以引导当前轮次）、Agent/Model、斜杠命令（走服务端 `/command`）、文本/Reasoning/Tool 消息、停止与权限/表单处理；时间线按官方客户端规则投影，系统指令、合成输入、技能等给模型看的记录只显示一行通知
 - 子会话、改动、文件浏览与搜索、重命名、删除；随版本变化的接口（重命名、恢复撤销、改动、已读同步）按实例 `/openapi.json` 选择
-- 全服务器任务总览灵动岛：实时显示「xx 个运行中、xx 个未读已完成」，有待处理时追加「xx 个待回复」、有失败时追加「xx 个失败」；同一口径按设备能力分发到各厂商灵动岛（小米超级岛、vivo 原子岛、Android 16 Live Updates / OPPO ColorOS 16 流体云），详见 `docs/ISLAND_ADAPTATION.md`
+- 全服务器任务总览：实时显示「xx 个运行中、xx 个未读已完成」，有待处理时追加「xx 个待回复」、有失败时追加「xx 个失败」；在 Android 16+ 以系统实时更新（Live Updates）显示在状态栏胶囊 / 锁屏卡片，外观由系统决定，详见 `docs/LIVE_UPDATES.md`
 - 本地前台监控与运行中、待处理、完成通知；任务总览仅统计未读结果，用户打开会话后即视为已读
 
 ## 本地构建
@@ -40,4 +40,4 @@ ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUni
 
 ## 验收边界
 
-Android 构建与单元测试只能证明代码可编译和有限的 API/状态逻辑。真实 OpenCode 版本、SSE 断线恢复、Android 16 Live Updates 提升、小米超级岛授权与展示都需要在目标服务器和设备上验收。Android 15+ 的 dataSync 前台服务有运行时长限制。
+Android 构建与单元测试只能证明代码可编译和有限的 API/状态逻辑。真实 OpenCode 版本、SSE 断线恢复、Android 16 Live Updates 提升都需要在目标服务器和设备上验收。Android 15+ 的 dataSync 前台服务有运行时长限制。

@@ -170,7 +170,7 @@ class LagoonController private constructor(private val appContext: Context) {
   private var reconcile: Job? = null
   /** 上一次真正下发到系统的岛内容指纹（服务器 + 落点 + 渲染后的文案），与瞬时的 detail 无关。 */
   private var lastSummary: Triple<String?, String?, LiveUpdateContent>? = null
-  /** 拆岛的延迟复核任务：瞬时非活跃不立即取消，避免澎湃息屏下反复消失/重弹。 */
+  /** 拆岛的延迟复核任务：瞬时非活跃不立即取消，避免息屏岛 / 胶囊反复消失与重弹。 */
   private var summarySettle: Job? = null
   private var visibleConversation: Pair<String, String>? = null
   private val seenEvents = linkedSetOf<String>()
@@ -200,8 +200,8 @@ class LagoonController private constructor(private val appContext: Context) {
     scope.launch { state.collect { state ->
       val profile = state.server
       // Dedupe on the content the system actually renders, not on the transient task detail: a running
-      // task changes detail on every tool step, and re-posting the same island each time makes HyperOS
-      // replay its expand animation on the AOD island.
+      // task changes detail on every tool step, and re-posting the same island each time makes some
+      // systems replay their expand animation on the AOD island.
       val signature = profile?.let { Triple(it.id, state.summaryTargetId, LiveUpdateContent.of(state.summary)) }
       if (signature != lastSummary) { lastSummary = signature; publishSummary(state); ensureMonitoring(state) }
     } }
@@ -213,8 +213,8 @@ class LagoonController private constructor(private val appContext: Context) {
       .onFailure { Diagnostics.warn("BackgroundSync", "无法安排后台定时刷新", it) }
   }
   /**
-   * 下发服务器总览（灵动岛）。真正开始时立即发布；一旦读到的不是 ACTIVE，先等一个短暂窗口复核，
-   * 只有持续非活跃才拆岛。多步任务在步骤之间会瞬时变为 idle，立即拆岛会让息屏超级岛反复消失/重弹。
+   * 下发服务器总览（实时更新）。真正开始时立即发布；一旦读到的不是 ACTIVE，先等一个短暂窗口复核，
+   * 只有持续非活跃才拆岛。多步任务在步骤之间会瞬时变为 idle，立即拆岛会让息屏岛 / 胶囊反复消失与重弹。
    */
   private fun publishSummary(state: LagoonState) {
     val profile = state.server ?: return
@@ -254,11 +254,6 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { it.copy(profiles = store.profiles()) }
     scheduleBackgroundSync()
     if (connect) connect(profile.id)
-  }
-  /** 持久化待合作灵动岛通道开关（荣耀 / OPPO 流体云），不触发重连。 */
-  fun setIslandVendor(profile: ServerProfile) {
-    store.updateIslandVendor(profile)
-    mutable.update { it.copy(profiles = store.profiles()) }
   }
   fun deleteServer(id: String) {
     if (mutable.value.serverId == id) {
@@ -695,7 +690,7 @@ class LagoonController private constructor(private val appContext: Context) {
         if (enteringTerminal && sessionId == state.value.sessionId && messageRefresh?.isActive != true) {
           state.value.session?.let { selected -> val token = generation; messageRefresh = scope.launch { delay(refreshMode.messageDebounceMs); loadSession(selected, ancillary = false, token = token) } }
         }
-        // 运行中的任务不再单独发通知：通知中心只保留灵动岛总览，结果由未读账本（recordNotice）通知，
+        // 运行中的任务不再单独发通知：通知中心只保留实时更新总览，结果由未读账本（recordNotice）通知，
         // 等待用户处理由 notifyAttention 通知；这样运行中的会话不会在通知中心堆积。
       }
     }

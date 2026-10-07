@@ -14,6 +14,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Lifecycle
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,8 +31,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import com.igng.opencode.lagoon.core.*
-import com.igng.opencode.lagoon.system.IslandRegistry
-import com.igng.opencode.lagoon.system.IslandSupport
+import com.igng.opencode.lagoon.system.LiveUpdateSupport
 import com.igng.opencode.lagoon.system.TaskNotifications
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -335,12 +335,21 @@ fun SettingsScreen(
   onBack: () -> Unit
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
-  // 当前设备实际生效的实时更新通道（只展示这一条，不再罗列每个品牌）。检测放到 IO 线程执行。
-  var islandCurrent by remember { mutableStateOf<IslandSupport?>(null) }
+  // 只展示系统标准实时更新的状态；不检测任何厂商通道。检测放到 IO 线程执行。
+  var notificationsEnabled by remember { mutableStateOf(true) }
+  var liveUpdate by remember { mutableStateOf<LiveUpdateSupport?>(null) }
   val lifecycleOwner = LocalLifecycleOwner.current
   val scope = rememberCoroutineScope()
-  fun refreshSupport() { scope.launch { islandCurrent = withContext(Dispatchers.IO) { IslandRegistry.current(context, state.server) } } }
-  DisposableEffect(lifecycleOwner, state.serverId) {
+  fun refreshSupport() {
+    scope.launch {
+      val (enabled, support) = withContext(Dispatchers.IO) {
+        NotificationManagerCompat.from(context).areNotificationsEnabled() to LiveUpdateSupport.detect(context)
+      }
+      notificationsEnabled = enabled
+      liveUpdate = support
+    }
+  }
+  DisposableEffect(lifecycleOwner) {
     val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refreshSupport() }
     lifecycleOwner.lifecycle.addObserver(observer); refreshSupport()
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -400,20 +409,20 @@ fun SettingsScreen(
     }
 
     item {
-      SmallTitle("超级岛与通知")
+      SmallTitle("任务通知")
       Card(Modifier.fillMaxWidth()) {
         SuperArrow(
-          title = "通知中心入口",
-          summary = "有任务运行或等你处理时，以系统「实时更新」显示运行中 / 待回复计数（状态栏胶囊、澎湃 OS 超级岛、ColorOS 流体云），外观与配色由系统决定",
+          title = "通知权限",
+          summary = if (notificationsEnabled) "已开启；待处理与任务结果会通知，点按打开系统通知设置" else "未开启，点按授予通知权限",
           onClick = onNotifications
         )
-        val item = islandCurrent
+        val item = liveUpdate
         if (item == null) {
-          BasicComponent(title = "当前模式", summary = "正在检测本机实时更新能力…")
+          BasicComponent(title = "系统实时更新", summary = "正在检测本机实时更新能力…")
         } else {
-          // 只显示当前生效的模式，不再把每个品牌都列一遍。
+          // 只有系统标准实时更新一条通道，不再罗列任何品牌。
           BasicComponent(
-            title = "当前模式：${item.label}",
+            title = "系统实时更新",
             summary = item.note,
             endActions = {
               Text(
@@ -432,7 +441,7 @@ fun SettingsScreen(
               )
             }
           )
-          if (item.vendor == "android" && item.supported && !item.granted) SuperArrow(
+          if (item.supported && !item.granted) SuperArrow(
             title = "开启实时更新权限",
             summary = "Android 16 实时更新需要单独授权",
             onClick = { TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } } }

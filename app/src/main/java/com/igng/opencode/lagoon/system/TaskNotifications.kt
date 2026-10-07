@@ -128,7 +128,7 @@ class TaskNotifications(private val context: Context) {
 
   /**
    * Server-wide summary. While tasks run or wait for the user it is an ongoing, promoted
-   * notification (Android 16 Live Update: status bar chip / HyperOS Super Island); once everything has
+   * notification (Android 16 Live Update: status bar chip / lock screen card); once everything has
    * settled it is demoted to an ordinary, dismissible notification. Look and colors are left to the
    * system; this only supplies content.
    */
@@ -142,7 +142,7 @@ class TaskNotifications(private val context: Context) {
       .setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
       .setOngoing(active).setAutoCancel(!active)
       .setOnlyAlertOnce(true).setShowWhen(false)
-      // 内容级更新不应触发声音/横幅；澎湃超级岛只应按内容变化做平滑更新，而不是重放“收到通知”动画。
+      // 内容级更新不应触发声音/横幅；同一内容重复下发时只应平滑更新，而不是重放“收到通知”动画。
       .setSilent(true)
       .setCategory(if (active) NotificationCompat.CATEGORY_PROGRESS else NotificationCompat.CATEGORY_STATUS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -150,9 +150,7 @@ class TaskNotifications(private val context: Context) {
       .setDeleteIntent(summaryDismissed(profile.id, content.stage))
     if (active) builder.setShortCriticalText(content.shortCriticalText)
     (targetSessionId ?: content.headlineSessionId)?.let { builder.setContentIntent(open(profile.id, it)) }
-    val notification = builder.build()
-    IslandRegistry.extendAll(context, profile, notification, content.title, content.expandedText, running = active, summary = summary)
-    return notification
+    return builder.build()
   }
 
   private fun summaryDismissed(serverId: String, stage: LiveUpdateStage): PendingIntent {
