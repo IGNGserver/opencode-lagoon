@@ -48,7 +48,7 @@ class LiveUpdateContentTest {
     val content = LiveUpdateContent.of(summary(Triple("a", TaskPhase.THINKING, 1), Triple("b", TaskPhase.WAITING_QUESTION, 2)))
     assertEquals("1 个任务待你处理", content.title)
     assertEquals("b", content.headlineSessionId)
-    assertEquals("会话b", content.text)
+    assertEquals("1个运行中，0个已完成，1个待回复", content.text)
     assertEquals("2 个任务运行中", LiveUpdateContent.of(summary(Triple("a", TaskPhase.THINKING, 1), Triple("b", TaskPhase.TOOL, 2))).title)
   }
 
@@ -61,7 +61,7 @@ class LiveUpdateContentTest {
       Triple("a", TaskPhase.THINKING, 4), Triple("b", TaskPhase.TOOL, 3),
       Triple("c", TaskPhase.COMPLETED, 2), Triple("d", TaskPhase.COMPLETED, 1)
     ))
-    assertEquals("运行中 · 会话a\n运行中 · 会话b\n已完成 · 会话c\n另有 1 个任务", content.expandedText)
+    assertEquals("2个运行中，2个已完成\n运行中 · 会话a\n运行中 · 会话b\n已完成 · 会话c\n另有 1 个任务", content.expandedText)
     assertFalse(content.expandedText.contains("●"))
     assertFalse(content.expandedText.contains("["))
   }
