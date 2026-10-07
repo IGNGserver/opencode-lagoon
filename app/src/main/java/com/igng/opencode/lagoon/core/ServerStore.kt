@@ -148,9 +148,30 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     val json = JSONObject(preferences.getString("modelVisibility:$id", "{}").orEmpty())
     json.keys().asSequence().associateWith { json.optBoolean(it) }
   }.getOrDefault(emptyMap())
+  /** Whether this server has an explicit model allow-list.  An empty map alone cannot represent that state. */
+  fun modelVisibilityConfigured(id: String): Boolean =
+    if (preferences.contains("modelVisibilityConfigured:$id")) preferences.getBoolean("modelVisibilityConfigured:$id", false)
+    else preferences.contains("modelVisibility:$id")
+  fun rememberModelOverrides(id: String, overrides: Map<String, Boolean>) {
+    val json = JSONObject().apply { overrides.forEach { (key, visible) -> put(key, visible) } }
+    preferences.edit().putString("modelVisibility:$id", json.toString()).putBoolean("modelVisibilityConfigured:$id", true).apply()
+  }
   fun rememberModelOverride(id: String, key: String, visible: Boolean) {
-    val json = JSONObject(modelOverrides(id) + (key to visible))
-    preferences.edit().putString("modelVisibility:$id", json.toString()).apply()
+    rememberModelOverrides(id, modelOverrides(id) + (key to visible))
+  }
+  /** Clears the local allow-list; the next catalog read exposes every server model again. */
+  fun clearModelVisibility(id: String) {
+    preferences.edit().remove("modelVisibility:$id").remove("modelVisibilityConfigured:$id").apply()
+  }
+  /** Local variant selection, keyed by provider/model.  Missing keys mean the server default. */
+  fun modelVariants(id: String): Map<String, String> = runCatching {
+    val json = JSONObject(preferences.getString("modelVariants:$id", "{}").orEmpty())
+    json.keys().asSequence().mapNotNull { key -> json.optString(key).takeIf(String::isNotBlank)?.let { key to it } }.toMap()
+  }.getOrDefault(emptyMap())
+  fun rememberModelVariant(id: String, key: String, variant: String?) {
+    val json = JSONObject(preferences.getString("modelVariants:$id", "{}").orEmpty())
+    if (variant.isNullOrBlank()) json.remove(key) else json.put(key, variant)
+    preferences.edit().putString("modelVariants:$id", json.toString()).apply()
   }
   /** Most recently chosen models first, at most five like the official selector. */
   fun recentModels(id: String): List<String> = runCatching {
@@ -320,7 +341,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     } }
     val editor = preferences.edit().putString("profiles", json.toString()).remove("directories:$id").remove("sessionNotices:$id").remove("collapsedSections:$id").remove("collapsedProjects:$id").remove("pinned:$id")
       .remove("backgroundRunning:$id")
-      .remove("modelVisibility:$id").remove("recentModels:$id").remove("scope:$id")
+      .remove("modelVisibility:$id").remove("modelVisibilityConfigured:$id").remove("modelVariants:$id").remove("recentModels:$id").remove("scope:$id")
     val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "notification").map { "$it:$id:" }
     preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
     editor.apply()

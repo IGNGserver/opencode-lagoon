@@ -53,7 +53,11 @@ data class LagoonState(
   val children: List<Session> = emptyList(), val changes: List<FileChange> = emptyList(),
   val agents: List<AgentChoice> = emptyList(), val models: List<ModelChoice> = emptyList(), val commands: List<CommandChoice> = emptyList(),
   /** [models] with catalog metadata; visibility follows [ModelVisibility] plus this phone's switches. */
-  val modelCatalog: List<ModelInfo> = emptyList(), val modelOverrides: Map<String, Boolean> = emptyMap(), val recentModels: List<String> = emptyList(),
+  val modelCatalog: List<ModelInfo> = emptyList(), val modelOverrides: Map<String, Boolean> = emptyMap(),
+  /** False means the server's complete catalog is shown; true means [modelOverrides] is an allow-list. */
+  val modelVisibilityConfigured: Boolean = false,
+  /** Per-server variant selections keyed by provider/model; values are always server-provided ids. */
+  val modelVariants: Map<String, String> = emptyMap(), val recentModels: List<String> = emptyList(),
   /** Files picked on this phone, per session (`draft` before a session exists), until they are sent. */
   val pendingAttachments: Map<String, List<LocalAttachment>> = emptyMap(),
   val agent: String? = null, val model: ModelChoice? = null,
@@ -99,7 +103,7 @@ data class LagoonState(
   /** 首页当前服务器可用的执行目录：项目 → 最近会话。用于未打开会话时也能按首页选中的服务器加载模型目录。 */
   val homeDirectory: String? get() = project?.directory ?: sessions.firstOrNull()?.directory
   val attachments: List<LocalAttachment> get() = pendingAttachments[attachmentKey(sessionId)].orEmpty()
-  val visibleModels: List<ModelInfo> get() = ModelVisibility.visible(modelCatalog, modelOverrides)
+  val visibleModels: List<ModelInfo> get() = ModelVisibility.visibleConfigured(modelCatalog, modelOverrides, modelVisibilityConfigured)
   fun pending(action: String): Boolean = pendingOperations.contains(operationKey(serverId, sessionId, projectId, action))
   fun resource(name: String): ResourceStatus = resources[name] ?: ResourceStatus()
   fun title(session: Session): String = session.displayTitle()
@@ -351,7 +355,8 @@ class LagoonController private constructor(private val appContext: Context) {
       agent = configuration.agent, model = configuration.model, agentChanged = configuration.agentChanged, modelChanged = configuration.modelChanged,
       draft = rememberedSession?.let { store.draft(id, it) }.orEmpty(), references = rememberedSession?.let { store.references(id, it) }.orEmpty(),
       tasks = store.taskStates(id), knownParents = store.taskParents(id), notices = store.sessionNotices(id), collapsedSections = store.collapsedSections(id), pinned = store.pinnedSessions(id),
-      modelOverrides = store.modelOverrides(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
+      modelOverrides = store.modelOverrides(id), modelVisibilityConfigured = store.modelVisibilityConfigured(id),
+      modelVariants = store.modelVariants(id), recentModels = store.recentModels(id), scopeProjectId = store.scope(id),
       message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     connecting = scope.launch {
       try {
@@ -601,8 +606,9 @@ class LagoonController private constructor(private val appContext: Context) {
       current.session?.let { loadSession(it, token = token, ancillary = false) }
       return
     }
-    // 未打开会话时也按首页选中的服务器加载模型目录（项目 → 最近会话目录），管理模型因此不再依赖会话。
-    current.homeDirectory?.let { directory -> loadChoices(directory, token) }
+     // 未打开会话时也按首页选中的服务器加载模型目录（项目 → 最近会话目录），管理模型因此不再依赖会话。
+     // 没有项目/会话时传空目录，让服务器按自己的默认工作区返回模型目录。
+     loadChoices(current.homeDirectory.orEmpty(), token)
     current.session?.let { loadSession(it, token = token) }
   }
   fun loadMoreSessions() = act("sessions-more") { op ->
@@ -1004,6 +1010,31 @@ class LagoonController private constructor(private val appContext: Context) {
     val token = generation
     scope.launch { loadChoices(project.directory, token) }
   }
+  /**
+   * Applies the phone's per-model variant selection without ever inventing a variant.  A stale
+   * persisted id is removed when the server no longer advertises it, which makes the request fall
+   * back to the server default on the next send.
+   */
+  private fun normalizeModelVariant(serverId: String, model: ModelChoice, catalog: List<ModelInfo>): ModelChoice {
+    val info = catalog.firstOrNull { it.key == modelKey(model) } ?: return model
+    val ids = info.variants.map { it.id }.toSet()
+    val stored = store.modelVariants(serverId)[info.key]
+    val selected = when {
+      stored != null && stored in ids -> stored
+      stored != null -> {
+        store.rememberModelVariant(serverId, info.key, null)
+        null
+      }
+      model.variant != null && model.variant in ids -> {
+        // A model read from an existing server session is the same source of truth the official
+        // client uses to initialize its local variant map.
+        store.rememberModelVariant(serverId, info.key, model.variant)
+        model.variant
+      }
+      else -> null
+    }
+    return info.choice.copy(variant = selected)
+  }
   private suspend fun loadChoices(directory: String, token: Int = generation) {
     val client = api ?: return
     // Agents, models and commands are independent; one parallel round instead of three.
@@ -1014,10 +1045,15 @@ class LagoonController private constructor(private val appContext: Context) {
       val commandsTask = async { attempt { client.commands(directory) } }
       Triple(agentsTask.await(), modelsTask.await(), commandsTask.await())
     }
-    if (token == generation && revision == selectionRevision && (mutable.value.executionDirectory ?: mutable.value.homeDirectory) == directory) {
+    val expectedDirectory = mutable.value.executionDirectory ?: mutable.value.homeDirectory
+    if (token == generation && revision == selectionRevision && (expectedDirectory == null || expectedDirectory == directory)) {
       mutable.update { current ->
         val catalog = models.getOrDefault(current.modelCatalog)
-        current.copy(agents = agents.getOrDefault(current.agents), models = catalog.map { it.choice }, modelCatalog = catalog, commands = commands.getOrDefault(current.commands),
+        val serverId = current.serverId
+        val model = if (serverId == null) current.model else current.model?.let { normalizeModelVariant(serverId, it, catalog) }
+        current.copy(agents = agents.getOrDefault(current.agents), models = catalog.map { it.choice }, modelCatalog = catalog,
+          model = model, modelChanged = current.modelChanged || model?.variant != current.model?.variant,
+          modelVariants = serverId?.let(store::modelVariants) ?: current.modelVariants, commands = commands.getOrDefault(current.commands),
           resources = current.resources + mapOf("agents" to agents.resourceStatus(), "models" to models.resourceStatus(), "commands" to commands.resourceStatus()))
       }
     }
@@ -1131,7 +1167,11 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { it.copy(messages = messages, cached = result.isFailure, messagesCursor = if (it.loadedOlderMessages) it.messagesCursor else nextCursor, cacheComplete = result.isSuccess || cache.messagesComplete(serverId, session.id),
       previews = it.previews + (session.id to preview),
       agent = if (it.agentChanged) it.agent else latestAgent,
-      model = if (it.modelChanged) it.model else latestModel,
+      model = if (it.modelChanged) it.model else latestModel?.let { candidate ->
+        if (it.modelCatalog.isEmpty()) candidate else normalizeModelVariant(serverId, candidate, it.modelCatalog)
+      },
+      modelChanged = it.modelChanged || (!it.modelChanged && latestModel != null && it.modelCatalog.isNotEmpty() &&
+        normalizeModelVariant(serverId, latestModel, it.modelCatalog).variant != latestModel.variant),
       resources = it.resources + ("messages" to ResourceStatus(if (result.isSuccess) { if (messages.none { message -> message.isDisplayable }) ResourceState.EMPTY else ResourceState.READY } else ResourceState.STALE))) }
     // Opening a session never infers a result from its history: “已完成” exists only in the ledger.
     if (ancillary) {
@@ -1150,19 +1190,50 @@ class LagoonController private constructor(private val appContext: Context) {
   fun chooseAgent(name: String?) {
     mutable.update { it.copy(agent = name ?: it.messages.asReversed().firstNotNullOfOrNull { message -> message.agent } ?: it.session?.agent, agentChanged = name != null) }; rememberConfiguration()
   }
+  private fun selectedModel(model: ModelChoice): ModelChoice {
+    val server = state.value.serverId ?: return model.copy(variant = null)
+    val info = state.value.modelCatalog.firstOrNull { it.key == modelKey(model) } ?: return model.copy(variant = null)
+    val stored = store.modelVariants(server)[info.key]
+    val variant = stored?.takeIf { candidate -> info.variants.any { it.id == candidate } }
+    if (stored != null && variant == null) store.rememberModelVariant(server, info.key, null)
+    return info.choice.copy(variant = variant)
+  }
   fun chooseModel(model: ModelChoice?) {
-    mutable.update { it.copy(model = model ?: it.messages.asReversed().firstNotNullOfOrNull { message -> message.model } ?: it.session?.model, modelChanged = model != null) }; rememberConfiguration()
+    val next = model?.let(::selectedModel) ?: state.value.messages.asReversed().firstNotNullOfOrNull { it.model } ?: state.value.session?.model
+    mutable.update { it.copy(model = next, modelChanged = model != null) }; rememberConfiguration()
     val server = state.value.serverId ?: return
     if (model != null) {
       store.rememberRecentModel(server, modelKey(model))
       mutable.update { it.copy(recentModels = store.recentModels(server)) }
     }
   }
+  /** Selects a server-advertised variant for the current model; null means the server default. */
+  fun chooseVariant(variant: String?) {
+    val current = state.value.model ?: return
+    val server = state.value.serverId ?: return
+    val info = state.value.modelCatalog.firstOrNull { it.key == modelKey(current) } ?: return
+    val selected = variant?.takeIf { id -> info.variants.any { it.id == id } }
+    store.rememberModelVariant(server, info.key, selected)
+    mutable.update { it.copy(model = info.choice.copy(variant = selected), modelChanged = true, modelVariants = store.modelVariants(server)) }
+    rememberConfiguration()
+  }
   /** A switch from the phone's "管理模型" list; it overrides the official default rule for this server. */
   fun setModelVisible(model: ModelInfo, visible: Boolean) {
     val server = state.value.serverId ?: return
-    store.rememberModelOverride(server, model.key, visible)
-    mutable.update { it.copy(modelOverrides = it.modelOverrides + (model.key to visible)) }
+    val current = state.value
+    // The first edit materializes the current all-visible catalog as an allow-list, so changing one
+    // switch does not accidentally hide every other model.
+    val baseline = if (current.modelVisibilityConfigured) current.modelOverrides
+    else current.modelCatalog.associate { it.key to true }
+    val next = baseline + (model.key to visible)
+    store.rememberModelOverrides(server, next)
+    mutable.update { it.copy(modelOverrides = next, modelVisibilityConfigured = true) }
+  }
+  /** Returns to the unconfigured state: every model currently offered by the server is visible. */
+  fun resetModelVisibility() {
+    val server = state.value.serverId ?: return
+    store.clearModelVisibility(server)
+    mutable.update { it.copy(modelOverrides = emptyMap(), modelVisibilityConfigured = false) }
   }
   /** Copies picked phone files into the cache off the main thread; each rejection is reported once. */
   fun addLocalAttachments(uris: List<android.net.Uri>) {
