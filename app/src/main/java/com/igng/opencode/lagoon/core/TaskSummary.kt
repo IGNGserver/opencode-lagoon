@@ -140,7 +140,9 @@ data class TaskSummary(
         return id
       }
       return tasks.values.groupBy { root(it.sessionId) }.mapValues { (id, values) ->
-        values.maxBy { priority(it) }.copy(sessionId = id)
+        // 同优先级时优先折算出的后台任务：同一家族里“后台任务运行中”的明细比子任务的“运行中”更能
+        // 说明根会话为什么还活着。
+        values.maxWith(compareBy<TaskState> { priority(it) }.thenBy { it.background }).copy(sessionId = id)
       }
     }
 

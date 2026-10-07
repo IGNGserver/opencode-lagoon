@@ -101,6 +101,21 @@ data class ModelChoice(val providerId: String, val modelId: String, val label: S
 data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
 
+/**
+ * 一条运行中的 shell 作业（`GET /api/shell` 的 `Shell.Info` 或 `shell.created` 事件）。
+ * [sessionId] 来自服务端写入的 `metadata.sessionID`；后台 shell 不是会话，因此不在
+ * `/api/session/active` 里，需要单独跟踪（对齐官方 `packages/app/src/session/requests/background.ts`）。
+ */
+data class ShellJob(
+  val id: String,
+  val sessionId: String,
+  val command: String,
+  val started: Long,
+  val directory: String,
+  /** 本机观测时间：目录读取失败时用于过期旧条目，避免事件丢失后“后台运行中”僵死。 */
+  val observedAt: Long = System.currentTimeMillis()
+)
+
 enum class TaskPhase { IDLE, THINKING, TOOL, SUBAGENT, TESTING, WAITING_PERMISSION, WAITING_QUESTION, COMPLETED, FAILED, ABORTED, DISCONNECTED }
 data class TaskState(
   val sessionId: String,
@@ -115,9 +130,10 @@ data class TaskState(
    */
   val activeAt: Long = -1,
   /**
-   * 该会话已把阻塞工具/子代理转入后台（服务端写入“backgrounded work is still unfinished”合成消息），
-   * 后台工作尚未完成。此时即使根执行已经 succeed，也应继续显示“后台运行中”，直到后台工作完成、
-   * 服务端重新唤醒 AI（新的 `session.execution.started`）。
+   * 该会话所属家族仍有“根执行结束后会重新唤醒会话”的后台工作：运行中的后台 shell、或仍在执行的
+   * 子代理会话。此时即使根执行已经 settle（或已由 [BackgroundWork.fold] 折算），也应继续显示
+   * “后台运行中”，直到后台工作完成、服务端重新唤醒 AI（新的 `session.execution.started`）。
+   * 旧的“用户显式转后台”合成消息标记也仍会置位这里（[TaskReducer.BACKGROUND_MARKER]）。
    */
   val background: Boolean = false
 ) {
@@ -361,6 +377,17 @@ internal fun JSONObject.toChange(): FileChange = FileChange(
   patch = str("patch")
 )
 
+/**
+ * One running shell (`Shell.Info`). The server's `shell.list` already returns running commands only;
+ * the guard keeps `shell.created` and defensive parsing on the same contract.
+ */
+internal fun JSONObject.toShellJob(directory: String): ShellJob? {
+  val id = str("id")
+  val sessionId = obj("metadata").str("sessionID")
+  if (id.isBlank() || sessionId.isBlank() || str("status") != "running") return null
+  return ShellJob(id, sessionId, str("command"), obj("time").optLong("started"), directory)
+}
+
 object TaskReducer {
   private val TEST_COMMAND = Regex("(?i)(test|gradle|pytest|vitest|jest)")
 
@@ -381,7 +408,8 @@ object TaskReducer {
       TaskState(sessionId, if (continuing) previous!!.phase else TaskPhase.THINKING, TaskState.RUNNING_DETAIL,
         if (continuing) previous!!.since else System.currentTimeMillis(),
         activeAt = if (continuing && previous!!.activeAt >= 0) previous!!.activeAt else idleBaseline,
-        background = continuing && previous!!.background)
+        // 会话自身在执行中一律是“运行中”；后台工作只在其 settle 后决定是否折算为“后台运行中”。
+        background = false)
     }
     previous?.active == true -> previous!!
     previous?.phase in TaskState.TERMINAL_PHASES -> previous!!
@@ -410,22 +438,28 @@ object TaskReducer {
     TaskState(sessionId, phase, detail, since, activeAt = previous?.activeAt ?: -1L, background = previous?.background == true)
 
   /** 显式 idle 信号（`session.idle` / `session.status` idle）：权威收尾一轮；后台工作未完成时保持运行。 */
-  private fun idle(sessionId: String, previous: TaskState?): TaskState? = when {
+  private fun idle(sessionId: String, previous: TaskState?, backgroundWork: Boolean): TaskState? = when {
     previous == null -> null
     previous.background -> previous
+    // 后台工作派生（官方 background 算法）显示还有 shell/子会话在跑：折算为“后台运行中”而不是收尾。
+    backgroundWork -> TaskState(sessionId, TaskPhase.THINKING, TaskState.BACKGROUND_DETAIL, previous.since,
+      activeAt = previous.activeAt.takeIf { it > 0 } ?: System.currentTimeMillis(), background = true)
     previous.active -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since,
       previous.activeAt.takeIf { it > 0 } ?: System.currentTimeMillis())
     else -> null
   }
 
   /** Reduces one `/api/event` frame; null means the event does not change the task phase. */
-  fun event(sessionId: String, type: String, properties: JSONObject, previous: TaskState?, timestamp: Long = 0): TaskState? {
+  fun event(sessionId: String, type: String, properties: JSONObject, previous: TaskState?, timestamp: Long = 0,
+    backgroundWork: Boolean = false): TaskState? {
     val since = previous?.since ?: System.currentTimeMillis()
     val at = timestamp.takeIf { it > 0 } ?: System.currentTimeMillis()
     return when (type) {
       "session.execution.started" -> status(sessionId, true, previous?.takeIf { it.active }, at).copy(background = false)
       // 后台工作未完成时，根执行 settle 不代表会话结束：继续显示“后台运行中”，等后台完成唤醒 AI。
-      "session.execution.succeeded" -> if (previous?.background == true)
+      // [backgroundWork] 是控制器按官方算法派生的实时结果（后台 shell / 子代理），[previous.background]
+      // 保留“用户显式转后台”合成消息的标记路径。
+      "session.execution.succeeded" -> if (backgroundWork || previous?.background == true)
         TaskState(sessionId, TaskPhase.THINKING, TaskState.BACKGROUND_DETAIL, since, activeAt = at, background = true)
         else TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", since, at)
       "session.execution.failed" -> TaskState(sessionId, TaskPhase.FAILED, properties.obj("error").str("message").ifBlank { "执行失败" }, since, at)
@@ -434,10 +468,10 @@ object TaskReducer {
         else TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, at)
       "session.status" -> when (properties.obj("status").str("type")) {
         "busy", "retry" -> running(sessionId, TaskPhase.THINKING, previous, since, at)
-        "idle" -> idle(sessionId, previous)
+        "idle" -> idle(sessionId, previous, backgroundWork)
         else -> previous
       }
-      "session.idle" -> idle(sessionId, previous)
+      "session.idle" -> idle(sessionId, previous, backgroundWork)
       "session.error" -> TaskState(sessionId, TaskPhase.FAILED,
         properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since, at)
       // 服务端把阻塞工具/子代理转入后台时写入的合成消息：标记后台工作，直到后台完成重新唤醒 AI。

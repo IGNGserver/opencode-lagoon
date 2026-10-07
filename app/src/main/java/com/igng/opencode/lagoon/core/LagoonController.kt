@@ -82,6 +82,11 @@ data class LagoonState(
    * 当前仍活跃的保留，运行结束后自动移除。
    */
   val backgroundRunning: Set<String> = emptySet(),
+  /**
+   * 运行中的 shell 作业（`GET /api/shell` 与 `shell.created/exited/deleted` 事件），按 shell id 索引。
+   * 后台 shell 不是会话，[tasks] 里看不到它；它是“后台任务运行中”判定的一部分（见 [BackgroundWork]）。
+   */
+  val shells: Map<String, ShellJob> = emptyMap(),
   /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
   val summaryTargetId: String? = null
 ) {
@@ -120,29 +125,75 @@ class LagoonController private constructor(private val appContext: Context) {
     private const val MAX_REQUEST_SESSIONS = 24
     /** Extra pages the initial load may pull so the first screen starts on a whole turn (official behaviour). */
     private const val MAX_INITIAL_PAGES = 5
+    /** 一次对账最多读取多少个目录的 shell 列表（首页项目优先，其次是最近活跃会话的目录）。 */
+    private const val MAX_SHELL_DIRECTORIES = 8
+    /** shell 归属会话不在目录页时，最多补读多少个会话身份来解析父链。 */
+    private const val MAX_SHELL_SESSIONS = 12
+    /** 后台工作结束后等待服务端唤醒的宽限期；超时仍无新执行才按会话结局收尾。 */
+    private const val BACKGROUND_SETTLE_MILLIS = 10_000L
+    /** 目录读取失败时旧 shell 条目的最长保留时间，避免事件丢失后“后台运行中”僵死。 */
+    private const val SHELL_TTL_MILLIS = 5 * 60_000L
   }
   /**
    * Recomputes the server-wide island summary and persists live task state. Persisted running states are
    * what lets a later refresh — even after the process was frozen or killed — notice that a run this device
    * saw has ended and record it as an unread result.
+   *
+   * 后台 shell / 子代理折算成根会话的活跃任务（[BackgroundWork.fold]）后，首页、灵动岛、通知与前台
+   * 服务用同一份 [tasks] 口径显示“后台运行中”；折算态若已无后台工作，安排一次宽限收尾。
    */
   private fun withSummary(state: LagoonState): LagoonState {
-    state.serverId?.let { server -> state.tasks.values.forEach { store.rememberTask(server, it, state.parents[it.sessionId]) } }
-    val titles = state.sessions.associate { it.id to state.title(it) }
-    val active = state.activeRootTasks
+    val folded = BackgroundWork.fold(state.tasks, state.shells, state.parents)
+    val next = if (folded === state.tasks) state else state.copy(tasks = folded)
+    next.serverId?.let { server -> next.tasks.values.forEach { store.rememberTask(server, it, next.parents[it.sessionId]) } }
+    val work = BackgroundWork.workRoots(next.tasks, next.shells, next.parents)
+    next.tasks.values.filter { it.active && it.background && it.sessionId !in work }.forEach { scheduleBackgroundSettle(it.sessionId) }
+    val titles = next.sessions.associate { it.id to next.title(it) }
+    val active = next.activeRootTasks
     // “后台运行中”= 根会话自身没有在跑，只有它派生的后台/子任务在跑（主线程在等后台任务），
     // 而不是“应用退到过后台”。后者会把所有正在运行的会话都误标成后台运行中。
-    val background = TaskSummary.backgroundRoots(state.tasks, state.parents)
-    val summary = TaskSummary.of(state.tasks, state.notices, state.parents, titles, background)
-    return state.copy(
+    val background = TaskSummary.backgroundRoots(next.tasks, next.parents)
+    val summary = TaskSummary.of(next.tasks, next.notices, next.parents, titles, background)
+    return next.copy(
     summary = summary,
     backgroundRunning = background,
     // Prefer the session that needs a reply, then the newest unread result; otherwise the summary's
     // headline task, so tapping the island always lands somewhere, including when tasks are only running.
     summaryTargetId = active.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
-      ?: state.notices.filter { !it.viewed && it.sessionId !in active }.maxByOrNull { it.time }?.sessionId
+      ?: next.notices.filter { !it.viewed && it.sessionId !in active }.maxByOrNull { it.time }?.sessionId
       ?: summary.items.firstOrNull()?.sessionId
   )
+  }
+
+  /**
+   * 后台工作结束后没等到服务端唤醒时的兜底收尾（正常路径下后台完成会写合成消息并立刻唤醒会话，
+   * 新的 `session.execution.started` 会覆盖折算态，这里不会触发）。按会话持久化的结局写未读结果，
+   * 与对账路径的 `transitionNotice` 同一口径。
+   */
+  private fun scheduleBackgroundSettle(root: String) {
+    if (backgroundSettles.containsKey(root)) return
+    backgroundSettles[root] = scope.launch {
+      delay(BACKGROUND_SETTLE_MILLIS)
+      backgroundSettles.remove(root)
+      settleBackgroundRun(root)
+    }
+  }
+
+  private fun settleBackgroundRun(root: String) {
+    val current = state.value
+    val task = current.tasks[root] ?: return
+    if (!task.active || !task.background) return
+    if (BackgroundWork.hasBackgroundWork(root, current.tasks, current.shells, current.parents)) return
+    val session = current.sessions.firstOrNull { it.id == root } ?: return
+    val server = current.serverId ?: return
+    mutable.update { previous ->
+      val live = previous.tasks[root]
+      if (live == null || !live.active || !live.background) previous
+      else withSummary(previous.copy(tasks = previous.tasks + (root to TaskReducer.terminal(root, session.outcome, live))))
+    }
+    if (!state.value.notices.coversRun(root, task.since)) {
+      session.transitionNotice(task.since)?.let { notice -> recordNotice(server, session, notice, task.since) }
+    }
   }
   private val store = ServerStore(appContext)
   private val cache = OfflineCache(appContext)
@@ -188,6 +239,8 @@ class LagoonController private constructor(private val appContext: Context) {
   private val monitorRequested = mutableSetOf<String>()
   /** 待处理事项通知的去抖任务：进入等待态后短暂延迟再发，期间被处理就不打扰。 */
   private val attentionJobs = mutableMapOf<String, Job>()
+  /** 后台工作结束后的宽限收尾任务，按根会话 id 去重（见 [scheduleBackgroundSettle]）。 */
+  private val backgroundSettles = mutableMapOf<String, Job>()
   /** 等待态事件的单调序号：对账只在读取期间没有新的等待事件时才清除等待态，避免事件/对读竞态造成抖动。 */
   private var waitingEventSeq = 0L
   private val waitingEventSeqAt = mutableMapOf<String, Long>()
@@ -397,6 +450,32 @@ class LagoonController private constructor(private val appContext: Context) {
         if (token != generation || requestSequence != catalogSequence) return
       }
     }
+    // 运行中的 shell 作业：后台 shell 不是会话，不在 /api/session/active 里，冷启动/断线后只能从
+    // `GET /api/shell` 读到。目录列表以本机项目优先，其次是最新活跃会话的执行目录（上限防请求风暴）。
+    val shellDirectories = (projects.map { it.directory } +
+      active.orEmpty().mapNotNull { identities[it]?.directory } +
+      (sessions + extraSessions).map { it.directory })
+      .filter(String::isNotBlank).distinctBy(::normalizedDirectory).take(MAX_SHELL_DIRECTORIES)
+    val shellResults = coroutineScope { shellDirectories.map { directory -> async { directory to attempt { client.shells(directory) } } }.awaitAll() }
+    if (token != generation || requestSequence != catalogSequence) return
+    val refreshedShellDirectories = mutableSetOf<String>()
+    val freshShells = linkedMapOf<String, ShellJob>()
+    shellResults.forEach { (directory, result) ->
+      val key = normalizedDirectory(directory)
+      if (result.isSuccess) {
+        refreshedShellDirectories += key
+        result.getOrDefault(emptyList()).forEach { freshShells[it.id] = it }
+      } else Diagnostics.warn("LagoonController", "shell 列表读取失败：$directory", result.exceptionOrNull())
+    }
+    // shell 归属的会话不在目录页时补读身份与父链，保证后台状态能汇总到正确的根会话。
+    val unknownShellSessions = freshShells.values.map { it.sessionId }.filter { it !in identities }.distinct().take(MAX_SHELL_SESSIONS)
+    if (unknownShellSessions.isNotEmpty()) {
+      unknownShellSessions.chunked(4).forEach { batch ->
+        val fetched = coroutineScope { batch.map { id -> async { attempt { findSession(client, id) }.getOrNull() } }.awaitAll().filterNotNull() }
+        fetched.forEach { identities[it.id] = it }; extraSessions += fetched
+        if (token != generation || requestSequence != catalogSequence) return
+      }
+    }
     // Pending requests, read like the official client: permissions per session, forms per location.
     // Only a running session can be waiting on the user.
     val waitingCandidates = active.orEmpty().mapNotNull { identities[it] }.take(MAX_REQUEST_SESSIONS)
@@ -417,6 +496,12 @@ class LagoonController private constructor(private val appContext: Context) {
     // 本次读取前已知的待处理项，用于识别事件流可能漏掉的新权限/表单。
     val priorRequestIds = (state.value.permissions.map { it.id } + state.value.questions.map { it.id }).toSet()
     mutable.update { previous ->
+      val now = System.currentTimeMillis()
+      // shell 合并：本次成功读取的目录以服务端结果为准；读取失败的目录保留旧条目（TTL 防僵死）。
+      val keptShells = previous.shells.filter { (_, job) ->
+        normalizedDirectory(job.directory) !in refreshedShellDirectories && now - job.observedAt < SHELL_TTL_MILLIS
+      }
+      val nextShells = keptShells + freshShells.mapValues { (_, job) -> job.copy(observedAt = now) }
       val previousTasks = previous.tasks + storedTasks.filter { (id, task) -> previous.tasks[id]?.let { old -> task.since > old.since || (task.finishedAt ?: 0) > (old.finishedAt ?: 0) } ?: true }
       val nextSessions = (sessions + extraSessions + previous.sessions.filter {
         // A session this device saw running, or one with an unread result, never silently drops out;
@@ -424,16 +509,26 @@ class LagoonController private constructor(private val appContext: Context) {
         it.id in active.orEmpty() || it.id == previous.sessionId || previousTasks[it.id]?.active == true ||
           previous.notices.unseenFor(it.id).isNotEmpty() || page.next != null
       }).distinctBy { it.id }.sortedWith(sessionActivityOrder)
+      val parentMap = store.taskParents(serverId) + nextSessions.mapNotNull { s -> s.parentId?.let { s.id to it } }
       // Only live state is carried; finished runs live in the unread ledger, never as a permanent phase.
       val states = mutableMapOf<String, TaskState>()
-      nextSessions.forEach { session ->
+      // 先子后父：父会话判断“子树是否还有后台工作”时，必须看到子会话本次是否已收尾。
+      nextSessions.sortedByDescending { BackgroundWork.depth(it.id, parentMap) }.forEach { session ->
         val task = previousTasks[session.id]
+        // 已处理会话的新状态覆盖旧值；未处理的会话仍按上次状态保守看待。
+        val effectiveTasks = previousTasks + states
+        // 本次权威读取里，该会话自身子树是否仍有后台工作（后台 shell / 活跃子代理）。
+        val hasWork = BackgroundWork.hasBackgroundWork(session.id, effectiveTasks, nextShells, parentMap)
         val next = when {
           active == null -> task
           session.id in active -> TaskReducer.status(session.id, true, task, session.idle)
+          // 折算出的后台任务：权威读取确认后台工作已结束（子代理/ shell 都不在了）时收尾；否则保留
+          // “后台运行中”。SSE 路径的折算态不在这里收尾，交给宽限任务等唤醒（settleBackgroundRun）。
+          task?.active == true && task.background == true && !hasWork ->
+            TaskReducer.terminal(session.id, session.outcome, task)
           // 不在前台活跃集合（/api/session/active）不等于本轮结束：转入后台的阻塞工具/子代理会让会话
-          // 继续存活。只有服务端持久化的 time.idle 越过本轮基线时才权威收尾（见 TaskReducer.terminal）。
-          task?.active == true && task.activeAt >= 0 && session.idle > 0 && session.idle > task.activeAt ->
+          // 继续存活。只有服务端持久化的 time.idle 越过本轮基线、且自身子树没有后台工作时才权威收尾。
+          task?.active == true && task.background != true && task.activeAt >= 0 && session.idle > 0 && session.idle > task.activeAt && !hasWork ->
             TaskReducer.terminal(session.id, session.outcome, task)
           task?.active == true -> task
           // 非活跃的任务不再作为常驻相位保留：终态结果只存在于未读账本（notices）。
@@ -473,7 +568,6 @@ class LagoonController private constructor(private val appContext: Context) {
         states[id] = TaskState(id, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, waiting.since, activeAt = waiting.activeAt, background = waiting.background)
       }
       // Roots whose family this device saw running and that an authoritative read now shows idle.
-      val parentMap = store.taskParents(serverId) + nextSessions.mapNotNull { s -> s.parentId?.let { s.id to it } }
       val wasActive = TaskSummary.aggregate(previousTasks.filterValues { it.active }, parentMap)
       val isActive = TaskSummary.aggregate(states.filterValues { it.active }, parentMap)
       finishedRuns = if (active == null) emptyList() else nextSessions.filter { it.parentId == null && it.id in wasActive && it.id !in isActive }
@@ -484,7 +578,7 @@ class LagoonController private constructor(private val appContext: Context) {
       withSummary(previous.copy(version = version, capabilities = capabilities,
         draftSessions = store.draftSessionIds(serverId), previews = nextSessions.associate { session -> session.id to (previous.previews[session.id] ?: store.sessionPreview(serverId, session.id)) }, connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
         error = null, degraded = degraded, staleDirectories = emptySet(),
-        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, notices = store.sessionNotices(serverId), collapsedSections = store.collapsedSections(serverId), sessionCursors = cursors, catalogComplete = cursors.isEmpty(),
+        projects = projects, sessions = nextSessions, knownParents = store.taskParents(serverId), tasks = states, shells = nextShells, notices = store.sessionNotices(serverId), collapsedSections = store.collapsedSections(serverId), sessionCursors = cursors, catalogComplete = cursors.isEmpty(),
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject(serverId))?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
         scopeProjectId = previous.scopeProjectId?.takeIf { id -> projects.any { it.id == id } },
@@ -674,7 +768,10 @@ class LagoonController private constructor(private val appContext: Context) {
     val directory = known?.directory ?: event.directory
     if (sessionId.isNotBlank()) {
       val before = mutable.value.tasks[sessionId]
-      var after = TaskReducer.event(sessionId, event.type, props, before, event.created)
+      // 事件会话自身子树里是否还有会唤醒它的后台工作（后台 shell / 仍在执行的子代理）。
+      // 用 sessionId 而不是根：子会话自己的 run settle 时，兄弟子任务不算它的后台工作。
+      val backgroundWork = BackgroundWork.hasBackgroundWork(sessionId, mutable.value.tasks, mutable.value.shells, mutable.value.parents)
+      var after = TaskReducer.event(sessionId, event.type, props, before, event.created, backgroundWork)
       if (after != null) {
         val resolved = props.str("requestID").ifBlank { props.str("id") }
         val pendingPermission = mutable.value.permissions.any { it.sessionId == sessionId && !(event.type == "permission.replied" && it.id == resolved) } || event.type == "permission.asked"
@@ -755,6 +852,15 @@ class LagoonController private constructor(private val appContext: Context) {
         val project = props.toProject()
         if (project.id.isNotBlank()) mutable.update { current -> current.copy(projects = current.projects.map { if (it.id == project.id) project.copy(sandboxes = project.sandboxes.ifEmpty { it.sandboxes }) else it }) }
       }
+      // 后台 shell 的实时增删：created 带完整 Shell.Info（`metadata.sessionID` 归属会话），
+      // exited/deleted 只带 id。折算与宽限收尾由 withSummary / scheduleBackgroundSettle 处理。
+      "shell.created" -> props.obj("info").toShellJob(event.directory)?.let { job ->
+        mutable.update { withSummary(it.copy(shells = it.shells + (job.id to job))) }
+      }
+      "shell.exited", "shell.deleted" -> {
+        val shellId = props.str("id")
+        if (shellId.isNotBlank() && mutable.value.shells.containsKey(shellId)) mutable.update { withSummary(it.copy(shells = it.shells - shellId)) }
+      }
       // A run started or ended: official `session.sync` of that one session (outcome, idle, updated).
       "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted" -> refreshSession(sessionId)
     }
@@ -792,19 +898,16 @@ class LagoonController private constructor(private val appContext: Context) {
   }
 
   /**
-   * 一个会话所属根家族里是否仍有活跃任务（根自身或任一子孙）。后台化的阻塞工具/子代理会让根执行
-   * settle 但家族仍活跃，此时不应记录完成结果、也不应通知，等后台完成重新唤醒 AI 后再收尾。
+   * 一个会话所属根家族里是否仍有活跃任务（根自身或任一子孙）或运行中的后台 shell。后台化的阻塞
+   * 工具/子代理会让根执行 settle 但家族仍活跃，此时不应记录完成结果、也不应通知，等后台完成重新
+   * 唤醒 AI 后再收尾。
    */
   private fun familyActive(sessionId: String): Boolean {
     if (sessionId.isBlank()) return false
     val current = mutable.value
-    var root = sessionId
-    val seen = mutableSetOf<String>()
-    while (seen.add(root)) {
-      val parent = current.knownParents[root] ?: break
-      root = parent
-    }
-    return TaskSummary.aggregate(current.tasks.filterValues { it.active }, current.parents)[root]?.active == true
+    val root = BackgroundWork.rootOf(sessionId, current.parents)
+    return BackgroundWork.hasBackgroundWork(root, current.tasks, current.shells, current.parents) ||
+      current.tasks[root]?.active == true
   }
 
   private fun recordResultNotice(event: ServerEvent, sessionId: String) {
