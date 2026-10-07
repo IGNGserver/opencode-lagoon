@@ -15,6 +15,11 @@ import androidx.compose.ui.unit.dp
 import com.igng.opencode.lagoon.core.*
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
+import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Delete
+import top.yukonga.miuix.kmp.icon.extended.More
+import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -25,6 +30,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 internal fun ProjectScopeSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
   if (state.browsePath != null) { DirectoryBrowserSheet(state, controller); return }
   var query by rememberSaveable { mutableStateOf("") }
+  var removing by remember { mutableStateOf<Project?>(null) }
   val counts = HomeScope.counts(state.sessions, state.projects)
   val projects = HomeScope.byActivity(state.sessions, state.projects).filter {
     query.isBlank() || it.name.contains(query.trim(), true) || it.directory.contains(query.trim(), true)
@@ -46,9 +52,9 @@ internal fun ProjectScopeSheet(state: LagoonState, controller: LagoonController,
       } else item {
         Card(Modifier.fillMaxWidth()) {
           projects.forEach { project ->
-            ChoiceRow(project.name, "${HomeScope.displayPath(project.directory, null)} · ${counts[project.id] ?: 0} 个会话", state.scopeProjectId == project.id) {
-              controller.setScope(project.id); onDismiss()
-            }
+            ProjectChoiceRow(project, "${HomeScope.displayPath(project.directory, null)} · ${counts[project.id] ?: 0} 个会话", state.scopeProjectId == project.id,
+              onSelect = { controller.setScope(project.id); onDismiss() },
+              onRemove = { removing = project })
           }
         }
       }
@@ -60,12 +66,14 @@ internal fun ProjectScopeSheet(state: LagoonState, controller: LagoonController,
       }
     }
   }
+  removing?.let { project -> RemoveProjectDialog(project, controller) { removing = null } }
 }
 
 /** Lightweight project chooser for a draft: picks where the new session starts, without changing the home scope. */
 @Composable
 internal fun DraftTargetSheet(state: LagoonState, controller: LagoonController, onDismiss: () -> Unit) {
   if (state.browsePath != null) { DirectoryBrowserSheet(state, controller); return }
+  var removing by remember { mutableStateOf<Project?>(null) }
   SuperBottomSheet(title = "在哪个项目里新建", show = true, onDismissRequest = onDismiss) {
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
       item {
@@ -74,9 +82,9 @@ internal fun DraftTargetSheet(state: LagoonState, controller: LagoonController, 
             Modifier.padding(16.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
         } else Card(Modifier.fillMaxWidth()) {
           HomeScope.byActivity(state.sessions, state.projects).forEach { project ->
-            ChoiceRow(project.name, HomeScope.displayPath(project.directory, null), state.projectId == project.id) {
-              if (project.id != state.projectId) controller.selectProject(project.id); onDismiss()
-            }
+            ProjectChoiceRow(project, HomeScope.displayPath(project.directory, null), state.projectId == project.id,
+              onSelect = { if (project.id != state.projectId) controller.selectProject(project.id); onDismiss() },
+              onRemove = { removing = project })
           }
         }
       }
@@ -85,6 +93,43 @@ internal fun DraftTargetSheet(state: LagoonState, controller: LagoonController, 
         Card(Modifier.fillMaxWidth()) {
           ChoiceRow("添加服务器目录…", "浏览服务器目录并添加为项目", false) { controller.openDirectoryBrowser() }
         }
+      }
+    }
+  }
+  removing?.let { project -> RemoveProjectDialog(project, controller) { removing = null } }
+}
+
+/** 项目行：点按选择，行尾「⋯」只提供本机移除；服务器目录与其中的数据不受影响。 */
+@Composable
+private fun ProjectChoiceRow(project: Project, summary: String, selected: Boolean, onSelect: () -> Unit, onRemove: () -> Unit) {
+  var menu by remember { mutableStateOf(false) }
+  Box {
+    BasicComponent(
+      title = project.name,
+      summary = summary,
+      onClick = onSelect,
+      endActions = {
+        if (selected) Icon(MiuixIcons.Ok, "已选择", Modifier.size(20.dp), tint = MiuixTheme.colorScheme.primary)
+        IconButton(onClick = { menu = true }, minWidth = 36.dp, minHeight = 36.dp) {
+          Icon(MiuixIcons.More, "项目操作", Modifier.size(18.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        }
+      }
+    )
+    MenuPopup(menu, { menu = false }, listOf(MenuSection(listOf(
+      MenuAction("从本机移除", MiuixIcons.Delete, danger = true) { menu = false; onRemove() }
+    ))))
+  }
+}
+
+/** 项目只在本机注册：移除是设备级动作，不触碰服务器上的目录与数据。 */
+@Composable
+private fun RemoveProjectDialog(project: Project, controller: LagoonController, onDismiss: () -> Unit) {
+  SuperDialog(title = "从本机移除项目？", show = true, onDismissRequest = onDismiss) {
+    Column {
+      Text("只删除此设备上的项目记录，不会删除服务器上的任何目录或数据。\n${project.name}")
+      DialogActions("取消", onDismiss, "移除", danger = true) {
+        controller.removeProject(project.id)
+        onDismiss()
       }
     }
   }
@@ -104,7 +149,8 @@ internal fun DirectoryBrowserSheet(state: LagoonState, controller: LagoonControl
   val path = state.browsePath.orEmpty()
   val crumbs = remember(path) { if (path.isBlank()) emptyList() else HomeScope.crumbs(path) }
   val searching = query.trim().length >= 2
-  val entries = remember(state.browseEntries) { state.browseEntries }
+  val entries = remember(state.browseEntries, state.browseShowHidden) { BrowseFilter.entries(state.browseEntries, state.browseShowHidden) }
+  val results = remember(state.browseSearch, state.browseShowHidden) { BrowseFilter.results(state.browseSearch, state.browseShowHidden) }
   SuperBottomSheet(title = "选择服务器目录", show = true, onDismissRequest = { controller.closeDirectoryBrowser() }) {
     Column(Modifier.fillMaxWidth().heightIn(max = 620.dp)) {
       Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -116,19 +162,31 @@ internal fun DirectoryBrowserSheet(state: LagoonState, controller: LagoonControl
         if (crumbs.isEmpty()) Text("正在定位服务器目录…", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
       }
       TextField(query, { query = it; controller.searchDirectories(it) }, label = "搜索目录或文件", useLabelAsPlaceholder = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+      Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("显示隐藏目录", Modifier.weight(1f), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        Switch(checked = state.browseShowHidden, onCheckedChange = { controller.setBrowseShowHidden(it) })
+      }
       ResourceHint(state.resource("browse"), "这个目录是空的", retry = { if (path.isNotBlank()) controller.browseDirectory(path) })
       if (searching) {
-        if (state.browseSearch.isEmpty()) Text("没有匹配项", Modifier.padding(16.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        else LazyColumn(Modifier.fillMaxWidth()) {
-          items(state.browseSearch, key = { it }) { result ->
-            val name = result.trimEnd('/').substringAfterLast('/')
-            BasicComponent(title = name.ifBlank { result }, summary = result, onClick = { controller.browseDirectory(childPath(path, result)) })
+        when {
+          results.isNotEmpty() -> LazyColumn(Modifier.fillMaxWidth()) {
+            items(results, key = { it }) { result ->
+              val name = result.trimEnd('/').substringAfterLast('/')
+              BasicComponent(title = name.ifBlank { result }, summary = result, onClick = { controller.browseDirectory(childPath(path, result)) })
+            }
           }
+          state.browseSearch.isNotEmpty() && !state.browseShowHidden -> Text("匹配项均为隐藏项，开启「显示隐藏目录」后可见",
+            Modifier.padding(16.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+          else -> Text("没有匹配项", Modifier.padding(16.dp), style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
         }
       } else {
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
           if (path.isNotBlank() && path.trimEnd('/') != "") item(key = "..") {
             BasicComponent(title = "上级目录", summary = HomeScope.parent(path), onClick = { controller.browseDirectory(HomeScope.parent(path)) })
+          }
+          if (entries.isEmpty() && state.browseEntries.isNotEmpty() && !state.browseShowHidden) item(key = "hidden-only") {
+            Text("此目录只有隐藏项，开启「显示隐藏目录」后可见", Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+              style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
           }
           items(entries, key = { it.path }) { node ->
             val directory = node.type == "directory"

@@ -50,6 +50,7 @@ object TranscriptRows {
   private val HIDDEN_TOOLS = setOf("todowrite")
   private val EDIT_TOOLS = setOf("edit", "write", "patch", "apply_patch")
   private val FINISHED_TOOLS = setOf("completed", "error")
+  private val ACTIVE_STATUSES = setOf("running", "pending")
   private val clock: DateTimeFormatter = DateTimeFormatter.ofPattern("M月d日 HH:mm").withZone(ZoneId.systemDefault())
 
   private class Turn(val id: String, val created: Long, val user: Message? = null, val shell: Message? = null) {
@@ -168,7 +169,7 @@ object TranscriptRows {
       // Only finished turns collapse into the「共处理 N 个操作」summary.
       body += runningTurnRows(turnKey, process, expanded)
     } else if (process.isNotEmpty()) {
-      body += toolGroupRows(turnKey, process, expanded, working = false)
+      body += toolGroupRows(turnKey, process, expanded)
     }
     if (finalParts.isNotEmpty()) {
       val text = finalParts.joinToString("\n\n") { it.second.text.trim() }
@@ -246,7 +247,7 @@ object TranscriptRows {
       if (group.isEmpty()) { index++; continue }
       batch++
       val tools = group.count { it.second.type == "tool" }
-      rows += activityGroupRows("$turnKey:batch:$batch", group, expanded, working = true,
+      rows += activityGroupRows("$turnKey:batch:$batch", group, expanded,
         title = if (tools > 0) "调用了 $tools 次工具" else "思考中")
     }
     return rows
@@ -256,15 +257,17 @@ object TranscriptRows {
    * One stable activity group per user turn, including intermediate text in chronological order.
    * Process output is visible in the activity list; tool/reasoning bodies are second-level details.
    */
-  private fun toolGroupRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, working: Boolean): List<TranscriptRow> =
-    activityGroupRows("$turnKey:activities", entries, expanded, working, "共处理 ${entries.count { it.second.type != "text" }} 个操作")
+  private fun toolGroupRows(turnKey: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>): List<TranscriptRow> =
+    activityGroupRows("$turnKey:activities", entries, expanded, "共处理 ${entries.count { it.second.type != "text" }} 个操作")
 
   /** A collapsed operation group: a one-line summary, and its calls/bodies only after [expanded]. */
-  private fun activityGroupRows(key: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, working: Boolean, title: String): List<TranscriptRow> {
+  private fun activityGroupRows(key: String, entries: List<Pair<String, MessagePart>>, expanded: Set<String>, title: String): List<TranscriptRow> {
     val tools = entries.filter { it.second.type == "tool" }.map { it.second }
     val reasonings = entries.filter { it.second.type == "reasoning" }.map { it.second }
+    // Only calls that are actually executing spin. A running turn used to force every batch to
+    // "running", so finished calls showed the spinner too and read as still working.
     val status = when {
-      working || tools.any { it.status in setOf("running", "pending") } -> "running"
+      tools.any { it.status in ACTIVE_STATUSES } || reasonings.any { it.status in ACTIVE_STATUSES } -> "running"
       tools.any { it.status == "error" } -> "error"
       else -> "completed"
     }
