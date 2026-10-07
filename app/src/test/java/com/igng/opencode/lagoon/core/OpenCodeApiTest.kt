@@ -194,6 +194,24 @@ class OpenCodeApiTest {
     }
   }
 
+  @Test fun runningShellsAreReadPerLocationAndCarryTheirSession() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[
+        {"id":"sh_1","status":"running","command":"sleep 100","cwd":"/repo","shell":"/bin/bash","file":"/tmp/sh_1","metadata":{"sessionID":"ses_1"},"time":{"started":5}},
+        {"id":"sh_2","status":"running","command":"make","cwd":"/repo","shell":"/bin/bash","file":"/tmp/sh_2","metadata":{},"time":{"started":6}}
+      ]}"""))
+      val shells = api(server).shells("/repo")
+      assertEquals(1, shells.size)
+      assertEquals("sh_1", shells.single().id)
+      assertEquals("ses_1", shells.single().sessionId)
+      assertEquals("sleep 100", shells.single().command)
+      assertEquals("/repo", shells.single().directory)
+      val request = server.takeRequest()
+      assertEquals("/api/shell", request.requestUrl?.encodedPath)
+      assertEquals("/repo", request.requestUrl?.queryParameter("location[directory]"))
+    }
+  }
+
   @Test fun renameAndUnrevertFollowTheDocumentedRoutes() = runBlocking {
     MockWebServer().use { server ->
       // An early 2.0.x instance: POST /rename and POST /revert/clear.

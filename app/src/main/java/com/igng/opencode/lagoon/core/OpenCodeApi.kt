@@ -336,6 +336,14 @@ class OpenCodeApi(
   /** Sessions whose foreground drain this server currently owns; every other session is idle. */
   suspend fun activeSessions(): Set<String> = dataObject(obj("api/session/active")).keys().asSequence().toSet()
 
+  /**
+   * Running shell jobs for [directory] (`GET /api/shell`). Shells are not sessions: a background
+   * command keeps running while its session execution is idle, so this is the only authoritative
+   * read for "background work still pending" after a cold start (official `shell.list`).
+   */
+  suspend fun shells(directory: String): List<ShellJob> =
+    dataArray(obj("api/shell", locationQuery(directory))).objects().mapNotNull { it.toShellJob(directory) }
+
   suspend fun createSession(directory: String, title: String): Session =
     dataObject(requestObject("POST", "api/session", JSONObject().put("location", JSONObject().put("directory", directory)).apply {
       if (title.isNotBlank()) put("title", title.trim())
