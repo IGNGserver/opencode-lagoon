@@ -217,6 +217,22 @@ class ControllerRegressionTest {
     }
   }
 
+  /** 项目删除只发生在设备本地：移除后服务器目录与其中的数据不受影响。 */
+  @Test fun removingAProjectOnlyDropsTheLocalRegistration() {
+    MockWebServer().use { server ->
+      val (c, state) = controller(api(server), LagoonState(serverId = "server", connected = true,
+        projects = listOf(Project("a", "/a", "A"), Project("b", "/b", "B")), projectId = "a", scopeProjectId = "a"))
+      val store = LagoonController::class.java.getDeclaredField("store").apply { isAccessible = true }.get(c) as ServerStore
+      store.addLocalProject("server", Project("a", "/a", "A"))
+      store.addLocalProject("server", Project("b", "/b", "B"))
+      c.removeProject("a")
+      assertEquals(listOf("b"), state.value.projects.map { it.id })
+      assertEquals("b", state.value.projectId)
+      assertNull(state.value.scopeProjectId)
+      assertEquals(listOf("/b"), store.localProjects("server").map { it.directory })
+    }
+  }
+
   @Test fun offlineReadCannotOverwriteAChangedConnectionGeneration() = runBlocking {
     MockWebServer().use { server ->
       val (c,state)=controller(api(server),LagoonState(serverId="server",connected=true))

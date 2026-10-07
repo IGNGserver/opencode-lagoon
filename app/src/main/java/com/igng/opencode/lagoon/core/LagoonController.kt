@@ -60,6 +60,8 @@ data class LagoonState(
   val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
   /** 添加项目用的远程目录选择器：当前绝对路径、目录项与搜索结果；[browsePath] 为 null 表示未打开。 */
   val browsePath: String? = null, val browseEntries: List<FileNode> = emptyList(), val browseSearch: List<String> = emptyList(),
+  /** 目录浏览器是否显示以点开头的隐藏项；默认隐藏，每次重新打开浏览器时复位。 */
+  val browseShowHidden: Boolean = false,
   val searchResults: List<String> = emptyList(),
   val capabilities: ApiCapabilities = ApiCapabilities(),
   val previews: Map<String, SessionPreview> = emptyMap(), val resources: Map<String, ResourceStatus> = emptyMap(),
@@ -1251,7 +1253,7 @@ class LagoonController private constructor(private val appContext: Context) {
       mutable.update { it.copy(error = error.message ?: "无法打开目录", resources = it.resources + ("browse" to ResourceStatus(ResourceState.ERROR, error.message))) }
       return@launch
     }
-    mutable.update { it.copy(browsePath = "", browseEntries = emptyList(), browseSearch = emptyList(), resources = it.resources + ("browse" to ResourceStatus(ResourceState.LOADING))) }
+    mutable.update { it.copy(browsePath = "", browseEntries = emptyList(), browseSearch = emptyList(), browseShowHidden = false, resources = it.resources + ("browse" to ResourceStatus(ResourceState.LOADING))) }
     val root = attempt { op.client.projectAt("") }.getOrNull()?.directory?.takeIf(String::isNotBlank)
       ?: state.value.homeDirectory ?: "/"
     loadBrowse(op, root)
@@ -1287,6 +1289,10 @@ class LagoonController private constructor(private val appContext: Context) {
   }
   fun closeDirectoryBrowser() {
     mutable.update { it.copy(browsePath = null, browseEntries = emptyList(), browseSearch = emptyList()) }
+  }
+  /** 切换「显示隐藏目录」；仅影响本机列表投影，不重新请求服务器。 */
+  fun setBrowseShowHidden(show: Boolean) {
+    mutable.update { it.copy(browseShowHidden = show) }
   }
   /** Leaves any open session for a blank draft that starts in the scope's (or latest) project. */
   fun beginDraft() {

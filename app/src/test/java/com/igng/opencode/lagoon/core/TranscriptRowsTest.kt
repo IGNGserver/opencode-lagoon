@@ -317,6 +317,17 @@ class TranscriptRowsTest {
     assertEquals(finishedTool, details.single { it.kind == "tool" }.source)
   }
 
+  /** 运行中的一轮里只有真正还在执行的批次转圈；已完成的调用保持完成态，不再误导成“仍在运行”。 */
+  @Test fun runningTurnSpinsOnlyTheBatchThatIsStillExecuting() {
+    val done = tool("t1", "bash", input = """{"command":"pwd"}""")
+    val live = tool("t2", "read", input = """{"filePath":"a.kt"}""", status = "running")
+    val rows = TranscriptRows.build(listOf(user("u1", t0), assistant("a1", t0 + 500,
+      done, part("p1", "text", text = "先看目录"), live, completedAt = null)), working = true)
+    val groups = rows.filter { it.kind == "tool-group" }
+    assertEquals(listOf("调用了 1 次工具", "调用了 1 次工具"), groups.map { it.title })
+    assertEquals(listOf("completed", "running"), groups.map { it.status })
+  }
+
   @Test fun openingOneGroupDoesNotIncludeAnotherTurnsDetailsOrNotices() {
     val messages = listOf(user("u1", t0), assistant("a1", t0 + 1, tool("t1", "bash", input = """{"command":"pwd"}""")),
       notice("n1", t0 + 2, "skill", """"skill":"test","name":"testing","text":"private instructions" """),

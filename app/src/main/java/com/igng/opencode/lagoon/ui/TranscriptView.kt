@@ -151,12 +151,14 @@ internal fun Conversation(state: LagoonState, controller: LagoonController, modi
   // Restore only after the older page actually landed. Keying on the rebuilt rows (and gating on the
   // history revision) means a streaming update during the request can no longer clear the anchor —
   // that premature clear was what made scrolling to the top stop working during a running turn.
+  // LazyListItemInfo.offset is negative once the anchor is scrolled off the top, while scrollToItem's
+  // scrollOffset is the forward (non-negative) amount, so negate it to land the row back in place.
   LaunchedEffect(mainRows) {
     if (!pendingRestoreAnchor || anchorKey == null || state.historyRevision == anchorRevision) return@LaunchedEffect
     val position = mainRows.indexOfFirst { it.key == anchorKey }
     if (position < 0) { pendingRestoreAnchor = false; anchorKey = null; return@LaunchedEffect }
     val leading = (if (state.cached) 1 else 0) + (if (state.sessionId in state.backgroundRunning) 1 else 0) + (if (state.messagesCursor != null) 1 else 0)
-    list.scrollToItem(leading + position, anchorOffset)
+    list.scrollToItem(leading + position, -anchorOffset)
     pendingRestoreAnchor = false
     anchorKey = null
   }
