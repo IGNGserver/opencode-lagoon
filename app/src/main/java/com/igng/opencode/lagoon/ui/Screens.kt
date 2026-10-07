@@ -332,6 +332,7 @@ fun SettingsScreen(
   onRefreshMode: (RefreshMode) -> Unit,
   onNotifications: () -> Unit,
   onEditServer: (ServerProfile?) -> Unit,
+  onManageModels: () -> Unit,
   onBack: () -> Unit
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
@@ -381,6 +382,15 @@ fun SettingsScreen(
           )
         }
         SuperArrow(title = "添加服务器", summary = "地址或 opencode pair 配对链接", onClick = { onEditServer(null) })
+        SuperArrow(
+          title = "模型显示",
+          summary = when {
+            state.serverId == null -> "连接服务器后管理模型下拉框"
+            state.modelVisibilityConfigured -> "已配置 · ${state.visibleModels.size}/${state.modelCatalog.size} 个模型"
+            else -> "未配置过滤 · 显示服务器返回的全部模型"
+          },
+          onClick = onManageModels
+        )
       }
     }
 

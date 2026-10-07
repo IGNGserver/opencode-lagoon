@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
       var showingServerForm by remember { mutableStateOf(false) }
       var editingServerId by remember { mutableStateOf<String?>(null) }
       var showingProjects by remember { mutableStateOf(false) }
+      var showingModelManagement by remember { mutableStateOf(false) }
       // Each blank draft gets a fresh saveable scope so a sent draft never reappears.
       var draftNonce by rememberSaveable { mutableIntStateOf(0) }
       var chatModal by remember { mutableStateOf(false) }
@@ -162,7 +163,7 @@ class MainActivity : ComponentActivity() {
       // The real page a back gesture returns to, drawn under the outgoing one while the finger moves.
       var peekRoute by remember { mutableStateOf<NavRoute?>(null) }
       val screenWidthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
-      PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects) { progress ->
+      PredictiveBackHandler(enabled = navigation.canGoBack && !keyboardOpen && !chatModal && !showingServerForm && !showingProjects && !showingModelManagement) { progress ->
         gestureActive = true; gestureRoute = route
         peekRoute = navigation.back().route.takeIf { previewBack && it.session == null }
         try {
@@ -194,10 +195,10 @@ class MainActivity : ComponentActivity() {
                 target.session == DRAFT_SESSION -> DraftScreen(state, controller, onBack = { goBack() }, onModal = { if (active) chatModal = it }, interactive = active)
                 target.session != null -> ChatScreen(displayed, controller, onBack = { goBack() }, onOpenChild = { child -> openSession(child, child = controller.state.value.sessions.any { it.id == child }) }, onModal = { if (active) chatModal = it }, interactive = active)
                 target.page == RootPage.ARCHIVED -> ArchivedScreen(state, controller, onOpen = { openSession(it) }, onBack = { goBack() })
-                target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, refreshMode, { refreshMode = it; controller.setRefreshMode(it) }, {
-                  if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                  else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-                }, ::editServer, onBack = { goBack() })
+                 target.page == RootPage.SETTINGS -> SettingsScreen(state, controller, themeMode, { themeMode = it; preferences.edit().putString("themeMode", it.name).apply() }, previewBack, { previewBack = it; preferences.edit().putBoolean("previewBack", it).apply() }, refreshMode, { refreshMode = it; controller.setRefreshMode(it) }, {
+                   if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                   else startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                 }, ::editServer, onManageModels = { showingModelManagement = true }, onBack = { goBack() })
                 else -> HomeScreen(state, controller, onOpen = { openSession(it) }, onNewSession = { openDraft() }, onProjects = { showingProjects = true },
                   onSelectServer = { profile -> if (profile.id != state.serverId || !state.connected) controller.connect(profile.id) },
                   onEditServer = ::editServer, onPage = ::openPage)
@@ -242,6 +243,7 @@ class MainActivity : ComponentActivity() {
             // MIUIX popups must stay inside this Scaffold content's popup registry.
             if (showingServerForm) ServersModal(state, controller, state.profiles.firstOrNull { it.id == editingServerId }) { showingServerForm = false; editingServerId = null }
             if (showingProjects) ProjectScopeSheet(state, controller) { showingProjects = false }
+            if (showingModelManagement) ModelManagementSheet(state, controller) { showingModelManagement = false }
           }
         }
       }

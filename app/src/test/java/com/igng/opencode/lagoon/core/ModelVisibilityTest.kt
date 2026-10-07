@@ -14,20 +14,20 @@ class ModelVisibilityTest {
   private fun model(provider: String, id: String, family: String?, ageDays: Long?, deprecated: Boolean = false) =
     ModelInfo(ModelChoice(provider, id, id), family = family, released = ageDays?.let { now - it * day } ?: 0, deprecated = deprecated)
 
-  @Test fun showsOnlyTheNewestOfEachRecentFamily() {
+  @Test fun showsEveryServerModelBeforeTheUserConfiguresAFilter() {
     val models = listOf(
       model("openai", "gpt-5.2", "gpt", 20), model("openai", "gpt-5.1", "gpt", 90),
       model("openai", "o5", "o", 10),
       model("anthropic", "sonnet-5", "claude-sonnet", 30), model("anthropic", "old", "claude-old", 400)
     )
-    assertEquals(listOf("gpt-5.2", "o5", "sonnet-5"), ModelVisibility.visible(models, emptyMap(), now).map { it.choice.modelId })
+    assertEquals(models.map { it.choice.modelId }, ModelVisibility.visible(models, emptyMap(), now).map { it.choice.modelId })
   }
 
-  @Test fun customModelsWithoutReleaseDateStayVisibleButUndatedFamilyLessDoNot() {
+  @Test fun modelsWithoutReleaseMetadataAreStillVisibleBeforeConfiguration() {
     val custom = model("newapi", "gemini-3.8-flash", null, null)
     val familyLess = model("zen", "space-bunny", null, 5)
     val visible = ModelVisibility.visible(listOf(custom, familyLess), emptyMap(), now)
-    assertEquals(listOf("gemini-3.8-flash"), visible.map { it.choice.modelId })
+    assertEquals(listOf("gemini-3.8-flash", "space-bunny"), visible.map { it.choice.modelId })
   }
 
   @Test fun phoneSwitchesWinOverTheDefaultRule() {
@@ -38,6 +38,12 @@ class ModelVisibilityTest {
     val visible = ModelVisibility.visible(listOf(custom, old, deprecated), overrides, now).map { it.choice.modelId }
     assertEquals(listOf("gpt-4"), visible)
     assertTrue(ModelVisibility.isVisible(deprecated, emptySet(), mapOf(deprecated.key to true)))
+  }
+
+  @Test fun configuredListContainsOnlyCheckedModels() {
+    val models = listOf(model("p", "a", "a", 1), model("p", "b", "b", 1))
+    assertEquals(listOf("a"), ModelVisibility.visibleConfigured(models, mapOf("p/a" to true, "p/b" to false), true).map { it.choice.modelId })
+    assertEquals(2, ModelVisibility.visibleConfigured(models, emptyMap(), false).size)
   }
 
   @Test fun keyIsUnambiguousForModelIdsWithSlashesAndColons() {
@@ -74,7 +80,7 @@ class ModelVisibilityTest {
   @Test fun parsesServerProvidedVariantsWithoutInventingAUniversalSet() {
     val objects = JSONObject("""{"id":"m","providerID":"p","name":"M","enabled":true,"variants":[{"id":"low","name":"Low"},{"id":"high","label":"High"}]}""")
       .toV2ModelInfo(emptyMap())!!
-    assertEquals(listOf(ModelVariant("low", "Low"), ModelVariant("high", "High")), objects.variants)
+    assertEquals(listOf(ModelVariant("low", "low"), ModelVariant("high", "high")), objects.variants)
     val strings = JSONObject("""{"id":"m","providerID":"p","name":"M","enabled":true,"variants":["low","high"]}""")
       .toV2ModelInfo(emptyMap())!!
     assertEquals(listOf(ModelVariant("low", "low"), ModelVariant("high", "high")), strings.variants)

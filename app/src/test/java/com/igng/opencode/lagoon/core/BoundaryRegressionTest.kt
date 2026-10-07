@@ -132,6 +132,22 @@ class BoundaryRegressionTest {
     assertTrue(s.localProjects("srv").isEmpty())
   }
 
+  @Test fun modelVisibilityAndVariantsAreLocalPerServerSelections() {
+    val p = memoryPreferences()
+    val s = store(p)
+    assertFalse(s.modelVisibilityConfigured("srv"))
+    s.rememberModelOverrides("srv", mapOf("p/a" to true, "p/b" to false))
+    assertTrue(s.modelVisibilityConfigured("srv"))
+    assertEquals(mapOf("p/a" to true, "p/b" to false), s.modelOverrides("srv"))
+    s.rememberModelVariant("srv", "p/a", "max")
+    assertEquals(mapOf("p/a" to "max"), s.modelVariants("srv"))
+    s.rememberModelVariant("srv", "p/a", null)
+    assertTrue(s.modelVariants("srv").isEmpty())
+    s.clearModelVisibility("srv")
+    assertFalse(s.modelVisibilityConfigured("srv"))
+    assertTrue(s.modelOverrides("srv").isEmpty())
+  }
+
   @Test fun migrationClearsOnlyTheOldServerDerivedProjectSelection() {
     val p=memoryPreferences()
     p.edit().putString("selectedProject","old").putString("location:srv:project","old")

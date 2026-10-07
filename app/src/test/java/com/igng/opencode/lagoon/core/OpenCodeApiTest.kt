@@ -69,6 +69,17 @@ class OpenCodeApiTest {
     }
   }
 
+  @Test fun defaultVariantIsOmittedFromTheModelReference() = runBlocking {
+    MockWebServer().use { server ->
+      repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
+      api(server).send(Session("ses_1", "/repo", "Task", 0), "hello", null, ModelChoice("openai", "gpt", "GPT"))
+      server.takeRequest() // POST /model
+      val prompt = server.takeRequest()
+      val model = JSONObject(prompt.body.readUtf8()).getJSONObject("metadata").getJSONObject("model")
+      assertFalse(model.has("variant"))
+    }
+  }
+
   @Test fun followingTheSessionSelectionSendsOnlyThePrompt() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setResponseCode(200).setBody("""{"data":{}}"""))
@@ -132,6 +143,16 @@ class OpenCodeApiTest {
       val request = server.takeRequest().requestUrl!!
       assertEquals("/api/location", request.encodedPath)
       assertEquals("/repo/sub", request.queryParameter("location[directory]"))
+    }
+  }
+
+  @Test fun modelCatalogKeepsServerVariantIdsIncludingMaxInOrder() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"data":[{"id":"gpt","providerID":"openai","name":"GPT","enabled":true,"variants":[{"id":"low","headers":{},"body":{}},{"id":"max","headers":{},"body":{}},{"id":"custom","headers":{},"body":{}}]}]}"""))
+      server.enqueue(MockResponse().setResponseCode(404))
+      val catalog = api(server).modelCatalog("/repo")
+      assertEquals(listOf("low", "max", "custom"), catalog.single().variants.map { it.id })
+      assertEquals(listOf("low", "max", "custom"), catalog.single().variants.map { it.label })
     }
   }
 
