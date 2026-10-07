@@ -3,6 +3,7 @@ package com.igng.opencode.lagoon.system
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -21,6 +22,13 @@ class SingleIslandOwnerTest {
     val outside = text.removeRange(summaryStart, summaryEnd)
     assertEquals(1, Regex("setRequestPromotedOngoing").findAll(summaryBody).count())
     assertFalse(outside.contains("setRequestPromotedOngoing"))
+  }
+
+  @Test fun summaryUsesTheStandardProgressRail() {
+    val text = source("src/main/java/com/igng/opencode/lagoon/system/TaskNotifications.kt")
+    assertTrue(text.contains("NotificationCompat.ProgressStyle"))
+    assertTrue(text.contains("setProgressSegments"))
+    assertTrue(text.contains("setStyledByProgress(false)"))
   }
 
   @Test fun inAppFakeIslandIsGone() {

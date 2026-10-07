@@ -13,17 +13,19 @@ package com.igng.opencode.lagoon.core
 enum class LiveUpdateStage { ACTIVE, SETTLED, EMPTY }
 
 /**
- * 总览通知的全部文案，由 [TaskSummary] 纯函数派生，与 Android 通知 API 解耦以便单测。
- * 外观（颜色、字体、卡片样式）完全交给各系统渲染，这里只决定内容。
+ * 总览通知的全部内容，由 [TaskSummary] 纯函数派生，与 Android 通知 API 解耦以便单测。
+ * 系统卡片的字体和布局仍由系统渲染；[progress] 只描述语义分段及其颜色类别。
  */
 data class LiveUpdateContent(
   val stage: LiveUpdateStage,
   val title: String,
   val text: String,
-  /** 展开态：最多 3 行“状态 · 会话名”，超出时追加“另有 N 个任务”。 */
+  /** 展开态：状态统计 + 最多 3 行“状态 · 会话名”，超出时追加“另有 N 个任务”。 */
   val expandedText: String,
   /** 状态栏胶囊短文案；只在 [LiveUpdateStage.ACTIVE] 时使用。 */
   val shortCriticalText: String,
+  /** Android 16 expanded Live Update 使用的分段状态轨道。 */
+  val progress: LiveUpdateProgress,
   /** 头条任务（最需要关注的那个）的会话 id，用作通知点击落点。 */
   val headlineSessionId: String?
 ) {
@@ -50,16 +52,19 @@ data class LiveUpdateContent(
         summary.completed > 0 -> "${summary.completed} 个任务已完成"
         else -> ""
       }
+      val statusText = summary.text.orEmpty()
       val lines = summary.items.take(MAX_LINES).map { "${phaseLabel(it.phase)} · ${it.title}" }
       val total = summary.running + summary.waiting + summary.completed + summary.failed
       val hidden = total - lines.size
-      val expanded = (if (hidden > 0) lines + "另有 $hidden 个任务" else lines).joinToString("\n")
+      val detailLines = if (hidden > 0) lines + "另有 $hidden 个任务" else lines
+      val expanded = (listOf(statusText).filter { it.isNotBlank() } + detailLines).joinToString("\n")
       return LiveUpdateContent(
         stage = stage,
         title = title,
-        text = summary.items.firstOrNull()?.title.orEmpty(),
+        text = statusText.ifBlank { summary.items.firstOrNull()?.title.orEmpty() },
         expandedText = expanded,
         shortCriticalText = summary.shortText,
+        progress = LiveUpdateProgress.of(summary),
         headlineSessionId = summary.items.firstOrNull()?.sessionId
       )
     }

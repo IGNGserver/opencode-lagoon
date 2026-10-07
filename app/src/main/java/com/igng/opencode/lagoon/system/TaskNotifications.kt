@@ -9,13 +9,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
 import com.igng.opencode.lagoon.R
 import com.igng.opencode.lagoon.core.LiveUpdateContent
+import com.igng.opencode.lagoon.core.LiveUpdateBucket
 import com.igng.opencode.lagoon.core.LiveUpdateStage
 import com.igng.opencode.lagoon.core.ServerStore
 import com.igng.opencode.lagoon.core.displayTitle
@@ -129,8 +132,8 @@ class TaskNotifications(private val context: Context) {
   /**
    * Server-wide summary. While tasks run or wait for the user it is an ongoing, promoted
    * notification (Android 16 Live Update: status bar chip / lock screen card); once everything has
-   * settled it is demoted to an ordinary, dismissible notification. Look and colors are left to the
-   * system; this only supplies content.
+   * settled it is demoted to an ordinary, dismissible notification. The expanded Android 16 card
+   * uses the platform's segmented progress rail; the status chip remains intentionally compact.
    */
   fun buildSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?): Notification {
     val content = LiveUpdateContent.of(summary)
@@ -139,7 +142,6 @@ class TaskNotifications(private val context: Context) {
       .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
       .setContentTitle(content.title).setContentText(content.text)
       .setSubText(profile.name)
-      .setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
       .setOngoing(active).setAutoCancel(!active)
       .setOnlyAlertOnce(true).setShowWhen(false)
       // 内容级更新不应触发声音/横幅；同一内容重复下发时只应平滑更新，而不是重放“收到通知”动画。
@@ -148,9 +150,42 @@ class TaskNotifications(private val context: Context) {
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setRequestPromotedOngoing(active)
       .setDeleteIntent(summaryDismissed(profile.id, content.stage))
-    if (active) builder.setShortCriticalText(content.shortCriticalText)
+    if (active) {
+      builder.setShortCriticalText(content.shortCriticalText)
+      if (Build.VERSION.SDK_INT >= 36) {
+        builder.setStyle(progressStyle(content))
+      } else {
+        builder.setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
+      }
+    } else {
+      builder.setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
+    }
     (targetSessionId ?: content.headlineSessionId)?.let { builder.setContentIntent(open(profile.id, it)) }
     return builder.build()
+  }
+
+  /**
+   * A categorical status rail, not a fake completion percentage. Segment lengths represent the
+   * current task mix; the tracker icon marks the most important active bucket (waiting first).
+   */
+  private fun progressStyle(content: LiveUpdateContent): NotificationCompat.ProgressStyle {
+    val style = NotificationCompat.ProgressStyle()
+      .setStyledByProgress(false)
+      .setProgress(content.progress.position)
+      .setProgressSegments(content.progress.segments.map { segment ->
+        NotificationCompat.ProgressStyle.Segment(segment.length).setColor(progressColor(segment.bucket))
+      })
+    if (content.progress.focus != null) {
+      style.setProgressTrackerIcon(IconCompat.createWithResource(context, R.drawable.ic_notification))
+    }
+    return style
+  }
+
+  private fun progressColor(bucket: LiveUpdateBucket): Int = when (bucket) {
+    LiveUpdateBucket.RUNNING -> Color.rgb(72, 151, 244)
+    LiveUpdateBucket.WAITING -> Color.rgb(245, 177, 67)
+    LiveUpdateBucket.COMPLETED -> Color.rgb(76, 181, 112)
+    LiveUpdateBucket.FAILED -> Color.rgb(224, 100, 105)
   }
 
   private fun summaryDismissed(serverId: String, stage: LiveUpdateStage): PendingIntent {
@@ -191,4 +226,3 @@ class TaskNotifications(private val context: Context) {
     return if (intent.resolveActivity(context.packageManager) != null) intent else null
   }
 }
-
