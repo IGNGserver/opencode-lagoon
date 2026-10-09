@@ -155,6 +155,9 @@ class TaskNotifications(private val context: Context) {
       if (Build.VERSION.SDK_INT >= 36) {
         builder.setStyle(progressStyle(content))
       } else {
+        // Older Android versions have no Live Update progress rail. Show an indeterminate bar
+        // instead of implying a completion percentage the server does not provide.
+        builder.setProgress(0, 0, true)
         builder.setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
       }
     } else {

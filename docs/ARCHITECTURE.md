@@ -12,7 +12,7 @@
 - `core/KeystoreCipher.kt`: `ServerStore`/`OfflineCache` 共用的 AndroidKeyStore AES-GCM 加解密。
 - `core/PairLink.kt`: 官方 `opencode pair` 链接解析（强制 HTTPS）。
 - `core/Http.kt` / `core/Diagnostics.kt`: 进程级 OkHttp 连接池/调度器；轻量日志。
-- `ui/`: 小米 HyperOS / MIUIX 组件页面与不同消息 Part 的渲染；信息架构主线为 Server → Project/Directory → Session → Conversation，结构对齐 Qoder：没有底部 Dock，「会话」首页是唯一根页面（范围标题、服务器胶囊、按日期 / 项目 / 状态分组的列表、悬浮新建按钮），已归档、设置等低频页面从首页 ⋯ 整页推入；Chat 是会话主界面（工具调用为可展开的紧凑轨迹，子任务 / 改动 / 文件在右上角 ⋯）。`MainActivity` 负责页面栈、预见式返回（露出真实的上一页）与深链。
+- `ui/`: 小米 HyperOS / MIUIX 组件页面与不同消息 Part 的渲染；信息架构主线为 Server → Project/Directory → Session → Conversation，结构对齐 Qoder：没有底部 Dock，「会话」首页是唯一根页面（范围标题、服务器胶囊、当前服务器任务概览、按日期 / 项目 / 状态分组的列表、悬浮新建按钮）；任务概览展示运行中、未读完成、待回复、失败计数及最需关注的任务，状态不新鲜时明确提示；已归档、设置等低频页面从首页 ⋯ 整页推入；Chat 是会话主界面（工具调用为可展开的紧凑轨迹，子任务 / 改动 / 文件在右上角 ⋯）。`MainActivity` 负责页面栈、预见式返回（露出真实的上一页）与深链。
 - `system/`: 通知 Channel、Android Live Updates 请求、任务前台服务与通知操作。全服务器任务总览沿用统一口径（`core/TaskSummary.kt`）：`TaskNotifications.buildSummary` 生成单条 ongoing 的 Live Update 通知（`setRequestPromotedOngoing` + `setShortCriticalText`），并由 `LagoonController` 在状态变化时统一发布；`system/LiveUpdateSupport.kt` 只探测标准实时更新的可用状态，供设置页展示（不写任何厂商私有 extras，详见 `docs/LIVE_UPDATES.md`）。
 - `docs/task-event-contract.json`: Android `TaskReducer` 遵守的任务阶段归约契约。
 
@@ -22,6 +22,6 @@
 2. 从手机发送任务，检查消息、工具折叠、停止、SSE 重连后状态一致；确认系统实时更新显示「运行中 / 未读已完成 / 待回复 / 失败」计数，且打开会话后已完成计数下降。
 3. 触发 permission 和 question；分别从 App 与系统通知操作，检查服务器继续执行。
 4. 检查子会话、Diff、文件浏览；测试新建、运行中继续发送、斜杠命令、重命名、删除等会话操作。
-5. 在 Android 16 设备检查实时更新提升与设置页「任务通知」状态；Android 15 及以下确认普通通知照常显示。
+5. 在 Android 16 设备检查实时更新提升与设置页「任务通知」状态；Android 15 及以下确认普通通知照常显示，首页概览中的计数、优先任务和过期状态提示正确；关闭通知权限后仍可在应用首页查看任务概览。
 
 契约来源：`anomalyco/opencode` 2.x 源码（`packages/protocol`、`packages/schema`）与官方客户端（`packages/client`、`packages/session-ui`）。接入目标实例时可核对该实例 `/openapi.json`。

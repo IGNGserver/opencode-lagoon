@@ -25,9 +25,9 @@ data class LiveUpdateSupport(
         supported = supported,
         granted = granted,
         note = when {
-          !supported -> "需要 Android 16 及以上；当前系统仍会照常显示普通任务通知。"
+          !supported -> "Android 16 及以上可使用系统实时更新；Android 15 及以下使用普通通知，应用首页仍可查看任务概览。"
           granted -> "任务运行或等待处理时，总览会以系统样式显示在状态栏胶囊 / 锁屏实时卡片；全部结束后变为普通通知。"
-          else -> "系统尚未允许实时更新。请在系统设置中允许本应用「实时更新 / 提升为常驻通知」。"
+          else -> "系统尚未允许实时更新；任务仍可通过普通通知和应用首页查看。也可在系统设置中开启实时更新。"
         }
       )
     }

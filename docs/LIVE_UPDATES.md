@@ -9,6 +9,7 @@
 - **只有一个岛**：只有“服务器总览”通知申请提升为实时更新；单会话通知（运行中、待授权、完成 / 失败结果）都是普通通知，不申请提升。
 - **只在进行中上岛**：Google 的规范要求实时更新只覆盖“有明确开始和结束、正在进行”的活动，因此总览只在有任务运行或等待处理时常驻上岛，结束后降级为普通通知。
 - **分段状态轨道**：Android 16 活跃总览使用标准 `ProgressStyle` 的彩色 segments 表达任务组成（运行中 / 待处理 / 已完成 / 失败），不是虚构的完成百分比；状态栏胶囊仍只显示短文案，展开卡片由系统绘制轨道。
+- **旧系统优雅回退**：Android 15 及以下用一条普通 ongoing 通知显示总览计数与任务明细，并用不确定进度条表达“仍在处理”，不伪造完成比例；应用首页提供相同计数、优先任务直达和状态过期提示。通知权限关闭时，打开应用仍能查看首页概览。
 
 所有文案由 `core/LiveUpdateContent.kt` 从 `core/TaskSummary.kt` 纯函数派生，计数口径不变：`运行中 / 未读已完成 / 待回复 / 失败`。
 
@@ -39,7 +40,8 @@
 
 - `core/LiveUpdateContent.kt`：阶段判定、标题 / 正文 / 展开文案、胶囊短文案、点击落点、划掉后的重发规则。
 - `core/LiveUpdateProgress.kt`：把统一任务计数归一化为平台无关的状态分段与焦点位置，避免把没有服务端依据的任务数伪装成百分比。
-- `system/TaskNotifications.kt`：`buildSummary` / `showSummary` 按阶段构建总览；Android 16+ 使用 `NotificationCompat.ProgressStyle`，旧系统使用 `BigTextStyle`；单会话通知不申请提升。
+- `system/TaskNotifications.kt`：`buildSummary` / `showSummary` 按阶段构建总览；Android 16+ 使用 `NotificationCompat.ProgressStyle`，旧系统使用 `BigTextStyle` 与不确定进度条；单会话通知不申请提升。
+- `ui/SessionsHomeScreen.kt`：应用内任务概览在旧系统或通知权限关闭时作为可见回退，展示全项目任务计数及最需关注的会话。
 - `system/SummaryDismissals.kt`：按服务器记录用户划掉总览时的阶段。
 - `system/LiveUpdateSupport.kt`：探测标准实时更新在本机的可用状态，供设置页展示。
 
@@ -49,4 +51,4 @@
 2. 触发权限确认：标题变为“N 个任务待你处理”，点击进入对应会话。
 3. 全部结束：胶囊 / 岛消失，总览变为可划掉的普通通知；划掉后不再弹出，直到有新任务开始。
 4. 打开已完成会话：计数下降，全部已读后总览移除。
-5. 分别在浅色 / 深色模式截图，确认外观完全由系统决定；在 Android 15 及以下确认退化为普通通知。
+5. 分别在浅色 / 深色模式截图，确认外观完全由系统决定；在 Android 15 及以下确认普通通知展示明细和不确定进度条，首页卡片计数、优先任务与过期提示正确；关闭通知权限后仍可在首页查看任务概览。
