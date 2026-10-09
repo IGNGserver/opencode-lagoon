@@ -66,31 +66,16 @@ object TranscriptProjection {
       val index = message.parts.indexOfLast { it.type == kind && (kind != "reasoning" || it.status == "running") }
       if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
     }
-    fun editPart(kind: String, partId: String, change: (MessagePart) -> MessagePart) = editAssistant { message ->
-      val index = message.parts.indexOfLast { it.type == kind && (partId.isBlank() || it.id == partId) }
-      if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
-    }
     fun editTool(change: (MessagePart) -> MessagePart) = editAssistant { message ->
-      val callId = p.str("callID").ifBlank { p.str("id") }
-      val index = message.parts.indexOfLast { it.type == "tool" && (callId.isBlank() || it.id == callId) }
+      val index = message.parts.indexOfLast { it.type == "tool" && it.id == p.str("id") }
       if (index < 0) message else message.copy(parts = message.parts.toMutableList().also { it[index] = change(it[index]) })
     }
     fun insert(message: Message?): Result = if (message == null || messages.any { it.id == message.id }) Result(messages) else result(messages + message)
-    fun record(type: String, fields: JSONObject, id: String = messageId(event)): Message =
-      JSONObject(fields.toString()).put("id", id).put("type", type).put("time", JSONObject().put("created", at)).toMessage()
+    fun record(type: String, fields: JSONObject): Message =
+      JSONObject(fields.toString()).put("id", messageId(event)).put("type", type).put("time", JSONObject().put("created", at)).toMessage()
 
     return when (event.type) {
-      "session.next.prompted" -> {
-        val prompt = p.obj("prompt")
-        insert(record("user", JSONObject().put("text", prompt.str("text")).put("files", prompt.arr("files")), p.str("messageID")))
-      }
-      "session.next.prompt.admitted" -> Result(messages)
-      "session.next.context.updated" -> insert(record("system", JSONObject().put("text", p.str("text")), p.str("messageID")))
-      "session.next.synthetic" -> insert(record("synthetic", JSONObject().put("text", p.str("text")), p.str("messageID")))
-      "session.next.agent.switched" -> insert(record("agent-switched", JSONObject().put("agent", p.str("agent")), p.str("messageID")))
-      "session.next.model.switched" -> insert(record("model-switched", JSONObject().put("model", p.obj("model")), p.str("messageID")))
-      "session.next.moved" -> Result(messages)
-      "session.step.started", "session.next.step.started" -> {
+      "session.step.started" -> {
         val existing = messages.indexOfFirst { it.id == assistantId && it.role == "assistant" }
         val agent = p.str("agent").ifBlank { null }
         val model = p.obj("model").toModelChoice()
@@ -104,53 +89,47 @@ object TranscriptProjection {
           result(closed + Message(assistantId, "assistant", started, emptyList(), agent = agent, model = model, type = "assistant"))
         }
       }
-      "session.step.ended", "session.next.step.ended" -> editAssistant { it.copy(completedAt = at, finish = p.str("finish").ifBlank { "stop" }) }
-      "session.step.failed", "session.next.step.failed" -> editAssistantOrReconcile {
+      "session.step.ended" -> editAssistant { it.copy(completedAt = at, finish = p.str("finish").ifBlank { "stop" }) }
+      "session.step.failed" -> editAssistantOrReconcile {
         val error = p.obj("error")
         it.copy(completedAt = at, finish = p.str("finish").ifBlank { "error" }, error = error.str("message").ifBlank { "执行失败" },
           errorType = error.str("type").ifBlank { null }, retry = null)
       }
-      "session.retry.scheduled", "session.next.retried" -> editAssistant { it.copy(retry = "第 ${p.optInt("attempt")} 次重试：${p.obj("error").str("message")}") }
-      "session.text.started", "session.next.text.started", "session.reasoning.started", "session.next.reasoning.started" -> {
+      "session.retry.scheduled" -> editAssistant { it.copy(retry = "第 ${p.optInt("attempt")} 次重试：${p.obj("error").str("message")}") }
+      "session.text.started", "session.reasoning.started" -> {
         val kind = if (event.type.contains("reasoning")) "reasoning" else "text"
-        val explicitId = if (kind == "reasoning") p.str("reasoningID") else p.str("textID")
         editAssistant { message ->
           val ordinal = message.parts.count { it.type == kind }
-          message.copy(parts = message.parts + MessagePart(explicitId.ifBlank { "${message.id}:$kind:$ordinal" }, kind, status = if (kind == "reasoning") "running" else ""))
+          message.copy(parts = message.parts + MessagePart("${message.id}:$kind:$ordinal", kind, status = if (kind == "reasoning") "running" else ""))
         }
       }
-      "session.text.delta", "session.next.text.delta" -> editPart("text", p.str("textID")) { it.copy(text = it.text + p.str("delta")) }
-      "session.text.ended", "session.next.text.ended" -> editPart("text", p.str("textID")) { it.copy(text = p.str("text")) }
-      "session.reasoning.delta", "session.next.reasoning.delta" -> editPart("reasoning", p.str("reasoningID")) { it.copy(text = it.text + p.str("delta")) }
-      "session.reasoning.ended", "session.next.reasoning.ended" -> editPart("reasoning", p.str("reasoningID")) { it.copy(text = p.str("text"), status = "") }
-      "session.next.tool.input.started" -> editAssistant { message ->
-        message.copy(parts = message.parts + MessagePart(p.str("callID"), "tool", tool = p.str("name"), status = "pending"))
-      }
+      "session.text.delta" -> editLast("text") { it.copy(text = it.text + p.str("delta")) }
+      "session.text.ended" -> editLast("text") { it.copy(text = p.str("text")) }
+      "session.reasoning.delta" -> editLast("reasoning") { it.copy(text = it.text + p.str("delta")) }
+      "session.reasoning.ended" -> editLast("reasoning") { it.copy(text = p.str("text"), status = "") }
       "session.tool.input.started" -> editAssistant { message ->
         message.copy(parts = message.parts + MessagePart(p.str("id"), "tool", tool = p.str("name"), status = "pending"))
       }
-      "session.tool.input.delta", "session.next.tool.input.delta" -> editTool { if (it.status == "pending") it.copy(input = it.input + p.str("delta")) else it }
-      "session.tool.input.ended", "session.next.tool.input.ended" -> editTool { if (it.status == "pending") it.copy(input = p.str("text")) else it }
-      "session.tool.called", "session.next.tool.called" -> editTool { tool ->
+      "session.tool.input.delta" -> editTool { if (it.status == "pending") it.copy(input = it.input + p.str("delta")) else it }
+      "session.tool.input.ended" -> editTool { if (it.status == "pending") it.copy(input = p.str("text")) else it }
+      "session.tool.called" -> editTool { tool ->
         val input = p.obj("input")
-        val name = p.str("tool").ifBlank { p.str("name") }.ifBlank { tool.tool }
-        tool.copy(tool = name, status = "running", input = input.toString(2), title = input.str("description").ifBlank { tool.title },
+        tool.copy(status = "running", input = input.toString(2), title = input.str("description").ifBlank { tool.title },
           path = input.str("path").ifBlank { tool.path },
-          target = input.str("sessionID").takeIf { name in SUBAGENT_TOOLS && it.isNotBlank() } ?: tool.target)
+          target = input.str("sessionID").takeIf { tool.tool in SUBAGENT_TOOLS && it.isNotBlank() } ?: tool.target)
       }
-      "session.tool.progress", "session.next.tool.progress" -> editTool { tool ->
-        val child = p.obj("metadata").str("sessionID").ifBlank { p.obj("structured").str("sessionID") }
+      "session.tool.progress" -> editTool { tool ->
+        val child = p.obj("metadata").str("sessionID")
         if (tool.status == "running" && tool.tool in SUBAGENT_TOOLS && child.isNotBlank()) tool.copy(target = child) else tool
       }
-      "session.tool.success", "session.tool.failed", "session.next.tool.success", "session.next.tool.failed" -> editTool { tool ->
+      "session.tool.success", "session.tool.failed" -> editTool { tool ->
         if (tool.status != "running" && !(event.type.endsWith("failed") && tool.status == "pending")) return@editTool tool
         // Rebuild through the snapshot parser so live and loaded tools look identical.
         val state = JSONObject().put("status", if (event.type.endsWith("success")) "completed" else "error")
           .put("input", tool.input.trim().takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject())
           .put("content", p.optJSONArray("content") ?: JSONArray()).put("metadata", p.optJSONObject("metadata") ?: JSONObject())
-          .put("structured", p.optJSONObject("structured") ?: JSONObject())
         p.optJSONObject("error")?.let { state.put("error", it) }
-        val rebuilt = JSONObject().put("type", "tool").put("id", tool.id).put("name", p.str("tool").ifBlank { tool.tool }).put("state", state).toAssistantPart(tool.id)
+        val rebuilt = JSONObject().put("type", "tool").put("id", tool.id).put("name", tool.tool).put("state", state).toAssistantPart(tool.id)
         rebuilt.copy(title = rebuilt.title.ifBlank { tool.title }, target = rebuilt.target ?: tool.target)
       }
       "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted" -> {
@@ -172,11 +151,6 @@ object TranscriptProjection {
       "session.agent.selected" -> insert(record("agent-switched", JSONObject().put("agent", p.str("agent")).put("previous", p.str("previous"))))
       "session.model.selected" -> insert(record("model-switched", JSONObject().put("model", p.obj("model"))))
       "session.moved" -> insert(record("location-switched", JSONObject().put("location", p.obj("location"))))
-      "session.next.shell.started" -> {
-        val callId = p.str("callID")
-        insert(record("shell", JSONObject().put("callID", callId).put("command", p.str("command")).put("status", "running").put("output", ""), p.str("messageID")))
-          .let { inserted -> Result(inserted.messages.map { if (it.id == p.str("messageID")) it.withShellId(callId) else it }) }
-      }
       "session.shell.started" -> {
         val shell = p.obj("shell")
         insert(record("shell", JSONObject().put("shellID", shell.str("id")).put("command", shell.str("command")).put("status", shell.str("status"))))
@@ -193,20 +167,6 @@ object TranscriptProjection {
           result(messages.toMutableList().also { it[index] = ended.toMessage().withShellId(shell.str("id")) })
         }
       }
-      "session.next.shell.ended" -> {
-        val callId = p.str("callID")
-        val index = messages.indexOfLast { it.role == "shell" && it.parts.firstOrNull()?.target == callId }
-        if (index < 0) Result(messages) else {
-          val old = messages[index]
-          val command = old.parts.firstOrNull()?.input.orEmpty().let { raw -> runCatching { JSONObject(raw).str("command") }.getOrDefault(raw) }
-          val ended = JSONObject().put("id", old.id).put("type", "shell").put("callID", callId).put("command", command)
-            .put("output", p.str("output")).put("time", JSONObject().put("created", old.created).put("completed", at))
-          result(messages.toMutableList().also { it[index] = ended.toMessage().withShellId(callId) })
-        }
-      }
-      "session.next.compaction.started", "session.next.compaction.delta" -> Result(messages)
-      "session.next.compaction.ended" -> insert(record("compaction", JSONObject()
-        .put("reason", p.str("reason")).put("summary", p.str("text")).put("recent", p.str("recent")), p.str("messageID")))
       "session.compaction.started" -> insert(JSONObject().put("id", p.str("inputID").ifBlank { messageId(event) }).put("type", "compaction")
         .put("status", "running").put("time", JSONObject().put("created", at)).toMessage())
       "session.compaction.ended", "session.compaction.failed" -> {
@@ -219,7 +179,7 @@ object TranscriptProjection {
       }
       "session.inbox.enqueued" -> {
         val item = JSONObject(p.obj("item").toString()).put("id", p.str("inboxID")).put("time", JSONObject().put("created", at))
-        val message = item.toPendingMessage() ?: return null
+        val message = item.toInboxMessage() ?: return null
         val index = messages.indexOfFirst { it.id == message.id }
         result(if (index < 0) messages + message else messages.toMutableList().also { it[index] = message })
       }
@@ -234,8 +194,8 @@ object TranscriptProjection {
         result(messages.filterNot { it.id == id } + existing.copy(created = at, queued = false))
       }
       "session.inbox.cancelled" -> if (messages.none { it.id == p.str("inboxID") }) null else result(messages.filterNot { it.id == p.str("inboxID") })
-      "session.next.revert.committed", "session.revert.committed" -> {
-        val boundary = p.str("messageID").ifBlank { p.str("to") }
+      "session.revert.committed" -> {
+        val boundary = p.str("to")
         result(messages.filter { it.id < boundary })
       }
       // Replay-only: older releases replaced completed assistant content wholesale.

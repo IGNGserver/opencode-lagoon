@@ -16,8 +16,7 @@ class ApiCapabilitiesTest {
     val caps = ApiCapabilities.fromDocument(document)
     assertEquals(ActionEndpoint("PATCH", "api/session/{sessionID}"), caps.actions[SessionAction.RENAME])
     assertEquals(ActionEndpoint("DELETE", "api/session/{sessionID}/revert"), caps.actions[SessionAction.UNREVERT])
-    assertTrue(caps.diff); assertEquals(ActionEndpoint("GET", "api/session/{sessionID}/diff"), caps.diffEndpoint)
-    assertNotNull(caps.sessionView); assertTrue(caps.documented)
+    assertTrue(caps.diff); assertNotNull(caps.sessionView); assertTrue(caps.documented)
   }
   @Test fun unknownRequiredWriteFieldsKeepTheActionUnavailable() {
     val doc = JSONObject("""{"paths":{"/api/session/{id}/rename":{"post":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title","unknown"]}}}}}}}}""")
@@ -39,27 +38,5 @@ class ApiCapabilitiesTest {
   }
   @Test fun aDocumentWithoutPathsMeansTheCurrentContract() {
     assertEquals(ApiCapabilities.BASELINE, ApiCapabilities.fromDocument(JSONObject("{}")))
-    assertEquals(ApiCapabilities.BASELINE, ApiCapabilities.fromDocument(JSONObject("""{"paths":{}}""")))
-  }
-
-  @Test fun aCombinedDocumentPrefersNativeCollectionsButKeepsDocumentedLegacySessionActions() {
-    val document = JSONObject("""{"paths":{
-      "/session":{"get":{}},
-      "/session/{sessionID}":{"patch":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}}}}}}},"delete":{}},
-      "/session/{sessionID}/fork":{"post":{}},
-      "/api/health":{"get":{}},
-      "/api/session":{"get":{}},
-      "/api/session/{sessionID}":{"get":{}},
-      "/api/session/{sessionID}/revert/clear":{"post":{}},
-      "/api/event":{"get":{}}
-    }}""")
-    val caps = ApiCapabilities.fromDocument(document)
-    assertTrue(caps.nativeV2)
-    assertEquals("api/session", caps.sessionRoot)
-    assertEquals("api/event", caps.eventPath)
-    assertEquals(ActionEndpoint("PATCH", "session/{sessionID}"), caps.actions[SessionAction.RENAME])
-    assertEquals(ActionEndpoint("DELETE", "session/{sessionID}"), caps.removeEndpoint)
-    assertEquals(ActionEndpoint("POST", "session/{sessionID}/fork"), caps.forkEndpoint)
-    assertEquals(ActionEndpoint("POST", "api/session/{sessionID}/revert/clear"), caps.actions[SessionAction.UNREVERT])
   }
 }

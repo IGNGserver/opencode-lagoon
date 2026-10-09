@@ -83,7 +83,7 @@ fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> U
         if (!session.archived) add(MenuAction("归档", ARCHIVE_ICON) { controller.setArchived(session.id, true, onBack) })
         else if (archive.restorable) add(MenuAction("取消归档", UNARCHIVE_ICON) { controller.setArchived(session.id, false) })
       }
-      if (state.capabilities.remove) add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
+      add(MenuAction("删除", MiuixIcons.Delete, danger = true) { delete = true })
     })
   )
   QoderChatTheme {
