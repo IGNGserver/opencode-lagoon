@@ -41,7 +41,7 @@ class AttachmentPolicyTest {
       api.send(Session("s", "/repo", "Task", 0), "", null, null, inline = listOf(InlineFile("notes.txt", "text/plain", "data:text/plain;base64,SGk=")))
       val prompt = server.takeRequest()
       assertEquals("/api/session/s/prompt", prompt.requestUrl?.encodedPath)
-      val file = JSONObject(prompt.body.readUtf8()).getJSONObject("prompt").getJSONArray("files").getJSONObject(0)
+      val file = JSONObject(prompt.body.readUtf8()).getJSONArray("files").getJSONObject(0)
       assertEquals("data:text/plain;base64,SGk=", file.getString("uri"))
       assertEquals("notes.txt", file.getString("name"))
     }

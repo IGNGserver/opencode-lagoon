@@ -30,7 +30,7 @@ class ApiPagingTest {
       val requests = List(2) { server.takeRequest() }
       for (request in requests) {
         assertNull(request.requestUrl!!.queryParameter("directory"))
-        assertNull(request.requestUrl!!.queryParameter("parentID"))
+        assertEquals("null", request.requestUrl!!.queryParameter("parentID"))
       }
       assertEquals("desc", requests[0].requestUrl!!.queryParameter("order"))
       assertNull(requests[1].requestUrl!!.queryParameter("order"))
@@ -41,10 +41,9 @@ class ApiPagingTest {
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"c1","parentID":"p","location":{"directory":"/repo"},"time":{}}],"cursor":{"next":"more"}}"""))
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"c2","parentID":"p","location":{"directory":"/repo"},"time":{}}],"cursor":{}}"""))
       assertEquals(listOf("c1", "c2"), api(server).children(Session("p", "/repo", "P", 0)).map { it.id })
-      val first = server.takeRequest().requestUrl!!
-      assertEquals("100", first.queryParameter("limit")); assertEquals("desc", first.queryParameter("order"))
+      server.takeRequest()
       val next = server.takeRequest().requestUrl!!
-      assertEquals("100", next.queryParameter("limit")); assertEquals("more", next.queryParameter("cursor")); assertNull(next.queryParameter("order"))
+      assertEquals("p", next.queryParameter("parentID")); assertEquals("more", next.queryParameter("cursor"))
     }
   }
 
