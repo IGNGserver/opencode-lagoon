@@ -23,21 +23,21 @@ class OpenCodeApiTest {
 
   @Test fun healthReadsNativeV2HealthWithBasicAuth() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+      server.enqueue(MockResponse().setBody("""{"version":"2.0.18","pid":123,"urls":[]}"""))
       val api = api(server)
-      assertEquals("2.x", api.health())
+      assertEquals("2.0.18", api.health())
       val info = server.takeRequest()
-      assertEquals("/api/health", info.requestUrl?.encodedPath)
+      assertEquals("/api/info", info.requestUrl?.encodedPath)
       assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", info.getHeader("Authorization"))
       // The version is read once per client.
-      assertEquals("2.x", api.health())
+      assertEquals("2.0.18", api.health())
       assertEquals(1, server.requestCount)
     }
   }
 
   @Test fun aServerWithoutHealthIsRejectedAsNotOpenCode() = runBlocking {
     MockWebServer().use { server ->
-       repeat(2) { server.enqueue(MockResponse().setResponseCode(404)) }
+      repeat(3) { server.enqueue(MockResponse().setResponseCode(404)) }
       val error = runCatching { api(server).health() }.exceptionOrNull()
       assertTrue(error is IOException && error !is ApiException)
       assertTrue(error!!.message!!, error.message!!.contains("OpenCode 服务器"))
@@ -46,22 +46,32 @@ class OpenCodeApiTest {
 
   @Test fun legacyHealthUsesTheDocumentedGlobalHealthRoute() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
+      server.enqueue(MockResponse().setResponseCode(404)) // api/info
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health
       server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"0.0.1"}"""))
       val client = api(server)
       assertEquals("0.0.1", client.health())
+      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
       assertEquals("/api/health", server.takeRequest().requestUrl?.encodedPath)
       assertEquals("/global/health", server.takeRequest().requestUrl?.encodedPath)
     }
   }
 
-  @Test fun capabilityDiscoveryFallsBackFromDocToOpenapiJson() = runBlocking {
+  @Test fun healthSkipsSpaHtmlAndRecoversOnValidEndpoint() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      server.enqueue(MockResponse().setBody("""{"paths":{"/api/health":{"get":{}}}}"""))
+      server.enqueue(MockResponse().setResponseCode(404)) // api/info 404
+      server.enqueue(MockResponse().setBody("<!doctype html><html><body>Web UI</body></html>").addHeader("Content-Type", "text/html")) // api/health intercepted by SPA
+      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"2.0.1"}""")) // global/health
+      val client = api(server)
+      assertEquals("2.0.1", client.health())
+    }
+  }
+
+  @Test fun capabilityDiscoveryPrefersOpenapiJson() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/active":{"get":{}}}}"""))
       val client = api(server)
       assertTrue(client.discoverCapabilities().nativeV2)
-      assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
       assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
     }
   }
@@ -174,7 +184,7 @@ class OpenCodeApiTest {
        assertFalse(caps.nativeV2)
        assertEquals("session", caps.sessionRoot)
        assertEquals("event", caps.eventPath)
-       assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
+       assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
 
       val session = Session("ses_1", "/repo", "Task", 0, model = ModelChoice("p", "m", "M"))
       client.send(session, "hello", null, null, id = "msg_legacy")
@@ -347,11 +357,18 @@ class OpenCodeApiTest {
     }
   }
 
-  @Test fun nativeV2HasNoShellListingRoute() = runBlocking {
+  @Test fun runningShellsAreReadPerLocationInNativeV2() = runBlocking {
     MockWebServer().use { server ->
-       val shells = api(server).shells("/repo")
-       assertTrue(shells.isEmpty())
-       assertEquals(0, server.requestCount)
+      server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[
+        {"id":"sh_1","status":"running","command":"sleep 100","cwd":"/repo","shell":"/bin/bash","file":"/tmp/sh_1","metadata":{"sessionID":"ses_1"},"time":{"started":5}}
+      ]}"""))
+      val shells = api(server).shells("/repo")
+      assertEquals(1, shells.size)
+      assertEquals("sh_1", shells.single().id)
+      assertEquals("ses_1", shells.single().sessionId)
+      val request = server.takeRequest()
+      assertEquals("/api/shell", request.requestUrl?.encodedPath)
+      assertEquals("/repo", request.requestUrl?.queryParameter("location[directory]"))
     }
   }
 
@@ -365,7 +382,7 @@ class OpenCodeApiTest {
       repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
       val api = api(server)
       val capabilities = api.discoverCapabilities()
-       assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
+       assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
        assertFalse(capabilities.diff); assertFalse(capabilities.nativeV2)
       api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
       val rename = server.takeRequest()
@@ -395,17 +412,16 @@ class OpenCodeApiTest {
 
   @Test fun anUnreadableDocumentFallsBackToTheCurrentContract() = runBlocking {
     MockWebServer().use { server ->
-       server.enqueue(MockResponse().setResponseCode(404))
-       server.enqueue(MockResponse().setResponseCode(404))
+       repeat(3) { server.enqueue(MockResponse().setResponseCode(404)) }
        server.enqueue(MockResponse().setResponseCode(204))
        val api = api(server)
        assertEquals(ApiCapabilities.BASELINE, api.discoverCapabilities())
-       assertEquals(2, server.requestCount)
-       assertTrue(runCatching { api.renameSession(Session("ses_1", "/repo", "Old", 0), "New") }.isFailure)
-       api.unrevert(Session("ses_1", "/repo", "Old", 0))
        assertEquals(3, server.requestCount)
-       server.takeRequest(); server.takeRequest()
-       assertEquals("/api/session/ses_1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
+       api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
+       server.takeRequest(); server.takeRequest(); server.takeRequest()
+       val rename = server.takeRequest()
+       assertEquals("PATCH", rename.method)
+       assertEquals("/api/session/ses_1", rename.requestUrl?.encodedPath)
     }
   }
 
@@ -578,9 +594,9 @@ class OpenCodeApiTest {
    */
   @Test fun nonJsonSuccessResponsesReportFriendlyErrors() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html"))
-      server.enqueue(MockResponse().setBody("OK"))
-      server.enqueue(MockResponse().setResponseCode(200))
+      repeat(3) { server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html")) }
+      repeat(3) { server.enqueue(MockResponse().setBody("OK")) }
+      repeat(3) { server.enqueue(MockResponse().setResponseCode(200)) }
       suspend fun healthError(): Throwable? = api(server).let { api -> runCatching { api.health() }.exceptionOrNull() }
       val html = healthError()
       assertTrue("expected IOException, got $html", html is IOException && html !is ApiException)
