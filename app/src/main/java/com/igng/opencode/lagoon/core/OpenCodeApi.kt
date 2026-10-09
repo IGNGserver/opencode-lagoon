@@ -94,7 +94,7 @@ class OpenCodeApi(
     discoveredCapabilities?.let { return it }
     val document = try {
       var found: JSONObject? = null
-      for (path in listOf("doc", "openapi.json")) {
+      for (path in listOf("openapi.json", "doc", "api/openapi.json")) {
         try {
           val candidate = obj(path)
           if (candidate.optJSONObject("paths") != null) {
@@ -104,8 +104,7 @@ class OpenCodeApi(
         } catch (cancel: kotlinx.coroutines.CancellationException) {
           throw cancel
         } catch (error: Exception) {
-          // Older instances and some reverse proxies do not expose `/doc`; keep trying the
-          // published fallback before selecting the native V2 baseline.
+          // If the endpoint is 404, or returns SPA HTML (IOException with "网页"), try next candidate.
           Diagnostics.warn("OpenCodeApi", "无法读取 /$path，尝试下一个能力文档", error)
         }
       }
@@ -331,22 +330,41 @@ class OpenCodeApi(
   }
 
   /**
-   * V2 readiness is `/api/health`, whose response is `{healthy:true}` and intentionally has no
-   * version. The legacy InstanceHttpApi fallback is the documented `/global/health` route.
+   * V2 readiness probe:
+   * 1. Try `api/info` (the standard OpenCode 2.x info endpoint returning version, pid, etc.)
+   * 2. Try `api/health`
+   * 3. Fall back to legacy `global/health`
+   *
+   * If an endpoint returns HTML (such as SPA index.html returned with 200 OK by web UI),
+   * it is caught and skipped to the next candidate instead of failing immediately.
    */
   suspend fun health(): String {
     version?.let { return it }
-    val candidates = listOf("api/health", "global/health")
+    val candidates = listOf("api/info", "api/health", "global/health")
+    var firstNonJsonError: IOException? = null
     for (path in candidates) {
-      val info = try { obj(path) } catch (error: ApiException) {
+      val info = try {
+        obj(path)
+      } catch (error: ApiException) {
         if (error.status == 404) continue
         throw error
+      } catch (error: IOException) {
+        // If web UI SPA intercepts unknown path and returns HTML, jsonObject throws IOException.
+        // Save the first non-JSON error in case all candidates fail because the user provided a web URL.
+        if (error.message?.contains("网页") == true || error.message?.contains("JSON") == true || error.message?.contains("空响应") == true) {
+          if (firstNonJsonError == null) firstNonJsonError = error
+          continue
+        }
+        throw error
       }
-      if (!info.optBoolean("healthy")) continue
+      if (path == "api/info" && (info.has("version") || info.has("pid"))) {
+        return info.str("version").ifBlank { "2.x" }.also { version = it }
+      }
+      if (!info.optBoolean("healthy") && !info.has("pid")) continue
       val result = if (path == "api/health") "2.x" else info.str("version").ifBlank { "2.x" }
       return result.also { version = it }
     }
-    throw IOException("该地址不是 OpenCode 服务器（未找到可用的健康接口）")
+    throw firstNonJsonError ?: IOException("该地址不是 OpenCode 服务器（未找到可用的健康接口）")
   }
 
   suspend fun projects(): List<Project> {
@@ -448,8 +466,15 @@ class OpenCodeApi(
     return statuses.keys().asSequence().filter { statuses.obj(it).str("type") != "idle" }.toSet()
   }
 
-  /** V2 and the documented legacy API report shell lifecycle through events; there is no shell-list REST route. */
-  suspend fun shells(directory: String): List<ShellJob> = emptyList()
+  /**
+   * Running shell jobs for [directory] (`GET /api/shell`). Shells are not sessions: a background
+   * command keeps running while its session execution is idle, so this is the only authoritative
+   * read for "background work still pending" after a cold start (official `shell.list`).
+   */
+  suspend fun shells(directory: String): List<ShellJob> =
+    if (capabilities().nativeV2) {
+      dataArray(obj("api/shell", locationQuery(directory))).objects().mapNotNull { it.toShellJob(directory) }
+    } else emptyList()
 
   suspend fun createSession(directory: String, title: String): Session =
     run {

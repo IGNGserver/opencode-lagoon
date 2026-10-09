@@ -63,10 +63,19 @@ data class ApiCapabilities(
   fun supports(action: SessionAction) = action in actions
 
   companion object {
-    /** Native V2 routes that are safe to use when `/doc` is unavailable. */
+    /** Native V2 routes that are safe to use when `/doc` or `/openapi.json` is unavailable. */
     val BASELINE = ApiCapabilities(
       nativeV2 = true,
-      actions = mapOf(SessionAction.UNREVERT to ActionEndpoint("POST", "api/session/{sessionID}/revert/clear"))
+      actions = mapOf(
+        SessionAction.RENAME to ActionEndpoint("PATCH", "api/session/{sessionID}"),
+        SessionAction.UNREVERT to ActionEndpoint("POST", "api/session/{sessionID}/revert/clear")
+      ),
+      remove = true,
+      removeEndpoint = ActionEndpoint("DELETE", "api/session/{sessionID}"),
+      fork = true,
+      forkEndpoint = ActionEndpoint("POST", "api/session/{sessionID}/fork"),
+      diff = true,
+      diffEndpoint = ActionEndpoint("GET", "api/session/{sessionID}/diff")
     )
 
     fun fromDocument(document: JSONObject): ApiCapabilities {

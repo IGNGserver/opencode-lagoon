@@ -112,7 +112,7 @@ class ControllerRegressionTest {
       sessionBody(path)?.let { return MockResponse().setBody(it) }
       val body = when (path) {
         "/openapi.json" -> return MockResponse().setResponseCode(404)
-        "/api/health" -> """{"healthy":true}"""
+        "/api/info" -> """{"healthy":true}"""
         // The published V2 contract returns Project[] as a bare array.
         "/api/project" -> """[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project","time":{"created":1,"updated":1,"active":1}}]"""
         "/api/session" -> sessionsBody()
@@ -190,7 +190,7 @@ class ControllerRegressionTest {
         paths += request.path.orEmpty()
         val body = when (request.requestUrl!!.encodedPath) {
           "/openapi.json" -> return MockResponse().setResponseCode(404)
-          "/api/health" -> """{"healthy":true}"""
+          "/api/info" -> """{"healthy":true}"""
           "/api/project" -> """{"data":[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project"},{"id":"q","canonical":"/other","name":"Other"}]}"""
           "/api/session" -> {
             assertNull(request.requestUrl!!.queryParameter("directory"))
@@ -281,7 +281,7 @@ class ControllerRegressionTest {
     MockWebServer().use { s ->
       s.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse {
         val body=when(r.requestUrl!!.encodedPath) {
-          "/api/health" -> """{"healthy":true}"""
+          "/api/info" -> """{"healthy":true}"""
           "/api/project" -> """[{"id":"a","canonical":"/a","sandboxes":[]},{"id":"b","canonical":"/b","sandboxes":[]}]"""
           "/api/session" -> """{"data":[{"id":"sb","location":{"directory":"/b"},"title":"B","time":{}}],"cursor":{}}"""
           "/api/session/active" -> return MockResponse().setResponseCode(500)
@@ -299,7 +299,7 @@ class ControllerRegressionTest {
       s.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse {
         paths += r.path.orEmpty()
         val body=when(r.requestUrl!!.encodedPath) {
-          "/api/health" -> """{"healthy":true}"""
+          "/api/info" -> """{"healthy":true}"""
           "/api/project" -> """[{"id":"p","canonical":"/work/repo","sandboxes":[]}]"""
           "/api/session" -> """{"data":[{"id":"ses_r","projectID":"p","location":{"directory":"/work/repo"},"title":"R","time":{"updated":5}}],"cursor":{}}"""
           "/api/session/active" -> """{"data":{"ses_r":{"type":"running"}}}"""
@@ -332,7 +332,7 @@ class ControllerRegressionTest {
   @Test fun queuedSendCannotMixServerAndSession() = runBlocking {
     MockWebServer().use { a -> MockWebServer().use { b ->
       a.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse = when {
-        r.path!!.startsWith("/api/health") -> MockResponse().setBody("""{"healthy":true}""")
+        r.path!!.startsWith("/api/info") -> MockResponse().setBody("""{"healthy":true}""")
         r.path!!.startsWith("/api/session/sa/prompt") -> MockResponse().setBody("{}").setBodyDelay(350,TimeUnit.MILLISECONDS)
         r.path!!.contains("/prompt") -> MockResponse().setBody("{}")
         else -> MockResponse().setBody("""{"data":[]}""")
@@ -353,7 +353,7 @@ class ControllerRegressionTest {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         return when (request.requestUrl!!.encodedPath) {
-          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+          "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/project" -> MockResponse().setBody("""[{"id":"p","canonical":"/repo","sandboxes":[]}]""")
           "/api/session" -> MockResponse().setBody("""{"data":[{"id":"s","location":{"directory":"/repo"},"title":"Task","time":{}}],"cursor":{}}""")
           "/api/session/active" -> MockResponse().setBody("""{"data":{}}""")
@@ -395,7 +395,7 @@ class ControllerRegressionTest {
   @Test fun firstPromptFailureKeepsCreatedSessionDraftAndOldConfiguration() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session" -> MockResponse().setBody("""{"data":{"id":"created","location":{"directory":"/repo"},"title":"","time":{}}}""")
         "/api/session/created/prompt" -> MockResponse().setResponseCode(500)
         "/api/session/created/agent" -> MockResponse().setResponseCode(204)
@@ -430,7 +430,7 @@ class ControllerRegressionTest {
   @Test fun draftFirstSendCreatesOnceAndCarriesPhoneAttachmentsIntoTheSession() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session" -> MockResponse().setBody("""{"data":{"id":"created","location":{"directory":"/repo"},"title":"","time":{}}}""")
         "/api/session/created/prompt" -> MockResponse().setResponseCode(500)
         "/api/session/created/agent" -> MockResponse().setResponseCode(204)
@@ -478,7 +478,7 @@ class ControllerRegressionTest {
   @Test fun notificationTargetOutsideFirstPageResolvesItsParentChain() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher=object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session/old-child" -> MockResponse().setBody("""{"data":{"id":"old-child","parentID":"old-parent","location":{"directory":"/repo"},"time":{}}}""")
         "/api/session/old-parent" -> MockResponse().setBody("""{"data":{"id":"old-parent","location":{"directory":"/repo"},"time":{}}}""")
         else -> MockResponse().setResponseCode(404)
@@ -506,7 +506,7 @@ class ControllerRegressionTest {
       server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         val url = request.requestUrl!!
         return when (url.encodedPath) {
-          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+          "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
             MockResponse().setBody("""{"data":[{"id":"m2","type":"user","time":{"created":2},"text":"b"}],"cursor":{"next":"older"}}""")
           else MockResponse().setBody("""{"data":[{"id":"m1","type":"user","time":{"created":1},"text":"a"}],"cursor":{}}""")
@@ -531,7 +531,7 @@ class ControllerRegressionTest {
       server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         val url = request.requestUrl!!; requests += url.toString()
         return when (url.encodedPath) {
-          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
+          "/api/info" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
             MockResponse().setBody("""{"data":[{"id":"a1","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"mid"}]}],"cursor":{"next":"older"}}""")
           else MockResponse().setBody("""{"data":[{"id":"u1","type":"user","time":{"created":1},"text":"hi"}],"cursor":{}}""")
