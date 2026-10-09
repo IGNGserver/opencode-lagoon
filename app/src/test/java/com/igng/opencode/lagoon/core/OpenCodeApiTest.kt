@@ -21,26 +21,48 @@ import java.util.concurrent.TimeUnit
 class OpenCodeApiTest {
   private fun api(server: MockWebServer) = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), "opencode", allowCleartext = true), "secret")
 
-  @Test fun healthReadsTheServerVersionFromApiInfoWithBasicAuth() = runBlocking {
+  @Test fun healthReadsNativeV2HealthWithBasicAuth() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"version":"2.0.22","pid":1,"urls":[],"paths":{"tmp":"/tmp"}}"""))
+      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
       val api = api(server)
-      assertEquals("2.0.22", api.health())
+      assertEquals("2.x", api.health())
       val info = server.takeRequest()
-      assertEquals("/api/info", info.requestUrl?.encodedPath)
+      assertEquals("/api/health", info.requestUrl?.encodedPath)
       assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", info.getHeader("Authorization"))
       // The version is read once per client.
-      assertEquals("2.0.22", api.health())
+      assertEquals("2.x", api.health())
       assertEquals(1, server.requestCount)
     }
   }
 
-  @Test fun aServerWithoutApiInfoIsRejectedAsNotOpenCode2() = runBlocking {
+  @Test fun aServerWithoutHealthIsRejectedAsNotOpenCode() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
+       repeat(2) { server.enqueue(MockResponse().setResponseCode(404)) }
       val error = runCatching { api(server).health() }.exceptionOrNull()
       assertTrue(error is IOException && error !is ApiException)
-      assertTrue(error!!.message!!, error.message!!.contains("OpenCode 2.x"))
+      assertTrue(error!!.message!!, error.message!!.contains("OpenCode 服务器"))
+    }
+  }
+
+  @Test fun legacyHealthUsesTheDocumentedGlobalHealthRoute() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"0.0.1"}"""))
+      val client = api(server)
+      assertEquals("0.0.1", client.health())
+      assertEquals("/api/health", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("/global/health", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  @Test fun capabilityDiscoveryFallsBackFromDocToOpenapiJson() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      server.enqueue(MockResponse().setBody("""{"paths":{"/api/health":{"get":{}}}}"""))
+      val client = api(server)
+      assertTrue(client.discoverCapabilities().nativeV2)
+      assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
     }
   }
 
@@ -61,11 +83,11 @@ class OpenCodeApiTest {
       assertEquals("/api/session/ses_1/prompt", prompt.requestUrl?.encodedPath)
       val body = JSONObject(prompt.body.readUtf8())
       assertEquals("msg_fixed", body.getString("id"))
-      assertEquals("Fix it", body.getString("text"))
-      assertEquals("steer", body.getString("delivery"))
-      assertEquals("build", body.getJSONObject("metadata").getString("agent"))
-      val file = body.getJSONArray("files").getJSONObject(0)
-      assertEquals("data:image/png;base64,AAA=", file.getString("uri")); assertEquals("a.png", file.getString("name"))
+       assertEquals("Fix it", body.getJSONObject("prompt").getString("text"))
+       assertEquals("steer", body.getString("delivery"))
+       assertFalse(body.has("metadata"))
+       val file = body.getJSONObject("prompt").getJSONArray("files").getJSONObject(0)
+       assertEquals("data:image/png;base64,AAA=", file.getString("uri")); assertEquals("image/png", file.getString("mime")); assertEquals("a.png", file.getString("name"))
     }
   }
 
@@ -75,8 +97,8 @@ class OpenCodeApiTest {
       api(server).send(Session("ses_1", "/repo", "Task", 0), "hello", null, ModelChoice("openai", "gpt", "GPT"))
       server.takeRequest() // POST /model
       val prompt = server.takeRequest()
-      val model = JSONObject(prompt.body.readUtf8()).getJSONObject("metadata").getJSONObject("model")
-      assertFalse(model.has("variant"))
+       val promptBody = JSONObject(prompt.body.readUtf8())
+       assertFalse(promptBody.getJSONObject("prompt").has("metadata"))
     }
   }
 
@@ -105,14 +127,105 @@ class OpenCodeApiTest {
     }
   }
 
-  @Test fun slashCommandsRunThroughTheCommandRoute() = runBlocking {
+  @Test fun nativeV2DoesNotPretendCommandDiscoveryIsExecution() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(204))
-      api(server).command(Session("ses_1", "/repo", "T", 0), "review", "src/main", null, null)
+       assertTrue(runCatching { api(server).command(Session("ses_1", "/repo", "T", 0), "review", "src/main", null, null) }.isFailure)
+       assertEquals(0, server.requestCount)
+    }
+  }
+
+  @Test fun documentedInstanceHttpApiUsesLegacyPathsAndPayloadEnvelopes() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"paths":{
+        "/global/health":{"get":{}},
+        "/session":{"get":{},"post":{}},
+        "/session/{sessionID}":{"get":{},"patch":{"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}}}}}}},"delete":{}},
+        "/session/{sessionID}/message":{"get":{},"post":{}},
+        "/session/{sessionID}/fork":{"post":{}},
+        "/session/{sessionID}/abort":{"post":{}},
+        "/session/{sessionID}/summarize":{"post":{}},
+        "/session/{sessionID}/revert":{"post":{}},
+        "/session/{sessionID}/unrevert":{"post":{}},
+        "/permission":{"get":{}},
+        "/permission/{requestID}/reply":{"post":{}},
+        "/question":{"get":{}},
+        "/question/{requestID}/reply":{"post":{}},
+        "/question/{requestID}/reject":{"post":{}},
+        "/file":{"get":{}},
+        "/file/content":{"get":{}},
+        "/find/file":{"get":{}},
+        "/agent":{"get":{}},
+        "/command":{"get":{}},
+        "/provider":{"get":{}},
+        "/event":{"get":{}}
+      }}"""))
+      server.enqueue(MockResponse().setResponseCode(204)) // legacy prompt
+      server.enqueue(MockResponse().setBody("""[{"id":"per_1","sessionID":"ses_1","action":"bash","resources":["ls"],"save":[]}]"""))
+      server.enqueue(MockResponse().setResponseCode(204)) // permission reply
+      server.enqueue(MockResponse().setBody("""[{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Continue?","header":"Continue","options":[{"label":"Yes","description":"continue"}],"multiple":false}]}]"""))
+      server.enqueue(MockResponse().setResponseCode(204)) // question reply
+      server.enqueue(MockResponse().setResponseCode(204)) // question reject
+      server.enqueue(MockResponse().setBody("""[{"name":"main.kt","path":"main.kt","absolute":"/repo/main.kt","type":"file","ignored":false}]"""))
+      server.enqueue(MockResponse().setBody("""{"type":"text","content":"fun main() {}"}"""))
+      server.enqueue(MockResponse().setBody("""["main.kt"]"""))
+
+      val client = api(server)
+      val caps = client.discoverCapabilities()
+       assertFalse(caps.nativeV2)
+       assertEquals("session", caps.sessionRoot)
+       assertEquals("event", caps.eventPath)
+       assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
+
+      val session = Session("ses_1", "/repo", "Task", 0, model = ModelChoice("p", "m", "M"))
+      client.send(session, "hello", null, null, id = "msg_legacy")
+      val prompt = server.takeRequest()
+      assertEquals("/session/ses_1/message", prompt.requestUrl?.encodedPath)
+      assertEquals("/repo", prompt.requestUrl?.queryParameter("directory"))
+      val promptBody = JSONObject(prompt.body.readUtf8())
+      assertEquals("msg_legacy", promptBody.getString("messageID"))
+      assertEquals("text", promptBody.getJSONArray("parts").getJSONObject(0).getString("type"))
+
+      val permission = client.sessionPermissions(session).single()
+      assertEquals("/permission", server.takeRequest().requestUrl?.encodedPath)
+      client.replyPermission(permission, "once")
+      val permissionReply = server.takeRequest()
+      assertEquals("/permission/per_1/reply", permissionReply.requestUrl?.encodedPath)
+      assertEquals("once", JSONObject(permissionReply.body.readUtf8()).getString("reply"))
+
+      val question = client.forms("/repo").single()
+      assertEquals("/question", server.takeRequest().requestUrl?.encodedPath)
+      client.replyQuestion(question, listOf(listOf("Yes")))
+      val questionReply = server.takeRequest()
+      assertEquals("/question/que_1/reply", questionReply.requestUrl?.encodedPath)
+      assertEquals("Yes", JSONObject(questionReply.body.readUtf8()).getJSONArray("answers").getJSONArray(0).getString(0))
+      client.rejectQuestion(question)
+      assertEquals("/question/que_1/reject", server.takeRequest().requestUrl?.encodedPath)
+
+      assertEquals("main.kt", client.files("/repo", ".").single().path)
+      assertEquals("/file", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("fun main() {}", client.fileContent("/repo", "main.kt").content)
+      assertEquals("/file/content", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals(listOf("main.kt"), client.searchFiles("/repo", "main"))
+      assertEquals("/find/file", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  @Test fun combinedDocumentUsesTheDocumentedLegacyDiffPath() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"paths":{
+        "/api/health":{"get":{}},
+        "/api/session":{"get":{}},
+        "/api/session/{sessionID}":{"get":{}},
+        "/session/{sessionID}/diff":{"get":{}}
+      }}"""))
+      server.enqueue(MockResponse().setBody("""[{"file":"main.kt","patch":"@@","additions":1,"deletions":0,"status":"modified"}]"""))
+      val client = api(server)
+      assertTrue(client.discoverCapabilities().nativeV2)
+      server.takeRequest()
+      assertEquals("main.kt", client.diff(Session("ses_1", "/repo", "Task", 0)).single().path)
       val request = server.takeRequest()
-      assertEquals("/api/session/ses_1/command", request.requestUrl?.encodedPath)
-      val body = JSONObject(request.body.readUtf8())
-      assertEquals("review", body.getString("name")); assertEquals("src/main", body.getString("text"))
+      assertEquals("/session/ses_1/diff", request.requestUrl?.encodedPath)
+      assertEquals("/repo", request.requestUrl?.queryParameter("directory"))
     }
   }
 
@@ -132,6 +245,29 @@ class OpenCodeApiTest {
       assertEquals("20", first.queryParameter("limit")); assertEquals("desc", first.queryParameter("order"))
       val second = server.takeRequest().requestUrl!!
       assertEquals("older", second.queryParameter("cursor")); assertNull(second.queryParameter("order"))
+    }
+  }
+
+  @Test fun legacyMessagePaginationUsesTheDocumentedNextCursorHeader() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"paths":{
+        "/session":{"get":{}},
+        "/session/{sessionID}/message":{"get":{}}
+      }}"""))
+      server.enqueue(MockResponse().setBody("""[{"id":"msg_3","type":"user","time":{"created":3},"text":"third"},{"id":"msg_2","type":"user","time":{"created":2},"text":"second"}]""")
+        .addHeader("X-Next-Cursor", "older"))
+      server.enqueue(MockResponse().setBody("""[{"id":"msg_1","type":"user","time":{"created":1},"text":"first"}]"""))
+      val client = api(server)
+      assertFalse(client.discoverCapabilities().nativeV2)
+      server.takeRequest()
+      val firstPage = client.messagesPage("ses_1")
+      assertEquals(listOf("msg_2", "msg_3"), firstPage.items.map { it.id })
+      assertEquals("older", firstPage.next)
+      client.messagesPage("ses_1", "older")
+      val first = server.takeRequest().requestUrl!!
+      val second = server.takeRequest().requestUrl!!
+      assertEquals("20", first.queryParameter("limit")); assertNull(first.queryParameter("before"))
+      assertEquals("older", second.queryParameter("before"))
     }
   }
 
@@ -156,21 +292,15 @@ class OpenCodeApiTest {
     }
   }
 
-  @Test fun pendingInboxInputBecomesUserRows() = runBlocking {
+  @Test fun nativeV2HasNoInboxRestRoute() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"data":[
-        {"id":"msg_q","sessionID":"ses_1","type":"user","delivery":"queue","payload":{"text":"next","metadata":{"displayText":"下一步"}},"time":{"created":5}},
-        {"id":"msg_c","sessionID":"ses_1","type":"compaction","delivery":"steer","payload":{},"time":{"created":6}}
-      ]}"""))
-      val pending = api(server).inbox("ses_1")
-      assertEquals(listOf("msg_q"), pending.map { it.id })
-      assertTrue(pending.single().queued)
-      assertEquals("下一步", pending.single().parts.single().text)
-      assertEquals("/api/session/ses_1/inbox", server.takeRequest().requestUrl?.encodedPath)
+       val pending = api(server).inbox("ses_1")
+       assertTrue(pending.isEmpty())
+       assertEquals(0, server.requestCount)
     }
   }
 
-  @Test fun permissionsAreReadPerSessionAndRepliedWithADecision() = runBlocking {
+  @Test fun permissionsAreReadPerSessionAndRepliedWithAReply() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"per_a","sessionID":"ses_a","action":"bash","resources":["ls"],"save":["ls *"],"source":{"type":"tool","messageID":"msg","id":"call"}}]}"""))
       server.enqueue(MockResponse().setResponseCode(204))
@@ -181,7 +311,7 @@ class OpenCodeApiTest {
       api.replyPermission(permission, "always")
       val reply = server.takeRequest()
       assertEquals("/api/session/ses_a/permission/per_a/reply", reply.requestUrl?.encodedPath)
-      assertEquals("always", JSONObject(reply.body.readUtf8()).getString("decision"))
+       assertEquals("always", JSONObject(reply.body.readUtf8()).getString("reply"))
       // Without a server-provided save scope, “always” is refused before any request.
       assertTrue(runCatching { api.replyPermission(permission.copy(always = emptyList()), "always") }.isFailure)
       assertEquals(2, server.requestCount)
@@ -190,20 +320,22 @@ class OpenCodeApiTest {
 
   @Test fun formsAreReadAtTheSessionLocation() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[{"id":"frm_a","sessionID":"ses_a","title":"Config","fields":[{"key":"enabled","type":"boolean","required":true}]}]}"""))
+       server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[{"id":"que_a","sessionID":"ses_a","questions":[{"question":"Enable?","header":"Enable","options":[{"label":"Yes","description":"Enable it"}],"multiple":false,"custom":false}]}]}"""))
       server.enqueue(MockResponse().setResponseCode(204))
       server.enqueue(MockResponse().setResponseCode(204))
       val api = api(server)
       val form = api.forms("/repo").single()
       val list = server.takeRequest()
-      assertEquals("/api/form", list.requestUrl?.encodedPath)
+       assertEquals("/api/question/request", list.requestUrl?.encodedPath)
       assertEquals("/repo", list.requestUrl?.queryParameter("location[directory]"))
-      api.replyQuestion(form, listOf(listOf("true")))
-      val reply = server.takeRequest()
-      assertEquals("/api/session/ses_a/form/frm_a/reply", reply.requestUrl?.encodedPath)
-      assertTrue(JSONObject(reply.body.readUtf8()).getJSONObject("answer").getBoolean("enabled"))
-      api.rejectQuestion(form)
-      assertEquals("DELETE", server.takeRequest().method)
+       api.replyQuestion(form, listOf(listOf("Yes")))
+       val reply = server.takeRequest()
+       assertEquals("/api/session/ses_a/question/que_a/reply", reply.requestUrl?.encodedPath)
+       assertEquals("Yes", JSONObject(reply.body.readUtf8()).getJSONArray("answers").getJSONArray(0).getString(0))
+       api.rejectQuestion(form)
+       val reject = server.takeRequest()
+       assertEquals("POST", reject.method)
+       assertEquals("/api/session/ses_a/question/que_a/reject", reject.requestUrl?.encodedPath)
     }
   }
 
@@ -215,21 +347,11 @@ class OpenCodeApiTest {
     }
   }
 
-  @Test fun runningShellsAreReadPerLocationAndCarryTheirSession() = runBlocking {
+  @Test fun nativeV2HasNoShellListingRoute() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"location":{"directory":"/repo"},"data":[
-        {"id":"sh_1","status":"running","command":"sleep 100","cwd":"/repo","shell":"/bin/bash","file":"/tmp/sh_1","metadata":{"sessionID":"ses_1"},"time":{"started":5}},
-        {"id":"sh_2","status":"running","command":"make","cwd":"/repo","shell":"/bin/bash","file":"/tmp/sh_2","metadata":{},"time":{"started":6}}
-      ]}"""))
-      val shells = api(server).shells("/repo")
-      assertEquals(1, shells.size)
-      assertEquals("sh_1", shells.single().id)
-      assertEquals("ses_1", shells.single().sessionId)
-      assertEquals("sleep 100", shells.single().command)
-      assertEquals("/repo", shells.single().directory)
-      val request = server.takeRequest()
-      assertEquals("/api/shell", request.requestUrl?.encodedPath)
-      assertEquals("/repo", request.requestUrl?.queryParameter("location[directory]"))
+       val shells = api(server).shells("/repo")
+       assertTrue(shells.isEmpty())
+       assertEquals(0, server.requestCount)
     }
   }
 
@@ -243,8 +365,8 @@ class OpenCodeApiTest {
       repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
       val api = api(server)
       val capabilities = api.discoverCapabilities()
-      assertEquals("/openapi.json", server.takeRequest().requestUrl?.encodedPath)
-      assertFalse(capabilities.diff); assertNull(capabilities.sessionView)
+       assertEquals("/doc", server.takeRequest().requestUrl?.encodedPath)
+       assertFalse(capabilities.diff); assertFalse(capabilities.nativeV2)
       api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
       val rename = server.takeRequest()
       assertEquals("POST", rename.method); assertEquals("/api/session/ses_1/rename", rename.requestUrl?.encodedPath)
@@ -273,16 +395,17 @@ class OpenCodeApiTest {
 
   @Test fun anUnreadableDocumentFallsBackToTheCurrentContract() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setResponseCode(404))
-      repeat(2) { server.enqueue(MockResponse().setResponseCode(204)) }
-      val api = api(server)
-      assertEquals(ApiCapabilities.BASELINE, api.discoverCapabilities())
-      server.takeRequest()
-      api.renameSession(Session("ses_1", "/repo", "Old", 0), "New")
-      val rename = server.takeRequest()
-      assertEquals("PATCH", rename.method); assertEquals("/api/session/ses_1", rename.requestUrl?.encodedPath)
-      api.unrevert(Session("ses_1", "/repo", "Old", 0))
-      assertEquals("DELETE", server.takeRequest().method)
+       server.enqueue(MockResponse().setResponseCode(404))
+       server.enqueue(MockResponse().setResponseCode(404))
+       server.enqueue(MockResponse().setResponseCode(204))
+       val api = api(server)
+       assertEquals(ApiCapabilities.BASELINE, api.discoverCapabilities())
+       assertEquals(2, server.requestCount)
+       assertTrue(runCatching { api.renameSession(Session("ses_1", "/repo", "Old", 0), "New") }.isFailure)
+       api.unrevert(Session("ses_1", "/repo", "Old", 0))
+       assertEquals(3, server.requestCount)
+       server.takeRequest(); server.takeRequest()
+       assertEquals("/api/session/ses_1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
     }
   }
 
@@ -295,10 +418,17 @@ class OpenCodeApiTest {
   }
 
   @Test fun eventFramesKeepTypeDataLocationAndCreatedTime() {
-    val event = """{"id":"evt_1","created":42,"type":"session.text.delta","location":{"directory":"/repo"},"data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"hi"}}""".toServerEvent("")
-    assertEquals("evt_1", event.id); assertEquals("session.text.delta", event.type); assertEquals("/repo", event.directory)
-    assertEquals(42L, event.created); assertEquals("hi", event.properties.getString("delta"))
-    assertEquals("msg_1", TranscriptProjection.messageId(event))
+        val event = """{"id":"evt_1","type":"session.next.text.delta","location":{"directory":"/repo"},"data":{"timestamp":42,"sessionID":"ses_1","assistantMessageID":"msg_a","textID":"txt_a","delta":"hi"}}""".toServerEvent("")
+        assertEquals("evt_1", event.id); assertEquals("session.next.text.delta", event.type); assertEquals("/repo", event.directory)
+     assertEquals(42L, event.created); assertEquals("hi", event.properties.getString("delta"))
+     assertEquals("msg_1", TranscriptProjection.messageId(event))
+  }
+
+  @Test fun legacySseEnvelopeKeepsPropertiesAndSupportsTopLevelEventFrames() {
+    val wrapped = """{"directory":"/repo","payload":{"id":"evt_old","type":"permission.asked","properties":{"timestamp":7,"sessionID":"ses_1"}}}""".toServerEvent("")
+    assertEquals("evt_old", wrapped.id); assertEquals("permission.asked", wrapped.type); assertEquals("/repo", wrapped.directory); assertEquals(7L, wrapped.created)
+    val topLevel = """{"id":"evt_instance","type":"session.execution.succeeded","properties":{"created":9,"sessionID":"ses_1","directory":"/repo"}}""".toServerEvent("")
+    assertEquals("evt_instance", topLevel.id); assertEquals("session.execution.succeeded", topLevel.type); assertEquals("/repo", topLevel.directory); assertEquals(9L, topLevel.created)
   }
 
   @Test fun taskPhaseGroupsStayConsistent() {
@@ -326,6 +456,13 @@ class OpenCodeApiTest {
     assertEquals(TaskPhase.COMPLETED, completed.phase)
     assertEquals(TaskPhase.COMPLETED, TaskReducer.status("id", false, completed).phase)
     assertEquals(TaskPhase.THINKING, TaskReducer.status("id", true, completed).phase)
+  }
+
+  @Test fun legacyQuestionEventsUseTheQuestionV1Names() {
+    val waiting = TaskReducer.event("s", "question.asked", JSONObject("""{"sessionID":"s","id":"que_1","questions":[]}"""), null)
+    assertEquals(TaskPhase.WAITING_QUESTION, waiting?.phase)
+    val resumed = TaskReducer.event("s", "question.replied", JSONObject("""{"sessionID":"s","requestID":"que_1"}"""), waiting)
+    assertEquals(TaskPhase.THINKING, resumed?.phase)
   }
 
   /** Contract validation for TaskReducer phase transitions. */
