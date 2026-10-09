@@ -45,7 +45,7 @@ data class Session(val id: String, val directory: String, val title: String, val
 data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null,
   val agent: String? = null, val model: ModelChoice? = null, val completedAt: Long? = null, val finish: String? = null,
   val errorType: String? = null, val retry: String? = null, val notice: Notice? = null,
-  /** Admitted input not yet delivered to the agent (`/inbox`); `queue` items wait for the current turn. */
+  /** Admitted input not yet delivered to the agent; `queue` items wait for the current turn. */
   val queued: Boolean = false, val type: String = role)
 
 /** Official `Notice` row: a label, optional detail/items and, for subagent results, the child session. */
@@ -102,9 +102,8 @@ data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
 
 /**
- * 一条运行中的 shell 作业（`GET /api/shell` 的 `Shell.Info` 或 `shell.created` 事件）。
- * [sessionId] 来自服务端写入的 `metadata.sessionID`；后台 shell 不是会话，因此不在
- * `/api/session/active` 里，需要单独跟踪（对齐官方 `packages/app/src/session/requests/background.ts`）。
+ * 一条运行中的 shell 作业（由 V2 的 `session.next.shell.*` 或兼容事件投影）。
+ * 后台 shell 不是会话，因此不在 `/api/session/active` 里，需要单独跟踪。
  */
 data class ShellJob(
   val id: String,
@@ -112,7 +111,7 @@ data class ShellJob(
   val command: String,
   val started: Long,
   val directory: String,
-  /** 本机观测时间：目录读取失败时用于过期旧条目，避免事件丢失后“后台运行中”僵死。 */
+  /** 本机首次观测时间，保留用于诊断与未来的本地状态恢复。 */
   val observedAt: Long = System.currentTimeMillis()
 )
 
@@ -228,7 +227,7 @@ internal fun JSONObject.toMessage(): Message {
       val parts = arr("content").objects().map { content ->
         val kind = content.str("type")
         // Official part ids: tool calls keep their call id; text/reasoning are `<message>:<type>:<ordinal>`.
-        val partId = if (kind == "tool") content.str("id") else "$id:$kind:${ordinals.merge(kind, 1, Int::plus)!! - 1}"
+        val partId = content.str("id").ifBlank { "$id:$kind:${ordinals.merge(kind, 1, Int::plus)!! - 1}" }
         content.toAssistantPart(partId)
       }
       val error = optJSONObject("error")
@@ -237,16 +236,20 @@ internal fun JSONObject.toMessage(): Message {
         longPath("time", "completed").takeIf { it > 0 }, str("finish").ifBlank { null }, error?.str("type")?.ifBlank { null },
         retry?.let { "第 ${it.optInt("attempt")} 次重试：${it.obj("error").str("message")}" }, type = type)
     }
-    "shell" -> Message(id, "shell", created, listOf(shellPart(id, str("command"), str("status"), opt("exit") as? Number, obj("output").str("output"))
-      .copy(target = str("shellID").ifBlank { null })),
-      completedAt = longPath("time", "completed").takeIf { it > 0 }, type = type)
+    "shell" -> {
+      val completed = longPath("time", "completed")
+      val status = str("status").ifBlank { if (completed > 0) "exited" else "running" }
+      Message(id, "shell", created, listOf(shellPart(id, str("command"), status, opt("exit") as? Number, str("output").ifBlank { obj("output").str("output") })
+        .copy(target = str("callID").ifBlank { str("shellID") }.ifBlank { null })),
+        completedAt = completed.takeIf { it > 0 }, type = type)
+    }
     "idle" -> Message(id, "hidden", created, emptyList(), type = type)
     else -> noticeMessage(id, created, type, this)
   }
 }
 
-/** A pending `/inbox` item rendered like the official transcript does before delivery. */
-internal fun JSONObject.toInboxMessage(): Message? {
+/** A pending admitted-input item rendered like the official transcript does before delivery. */
+internal fun JSONObject.toPendingMessage(): Message? {
   val payload = obj("payload")
   val created = longPath("time", "created")
   val queued = str("delivery") == "queue"
@@ -316,7 +319,7 @@ private fun noticeMessage(id: String, created: Long, type: String, source: JSONO
     "compaction" -> when (source.str("status")) {
       "running" -> Notice("正在整理上下文", running = true)
       "failed" -> Notice("上下文整理失败", source.obj("error").str("message"), error = true)
-      else -> Notice("上下文已整理")
+      else -> Notice("上下文已整理", source.str("summary").ifBlank { source.str("text") })
     }
     else -> null
   }
@@ -350,7 +353,8 @@ internal fun JSONObject.toAssistantPart(id: String): MessagePart {
     error = state.optJSONObject("error")?.str("message").orEmpty().ifBlank { if (shellFailed) "退出码 ${metadata.opt("exit") ?: "超时"}" else "" },
     patch = diffs.joinToString("\n") { it.str("patch") }.trim(),
     files = diffs.map { it.str("file") }.filter(String::isNotBlank),
-    attachments = content.objects().filter { it.str("type") == "file" }.let { JSONArray(it) }.toAttachments(),
+    attachments = (state.arr("attachments").objects() + content.objects().filter { it.str("type") == "file" })
+      .let { JSONArray(it.distinctBy { item -> item.str("uri").ifBlank { item.str("url") }.ifBlank { item.str("path") } }) }.toAttachments(),
     target = (metadata.str("sessionID").ifBlank { inputObject?.str("sessionID").orEmpty() }).takeIf { name in SUBAGENT_TOOLS && it.isNotBlank() }
   )
 }
@@ -368,9 +372,29 @@ internal fun JSONObject.toPermission(directory: String): PermissionRequest {
   val source = obj("source")
   return PermissionRequest(
     str("id"), str("sessionID"), directory, str("action"), detail,
-    arr("save").strings(), source.str("messageID"), source.str("id")
+    arr("save").strings(), source.str("messageID"), source.str("callID").ifBlank { source.str("id") }
   )
 }
+
+/** Parses a native V2 question request; answers are option labels, not legacy form field values. */
+internal fun JSONObject.toQuestion(directory: String): QuestionRequest = QuestionRequest(
+  id = str("id"),
+  sessionId = str("sessionID"),
+  directory = directory,
+  questions = arr("questions").objects().map { question ->
+    val options = question.arr("options").objects().map { option ->
+      QuestionOption(option.str("label"), option.str("description"), option.str("label"))
+    }
+    QuestionPrompt(
+      title = question.str("question").ifBlank { question.str("header") },
+      options = options,
+      multiple = question.optBoolean("multiple", false),
+      custom = !question.has("custom") || question.optBoolean("custom"),
+      field = ""
+    )
+  },
+  form = false
+)
 /** `FileDiff.Info` from `GET /api/session/{id}/diff`. */
 internal fun JSONObject.toChange(): FileChange = FileChange(
   path = str("file").ifBlank { str("path") }, after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
@@ -378,8 +402,8 @@ internal fun JSONObject.toChange(): FileChange = FileChange(
 )
 
 /**
- * One running shell (`Shell.Info`). The server's `shell.list` already returns running commands only;
- * the guard keeps `shell.created` and defensive parsing on the same contract.
+ * One running shell payload from a compatible lifecycle event. There is intentionally no REST
+ * listing fallback: V2 shell state is derived from the event stream and local projection.
  */
 internal fun JSONObject.toShellJob(directory: String): ShellJob? {
   val id = str("id")
@@ -433,6 +457,11 @@ object TaskReducer {
   private fun running(sessionId: String, phase: TaskPhase, previous: TaskState?, since: Long, at: Long): TaskState? =
     if (previous?.phase in TaskState.TERMINAL_PHASES || previous?.phase in TaskState.WAITING_PHASES) previous
     else TaskState(sessionId, phase, TaskState.RUNNING_DETAIL, since, activeAt = at, background = previous?.background == true)
+  private fun admitted(sessionId: String, previous: TaskState?, at: Long): TaskState =
+    if (previous?.phase in TaskState.TERMINAL_PHASES)
+      TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, at, activeAt = at)
+    else running(sessionId, TaskPhase.THINKING, previous, previous?.since ?: at, at) ?:
+      TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, at, activeAt = at)
 
   private fun waiting(sessionId: String, phase: TaskPhase, detail: String, previous: TaskState?, since: Long): TaskState =
     TaskState(sessionId, phase, detail, since, activeAt = previous?.activeAt ?: -1L, background = previous?.background == true)
@@ -482,16 +511,33 @@ object TaskReducer {
         else TaskState(sessionId, if (running) previous!!.phase else TaskPhase.THINKING,
           if (running) previous!!.detail else TaskState.BACKGROUND_DETAIL, since, activeAt = at, background = true)
       }
-      "permission.asked" -> waiting(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previous, since)
-      "form.created" -> waiting(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previous, since)
-      "permission.replied", "form.replied", "form.cancelled" ->
+      "permission.asked", "permission.v2.asked" -> waiting(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previous, since)
+      "form.created", "question.asked", "question.v2.asked" -> waiting(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previous, since)
+      "permission.replied", "permission.v2.replied", "form.replied", "form.cancelled", "question.replied", "question.rejected", "question.v2.replied", "question.v2.rejected" ->
         if (previous?.phase in TaskState.WAITING_PHASES)
           TaskState(sessionId, TaskPhase.THINKING, TaskState.RUNNING_DETAIL, since, activeAt = at, background = previous!!.background)
         else previous
-      "session.step.started", "session.reasoning.started", "session.text.started", "session.retry.scheduled" ->
+      "session.next.prompted", "session.next.prompt.admitted" -> admitted(sessionId, previous, at)
+      "session.step.started", "session.next.step.started",
+      "session.reasoning.started", "session.next.reasoning.started", "session.text.started", "session.next.text.started",
+      "session.retry.scheduled", "session.next.retried" ->
         running(sessionId, TaskPhase.THINKING, previous, since, at)
-      "session.tool.called" -> {
-        val tool = properties.str("name")
+      "session.next.step.ended" -> {
+        // V2 emits one step settlement for every provider turn. Tool calls are followed by another
+        // step, so only a non-continuing finish settles the user-visible run.
+        val finish = properties.str("finish")
+        if (finish in setOf("", "tool-calls", "tool_use", "function_call", "continue"))
+          running(sessionId, TaskPhase.THINKING, previous, since, at)
+        else if (backgroundWork || previous?.background == true)
+          TaskState(sessionId, TaskPhase.THINKING, TaskState.BACKGROUND_DETAIL, since, activeAt = at, background = true)
+        else if (previous?.active == true)
+          TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", since, at)
+        else previous
+      }
+      "session.next.step.failed" -> TaskState(sessionId, TaskPhase.FAILED,
+        properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since, at)
+      "session.tool.called", "session.next.tool.called" -> {
+        val tool = properties.str("tool").ifBlank { properties.str("name") }
         val phase = when {
           tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
           tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(properties.obj("input").str("command")) -> TaskPhase.TESTING
@@ -499,10 +545,11 @@ object TaskReducer {
         }
         running(sessionId, phase, previous, since, at)
       }
-      "session.tool.input.started" -> {
-        val tool = properties.str("name")
+      "session.tool.input.started", "session.next.tool.input.started" -> {
+        val tool = properties.str("name").ifBlank { properties.str("tool") }
         running(sessionId, if (tool in SUBAGENT_TOOLS) TaskPhase.SUBAGENT else TaskPhase.TOOL, previous, since, at)
       }
+      "session.next.shell.started" -> running(sessionId, TaskPhase.TOOL, previous, since, at)
       else -> null
     }
   }

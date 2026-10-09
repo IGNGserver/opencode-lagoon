@@ -112,7 +112,7 @@ class ControllerRegressionTest {
       sessionBody(path)?.let { return MockResponse().setBody(it) }
       val body = when (path) {
         "/openapi.json" -> return MockResponse().setResponseCode(404)
-        "/api/info" -> """{"version":"2.0.22"}"""
+        "/api/health" -> """{"healthy":true}"""
         // The published V2 contract returns Project[] as a bare array.
         "/api/project" -> """[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project","time":{"created":1,"updated":1,"active":1}}]"""
         "/api/session" -> sessionsBody()
@@ -190,11 +190,11 @@ class ControllerRegressionTest {
         paths += request.path.orEmpty()
         val body = when (request.requestUrl!!.encodedPath) {
           "/openapi.json" -> return MockResponse().setResponseCode(404)
-          "/api/info" -> """{"version":"2.0.22"}"""
+          "/api/health" -> """{"healthy":true}"""
           "/api/project" -> """{"data":[{"id":"p","canonical":"/repo","sandboxes":["/trees/task"],"name":"Project"},{"id":"q","canonical":"/other","name":"Other"}]}"""
           "/api/session" -> {
             assertNull(request.requestUrl!!.queryParameter("directory"))
-            assertEquals("null", request.requestUrl!!.queryParameter("parentID"))
+            assertNull(request.requestUrl!!.queryParameter("parentID"))
             """{"data":[{"id":"tree","projectID":"p","title":"Server title","location":{"directory":"/trees/task"},"time":{"updated":20}},{"id":"other","projectID":"q","title":"Other session","location":{"directory":"/other"},"time":{"updated":10}}],"cursor":{}}"""
           }
           "/api/session/active" -> """{"data":{}}"""
@@ -268,8 +268,10 @@ class ControllerRegressionTest {
   }
   @Test fun slowDeletePreservesNewlySelectedSession() = runBlocking {
     MockWebServer().use { s ->
-      s.enqueue(MockResponse().setBody("""{"healthy":true}"""));s.enqueue(MockResponse().setResponseCode(204).setHeadersDelay(250,TimeUnit.MILLISECONDS))
-      val api=api(s);api.health();s.takeRequest()
+       s.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+       s.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}":{"delete":{}}}}"""))
+       s.enqueue(MockResponse().setResponseCode(204).setHeadersDelay(250,TimeUnit.MILLISECONDS))
+       val api=api(s);api.health();s.takeRequest();api.discoverCapabilities();s.takeRequest()
       val(c,state)=controller(api,LagoonState(serverId="server",connected=true,sessions=listOf(Session("a","/repo","A",0),Session("b","/repo","B",0)),sessionId="a"))
       val job=c.deleteSession();assertNotNull(s.takeRequest(2,TimeUnit.SECONDS));state.value=state.value.copy(sessionId="b")
       job.join();assertEquals("b",state.value.sessionId)
@@ -279,7 +281,7 @@ class ControllerRegressionTest {
     MockWebServer().use { s ->
       s.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse {
         val body=when(r.requestUrl!!.encodedPath) {
-          "/api/info" -> """{"version":"2.0.22"}"""
+          "/api/health" -> """{"healthy":true}"""
           "/api/project" -> """[{"id":"a","canonical":"/a","sandboxes":[]},{"id":"b","canonical":"/b","sandboxes":[]}]"""
           "/api/session" -> """{"data":[{"id":"sb","location":{"directory":"/b"},"title":"B","time":{}}],"cursor":{}}"""
           "/api/session/active" -> return MockResponse().setResponseCode(500)
@@ -297,12 +299,12 @@ class ControllerRegressionTest {
       s.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse {
         paths += r.path.orEmpty()
         val body=when(r.requestUrl!!.encodedPath) {
-          "/api/info" -> """{"version":"2.0.22"}"""
+          "/api/health" -> """{"healthy":true}"""
           "/api/project" -> """[{"id":"p","canonical":"/work/repo","sandboxes":[]}]"""
           "/api/session" -> """{"data":[{"id":"ses_r","projectID":"p","location":{"directory":"/work/repo"},"title":"R","time":{"updated":5}}],"cursor":{}}"""
           "/api/session/active" -> """{"data":{"ses_r":{"type":"running"}}}"""
           "/api/session/ses_r/permission" -> """{"data":[{"id":"per_1","sessionID":"ses_r","action":"bash","resources":["rm -rf build"]}]}"""
-          "/api/form" -> """{"location":{"directory":"/work/repo"},"data":[]}"""
+          "/api/question/request" -> """{"location":{"directory":"/work/repo"},"data":[]}"""
           else -> """{"data":[]}"""
         }; return MockResponse().setBody(body)
       }}
@@ -312,15 +314,17 @@ class ControllerRegressionTest {
       assertEquals(TaskPhase.WAITING_PERMISSION, state.value.tasks["ses_r"]?.phase)
       // The location-scoped list is never read without a location: it would only cover the server's cwd.
       assertFalse(paths.any { it.startsWith("/api/permission/request") })
-      assertTrue(paths.any { it.startsWith("/api/form") && it.contains("location%5Bdirectory%5D=%2Fwork%2Frepo") })
+      assertTrue(paths.any { it.startsWith("/api/question/request") && it.contains("location%5Bdirectory%5D=%2Fwork%2Frepo") })
       refresh(c, controlOnly=true)
       assertEquals(listOf("per_1"), state.value.permissions.map { it.id })
     }
   }
   @Test fun forkResponseSelectsNewSession() = runBlocking {
     MockWebServer().use { s ->
-      s.enqueue(MockResponse().setBody("""{"version":"2.0.22"}"""));s.enqueue(MockResponse().setBody("""{"data":{"id":"forked","location":{"directory":"/repo"},"title":"Fork","time":{}}}"""))
-      val api=api(s);api.health()
+       s.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+       s.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}/fork":{"post":{}}}}"""))
+       s.enqueue(MockResponse().setBody("""{"data":{"id":"forked","location":{"directory":"/repo"},"title":"Fork","time":{}}}"""))
+       val api=api(s);api.health();s.takeRequest();api.discoverCapabilities();s.takeRequest()
       val(c,state)=controller(api,LagoonState(serverId="server",connected=true,sessions=listOf(Session("original","/repo","Original",0)),sessionId="original"))
       c.fork().join();assertEquals("forked",state.value.sessionId);assertTrue(state.value.sessions.any{it.id=="forked"})
     }
@@ -328,7 +332,7 @@ class ControllerRegressionTest {
   @Test fun queuedSendCannotMixServerAndSession() = runBlocking {
     MockWebServer().use { a -> MockWebServer().use { b ->
       a.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse = when {
-        r.path!!.startsWith("/api/info") -> MockResponse().setBody("""{"version":"2.0.22"}""")
+        r.path!!.startsWith("/api/health") -> MockResponse().setBody("""{"healthy":true}""")
         r.path!!.startsWith("/api/session/sa/prompt") -> MockResponse().setBody("{}").setBodyDelay(350,TimeUnit.MILLISECONDS)
         r.path!!.contains("/prompt") -> MockResponse().setBody("{}")
         else -> MockResponse().setBody("""{"data":[]}""")
@@ -349,7 +353,7 @@ class ControllerRegressionTest {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         return when (request.requestUrl!!.encodedPath) {
-          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/project" -> MockResponse().setBody("""[{"id":"p","canonical":"/repo","sandboxes":[]}]""")
           "/api/session" -> MockResponse().setBody("""{"data":[{"id":"s","location":{"directory":"/repo"},"title":"Task","time":{}}],"cursor":{}}""")
           "/api/session/active" -> MockResponse().setBody("""{"data":{}}""")
@@ -378,7 +382,7 @@ class ControllerRegressionTest {
 
   @Test fun outgoingComposerCannotWriteOrSendIntoAnotherSession() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"version":"2.0.22"}"""))
+      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
       val api = api(server); api.health()
       val (controller, state) = controller(api, LagoonState(serverId="server", connected=true,
         sessions=listOf(Session("new", "/repo", "New", 0)), sessionId="new", draft="new draft"))
@@ -391,7 +395,7 @@ class ControllerRegressionTest {
   @Test fun firstPromptFailureKeepsCreatedSessionDraftAndOldConfiguration() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session" -> MockResponse().setBody("""{"data":{"id":"created","location":{"directory":"/repo"},"title":"","time":{}}}""")
         "/api/session/created/prompt" -> MockResponse().setResponseCode(500)
         "/api/session/created/agent" -> MockResponse().setResponseCode(204)
@@ -416,7 +420,9 @@ class ControllerRegressionTest {
       val requests=List(server.requestCount) { server.takeRequest() }
       assertEquals(1, requests.count { it.method == "POST" && it.requestUrl!!.encodedPath == "/api/session" })
       assertEquals("build", org.json.JSONObject(requests.single { it.requestUrl!!.encodedPath.endsWith("/agent") }.body.readUtf8()).getString("agent"))
-      assertEquals("build", org.json.JSONObject(requests.single { it.requestUrl!!.encodedPath.endsWith("/prompt") }.body.readUtf8()).getJSONObject("metadata").getString("agent"))
+      val promptBody = org.json.JSONObject(requests.single { it.requestUrl!!.encodedPath.endsWith("/prompt") }.body.readUtf8())
+      assertFalse(promptBody.has("metadata"))
+      assertEquals("retry this prompt", promptBody.getJSONObject("prompt").getString("text"))
       // The failed admission leaves no optimistic row behind.
       assertTrue(state.value.messages.none { it.role == "user" })
     }
@@ -424,7 +430,7 @@ class ControllerRegressionTest {
   @Test fun draftFirstSendCreatesOnceAndCarriesPhoneAttachmentsIntoTheSession() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session" -> MockResponse().setBody("""{"data":{"id":"created","location":{"directory":"/repo"},"title":"","time":{}}}""")
         "/api/session/created/prompt" -> MockResponse().setResponseCode(500)
         "/api/session/created/agent" -> MockResponse().setResponseCode(204)
@@ -456,8 +462,10 @@ class ControllerRegressionTest {
   }
   @Test fun rejectedDeleteKeepsSessionAndDoesNotNavigateAway() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("""{"version":"2.0.22"}""")); server.enqueue(MockResponse().setResponseCode(500))
-      val api = api(server); api.health()
+       server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+       server.enqueue(MockResponse().setBody("""{"paths":{"/api/session/{sessionID}":{"delete":{}}}}"""))
+       server.enqueue(MockResponse().setResponseCode(500))
+       val api = api(server); api.health(); server.takeRequest(); api.discoverCapabilities(); server.takeRequest()
       val (controller, state)=controller(api, LagoonState(serverId="server", connected=true,
         sessions=listOf(Session("s", "/repo", "Task", 0)), sessionId="s"))
       var navigated=false
@@ -470,7 +478,7 @@ class ControllerRegressionTest {
   @Test fun notificationTargetOutsideFirstPageResolvesItsParentChain() = runBlocking {
     MockWebServer().use { server ->
       server.dispatcher=object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
-        "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+        "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
         "/api/session/old-child" -> MockResponse().setBody("""{"data":{"id":"old-child","parentID":"old-parent","location":{"directory":"/repo"},"time":{}}}""")
         "/api/session/old-parent" -> MockResponse().setBody("""{"data":{"id":"old-parent","location":{"directory":"/repo"},"time":{}}}""")
         else -> MockResponse().setResponseCode(404)
@@ -498,7 +506,7 @@ class ControllerRegressionTest {
       server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         val url = request.requestUrl!!
         return when (url.encodedPath) {
-          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
             MockResponse().setBody("""{"data":[{"id":"m2","type":"user","time":{"created":2},"text":"b"}],"cursor":{"next":"older"}}""")
           else MockResponse().setBody("""{"data":[{"id":"m1","type":"user","time":{"created":1},"text":"a"}],"cursor":{}}""")
@@ -523,8 +531,7 @@ class ControllerRegressionTest {
       server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
         val url = request.requestUrl!!; requests += url.toString()
         return when (url.encodedPath) {
-          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
-          "/api/session/s/inbox" -> MockResponse().setBody("""{"data":[]}""")
+          "/api/health" -> MockResponse().setBody("""{"healthy":true}""")
           "/api/session/s/message" -> if (url.queryParameter("cursor") == null)
             MockResponse().setBody("""{"data":[{"id":"a1","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"mid"}]}],"cursor":{"next":"older"}}""")
           else MockResponse().setBody("""{"data":[{"id":"u1","type":"user","time":{"created":1},"text":"hi"}],"cursor":{}}""")

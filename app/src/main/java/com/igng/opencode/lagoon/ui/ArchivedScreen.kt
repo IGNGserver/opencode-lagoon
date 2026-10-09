@@ -31,7 +31,7 @@ internal fun ArchivedScreen(state: LagoonState, controller: LagoonController, on
       items(archived, key = { it.id }) { session ->
         HomeSessionRow(session, SessionStatus.NONE, unseen = false, onClick = { onOpen(session.id) }, actions = buildList {
           if (state.connected && state.capabilities.archive?.restorable == true) add(MenuAction("取消归档", UNARCHIVE_ICON) { controller.setArchived(session.id, false) })
-          if (state.connected) add(MenuAction("删除", MiuixIcons.Delete, danger = true) { deleting = session })
+          if (state.connected && state.capabilities.remove) add(MenuAction("删除", MiuixIcons.Delete, danger = true) { deleting = session })
         })
       }
       if (archived.isEmpty()) item {

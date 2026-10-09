@@ -57,6 +57,18 @@ class TranscriptProjectionTest {
     assertEquals("error", done.single().parts.single().status)
   }
 
+  @Test fun nativeV2ShellEventsKeepTheCallIdAndCompleteOnlyOnTheEndEvent() {
+    val started = listOf(Message("msg_a", "assistant", 1, emptyList(), type = "assistant"))
+      .apply("session.next.shell.started", """{"sessionID":"s","messageID":"msg_shell","callID":"call_1","command":"pwd"}""")
+    assertEquals("msg_shell", started.last().id)
+    assertEquals("call_1", started.last().parts.single().target)
+    assertEquals("running", started.last().parts.single().status)
+    val ended = started.apply("session.next.shell.ended", """{"sessionID":"s","callID":"call_1","output":"/repo\n"}""")
+    assertEquals("completed", ended.last().parts.single().status)
+    assertEquals("/repo\n", ended.last().parts.single().output)
+    assertNotNull(ended.last().completedAt)
+  }
+
   @Test fun instructionUpdatesBecomeNoticesNeverReplies() {
     val messages = listOf(Message("msg_a", "assistant", 1, emptyList(), type = "assistant"))
       .apply("session.instructions.updated", """{"sessionID":"s","delta":{"mcp:playwright":{}},"text":"tools.playwright.browser_close(): Promise<unknown>"}""")
