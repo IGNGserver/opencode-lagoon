@@ -813,12 +813,12 @@ class LagoonController private constructor(private val appContext: Context) {
         notifyAttention(request.sessionId)
       }
       "permission.replied" -> {
-        val requestId = props.str("requestID")
+        val requestId = props.str("requestID").ifBlank { props.str("id") }
         mutable.update { it.copy(permissions = it.permissions.filterNot { old -> old.id == requestId }) }
         cancelAttention(sessionId)
       }
       "form.replied", "form.cancelled" -> {
-        val requestId = props.str("id")
+        val requestId = props.str("id").ifBlank { props.str("requestID") }
         mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
         cancelAttention(sessionId)
       }
@@ -1550,7 +1550,11 @@ class LagoonController private constructor(private val appContext: Context) {
   }
   fun replyPermission(request: PermissionRequest, reply: String) = act("permission:${request.id}", request.directory) { op ->
     check(request in op.snapshot.permissions) { "权限请求已变化，请刷新" }
-    op.client.replyPermission(request, reply)
+    try {
+      op.client.replyPermission(request, reply)
+    } catch (e: ApiException) {
+      if (e.status != 404) throw e
+    }
     op.commitConnection { it.copy(permissions = it.permissions.filterNot { p -> p.id == request.id }) }
     cancelAttention(request.sessionId)
   }

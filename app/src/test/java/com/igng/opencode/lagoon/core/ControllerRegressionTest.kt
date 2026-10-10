@@ -517,6 +517,25 @@ class ControllerRegressionTest {
     }
   }
 
+  @Test fun replyPermissionTolerates404WhenAlreadySettledElsewhere() = runBlocking {
+    MockWebServer().use { server ->
+      server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest): MockResponse {
+        return when (request.requestUrl!!.encodedPath) {
+          "/api/info" -> MockResponse().setBody("""{"version":"2.0.22"}""")
+          "/api/session/ses_r/permission/per_1/reply" -> MockResponse().setResponseCode(404).setBody("""{"message":"Permission request not found"}""")
+          else -> MockResponse().setBody("""{"data":[]}""")
+        }
+      } }
+      val api = api(server); api.health()
+      val perm = PermissionRequest("per_1", "ses_r", "/repo", "bash", "ls", emptyList())
+      val (controller, state) = controller(api, LagoonState(serverId = "server", connected = true,
+        permissions = listOf(perm), tasks = mapOf("ses_r" to TaskState("ses_r", TaskPhase.WAITING_PERMISSION))))
+      controller.replyPermission(perm, "once").join()
+      assertTrue(state.value.permissions.isEmpty())
+      assertFalse(state.value.pending("permission:per_1"))
+    }
+  }
+
   @Test fun initialLoadPullsOlderPagesUntilTheWindowStartsOnAWholeTurn() = runBlocking {
     MockWebServer().use { server ->
       val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
