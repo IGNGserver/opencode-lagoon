@@ -180,7 +180,7 @@ class MainActivity : ComponentActivity() {
           throw cancel
         } finally { gestureActive = false; peekRoute = null }
       }
-      OpenCodeMiuixTheme(dark) {
+      LagoonMiuixTheme(dark) {
         Scaffold(
           modifier = Modifier.imePadding(),
           contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -252,7 +252,7 @@ class MainActivity : ComponentActivity() {
   override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); parseDeepLink(intent) }
   private fun parseDeepLink(intent: Intent?) {
     val uri = intent?.data ?: return
-    if (uri.scheme != "opencode-lagoon" || uri.host != "server") return
+    if ((uri.scheme != "lagoon" && uri.scheme != "opencode-lagoon") || uri.host != "server") return
     val parts = uri.pathSegments
     if (parts.size >= 3 && parts[1] == "session") deepLink = parts[0] to parts[2]
   }

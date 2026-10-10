@@ -14,7 +14,7 @@ enum class ThemeMode(val label: String) { SYSTEM("跟随系统"), LIGHT("浅色"
  * 明暗模式由应用偏好与系统配置共同决定。
  */
 @Composable
-fun OpenCodeMiuixTheme(
+fun LagoonMiuixTheme(
   dark: Boolean,
   content: @Composable () -> Unit
 ) {
@@ -31,3 +31,9 @@ fun OpenCodeMiuixTheme(
     content = content
   )
 }
+
+@Composable
+fun OpenCodeMiuixTheme(
+  dark: Boolean,
+  content: @Composable () -> Unit
+) = LagoonMiuixTheme(dark, content)

@@ -1,4 +1,4 @@
-name: 发布 OpenCode Lagoon Release
+name: 发布 Lagoon Release
 
 on:
   push:
@@ -51,7 +51,7 @@ jobs:
             echo "版本号包含不适合作为文件名或 URL 的字符：$version" >&2
             exit 1
           fi
-          name="OpenCode-Lagoon-${version}.apk"
+          name="Lagoon-${version}.apk"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "APK 发布产物名称：${name}"
 
@@ -63,27 +63,27 @@ jobs:
 
       - name: 注入签名
         env:
-          KEYSTORE_BASE64: ${{ secrets.OPENCODE_LAGOON_KEYSTORE_BASE64 }}
+          KEYSTORE_BASE64: ${{ secrets.LAGOON_KEYSTORE_BASE64 || secrets.OPENCODE_LAGOON_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
           test -n "$KEYSTORE_BASE64" || { echo "预发布和正式版都需要稳定签名" >&2; exit 1; }
           umask 077
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/opencode-release.jks"
-          echo "OPENCODE_LAGOON_KEYSTORE_FILE=$RUNNER_TEMP/opencode-release.jks" >> "$GITHUB_ENV"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/lagoon-release.jks"
+          echo "LAGOON_KEYSTORE_FILE=$RUNNER_TEMP/lagoon-release.jks" >> "$GITHUB_ENV"
 
       - name: 构建并验证 Android
         timeout-minutes: 25
         env:
-          OPENCODE_LAGOON_KEYSTORE_PASSWORD: ${{ secrets.OPENCODE_LAGOON_KEYSTORE_PASSWORD }}
-          OPENCODE_LAGOON_KEY_ALIAS: ${{ secrets.OPENCODE_LAGOON_KEY_ALIAS }}
-          OPENCODE_LAGOON_KEY_PASSWORD: ${{ secrets.OPENCODE_LAGOON_KEY_PASSWORD }}
-          OPENCODE_LAGOON_REQUIRE_RELEASE_SIGNING: 'true'
+          LAGOON_KEYSTORE_PASSWORD: ${{ secrets.LAGOON_KEYSTORE_PASSWORD || secrets.OPENCODE_LAGOON_KEYSTORE_PASSWORD }}
+          LAGOON_KEY_ALIAS: ${{ secrets.LAGOON_KEY_ALIAS || secrets.OPENCODE_LAGOON_KEY_ALIAS }}
+          LAGOON_KEY_PASSWORD: ${{ secrets.LAGOON_KEY_PASSWORD || secrets.OPENCODE_LAGOON_KEY_PASSWORD }}
+          LAGOON_REQUIRE_RELEASE_SIGNING: 'true'
         run: |
           set -euo pipefail
-          export OPENCODE_LAGOON_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
-          export OPENCODE_LAGOON_VERSION_NAME="${RELEASE_TAG#v}"
-          echo "OPENCODE_LAGOON_VERSION_CODE=$OPENCODE_LAGOON_VERSION_CODE" >> "$GITHUB_ENV"
-          echo "OPENCODE_LAGOON_VERSION_NAME=$OPENCODE_LAGOON_VERSION_NAME" >> "$GITHUB_ENV"
+          export LAGOON_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
+          export LAGOON_VERSION_NAME="${RELEASE_TAG#v}"
+          echo "LAGOON_VERSION_CODE=$LAGOON_VERSION_CODE" >> "$GITHUB_ENV"
+          echo "LAGOON_VERSION_NAME=$LAGOON_VERSION_NAME" >> "$GITHUB_ENV"
           ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleRelease
 
       - name: 定位构建产物
@@ -101,7 +101,7 @@ jobs:
       - name: 校验产物（非调试、固定证书）
         shell: bash
         env:
-          EXPECTED_CERT: ${{ secrets.OPENCODE_LAGOON_SIGNING_CERT_SHA256 }}
+          EXPECTED_CERT: ${{ secrets.LAGOON_SIGNING_CERT_SHA256 || secrets.OPENCODE_LAGOON_SIGNING_CERT_SHA256 }}
         run: |
           set -euo pipefail
           apk="${{ steps.apk.outputs.path }}"
@@ -169,12 +169,12 @@ jobs:
           apk_name="${{ steps.asset.outputs.name }}"
           apk_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
           {
-            echo "# OpenCode Lagoon ${RELEASE_TAG}"
+            echo "# Lagoon ${RELEASE_TAG}"
             echo
             if [[ "$RELEASE_TYPE" == "release" ]]; then
-              echo "这是 OpenCode Lagoon 正式版本。"
+              echo "这是 Lagoon 正式版本。"
             else
-              echo "这是 OpenCode Lagoon 预发布版本，用于验证本次更新。"
+              echo "这是 Lagoon 预发布版本，用于验证本次更新。"
             fi
             echo
             echo "## 本次更新"
@@ -212,10 +212,10 @@ jobs:
           # 而不是让 gh release create 因 Release 已存在而报错退出。
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG 已存在，按幂等更新处理"
-            gh release edit "$RELEASE_TAG" --title "OpenCode Lagoon ${RELEASE_TAG}" --notes-file release-notes.md "${flags[@]}"
+            gh release edit "$RELEASE_TAG" --title "Lagoon ${RELEASE_TAG}" --notes-file release-notes.md "${flags[@]}"
             gh release upload "$RELEASE_TAG" "$apk_asset" --clobber
           else
-            gh release create "$RELEASE_TAG" "$apk_asset" --title "OpenCode Lagoon ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag "${flags[@]}"
+            gh release create "$RELEASE_TAG" "$apk_asset" --title "Lagoon ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag "${flags[@]}"
           fi
           # 显式核对发布结果，缺失时以失败结束，不要出现「工作流成功但 Release 页面没有版本」。
           gh release view "$RELEASE_TAG" --json tagName,isPrerelease,isDraft,url,assets \
@@ -234,4 +234,4 @@ jobs:
 
       - name: 清理 runner 签名材料
         if: always()
-        run: rm -f "$RUNNER_TEMP/opencode-release.jks"
+        run: rm -f "$RUNNER_TEMP/lagoon-release.jks" "$RUNNER_TEMP/opencode-release.jks"

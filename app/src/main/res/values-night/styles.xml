@@ -1,6 +1,6 @@
 <resources>
   <!-- 深色启动主题：窗口底色与 MIUIX surface 画布一致（纯黑），与 Compose 首帧无缝衔接。 -->
-  <style name="Theme.OpenCodeLagoon" parent="android:style/Theme.Material.NoActionBar">
+  <style name="Theme.Lagoon" parent="android:style/Theme.Material.NoActionBar">
     <item name="android:navigationBarColor">@android:color/transparent</item>
     <item name="android:statusBarColor">@android:color/transparent</item>
     <item name="android:windowActionModeOverlay">true</item>

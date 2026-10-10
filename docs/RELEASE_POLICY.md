@@ -17,7 +17,7 @@
 ## 发布失败后的恢复
 
 - 发布步骤是幂等的：Release 已存在时更新说明并覆盖同名 APK 产物，因此对同一个 tag 重跑工作流是安全的。
-- 恢复方式：Actions → `发布 OpenCode Lagoon Release` → Run workflow，`tag` 填缺失的版本号（例如 `v0.1.0-rc.14`），`release_type` 按规范选择。
+- 恢复方式：Actions → `发布 Lagoon Release` → Run workflow，`tag` 填缺失的版本号（例如 `v0.1.0-rc.14`），`release_type` 按规范选择。
 - 工作流和 CI 都带 `timeout-minutes`（job 30 分钟、companion 步骤 10 分钟），卡住会以失败结束而不是占着 runner 几小时；失败时「发布结果提示」步骤会在日志里指出这个 tag 还没有 Release。
 
 ## 稳定签名与产物
@@ -33,7 +33,7 @@
 
 1. 完成功能和验证，更新 `docs/releases/<tag>.md`。
 2. 提交变更并推送分支。
-3. 创建并推送版本 tag，或手动运行 `发布 OpenCode Lagoon Release` 工作流。
+3. 创建并推送版本 tag，或手动运行 `发布 Lagoon Release` 工作流。
 4. 工作流重新执行 Android 单元测试和 Release APK 构建。
 5. 工作流把中文说明和 APK 一起发布到 GitHub Release。tag 触发默认是 pre-release；手动运行时只有选择 `release` 才会发布正式版。
 6. 第 4、5 步没跑到（失败、超时、被取消）时，这个版本只会出现在 Tags 页面；按上面「发布失败后的恢复」重跑同一个 tag 即可补上 Release。
@@ -42,8 +42,8 @@
 
 - GitHub Release 的正文由工作流自动组装，顺序为：版本标题、发布类型说明、推送变体、`## 本次更新`、`## 下载`、`## 自动验证`。
 - `## 本次更新` 的正文取自 `docs/releases/<tag>.md`（去掉文件开头的 `## 本次更新` 标题）。
-- `## 下载` 由工作流生成，包含 Android 安装包的直链：`https://github.com/<owner>/<repo>/releases/download/<tag>/OpenCode-Lagoon-<version>.apk`。
-- Android 安装包的上传文件名固定为 `OpenCode-Lagoon-<version>.apk`（`<version>` 为去掉 `v` 前缀的 tag，例如 `v0.1.0-rc.5` → `OpenCode-Lagoon-0.1.0-rc.5.apk`），不再是固定的 `app-release.apk`。Gradle 仍按默认路径产出 `app-release.apk`，工作流在校验签名后复制并重命名后上传。
+- `## 下载` 由工作流生成，包含 Android 安装包的直链：`https://github.com/<owner>/<repo>/releases/download/<tag>/Lagoon-<version>.apk`。
+- Android 安装包的上传文件名固定为 `Lagoon-<version>.apk`（`<version>` 为去掉 `v` 前缀的 tag，例如 `v0.1.0-rc.5` → `Lagoon-0.1.0-rc.5.apk`），不再是固定的 `app-release.apk`。Gradle 仍按默认路径产出 `app-release.apk`，工作流在校验签名后复制并重命名后上传。
 - 因为直链里写死了文件名和 tag，改名或改版本号会破坏旧链接；如需变更命名规则，应作为独立迁移处理。
 
 ## 说明模板

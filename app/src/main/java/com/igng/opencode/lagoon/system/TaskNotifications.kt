@@ -52,14 +52,14 @@ class TaskNotifications(private val context: Context) {
   }
   private fun allowed(): Boolean = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
   private fun open(serverId: String, sessionId: String): PendingIntent {
-    val uri = Uri.parse("opencode-lagoon://server/${Uri.encode(serverId)}/session/${Uri.encode(sessionId)}")
+    val uri = Uri.parse("lagoon://server/${Uri.encode(serverId)}/session/${Uri.encode(sessionId)}")
     val intent = Intent(Intent.ACTION_VIEW, uri, context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     return PendingIntent.getActivity(context, notificationId(serverId, sessionId), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
   }
   private fun action(name: String, profile: ServerProfile, session: Session, permission: PermissionRequest? = null): PendingIntent {
     val intent = Intent(context, NotificationActionReceiver::class.java).apply {
       this.action = name
-      data = Uri.parse("opencode-lagoon://action/${Uri.encode(profile.id)}/${Uri.encode(session.id)}/$name")
+      data = Uri.parse("lagoon://action/${Uri.encode(profile.id)}/${Uri.encode(session.id)}/$name")
       putExtra("serverId", profile.id)
       putExtra("profileUrl", profile.url)
       putExtra("sessionId", session.id)
@@ -194,7 +194,7 @@ class TaskNotifications(private val context: Context) {
   private fun summaryDismissed(serverId: String, stage: LiveUpdateStage): PendingIntent {
     val intent = Intent(context, NotificationActionReceiver::class.java).apply {
       action = NotificationActionReceiver.ACTION_SUMMARY_DISMISSED
-      data = Uri.parse("opencode-lagoon://summary/${Uri.encode(serverId)}/${stage.name}")
+      data = Uri.parse("lagoon://summary/${Uri.encode(serverId)}/${stage.name}")
       putExtra("serverId", serverId)
       putExtra("stage", stage.name)
     }

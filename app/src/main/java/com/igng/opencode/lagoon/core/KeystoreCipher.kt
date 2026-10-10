@@ -14,10 +14,12 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Extracted from ServerStore and OfflineCache, which had byte-identical copies of this routine.
  */
-internal class KeystoreCipher(private val alias: String) {
+internal class KeystoreCipher(private val alias: String, private val legacyAlias: String? = null) {
   private val key: SecretKey by lazy {
     val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    (store.getKey(alias, null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+    val existing = (store.getKey(alias, null) as? SecretKey)
+      ?: legacyAlias?.let { store.getKey(it, null) as? SecretKey }
+    existing ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
       init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
         .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
       generateKey()
