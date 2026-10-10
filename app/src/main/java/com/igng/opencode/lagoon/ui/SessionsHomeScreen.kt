@@ -88,7 +88,7 @@ internal fun HomeScreen(
       if (!searching) ServerChips(state, onSelectServer, onEditServer)
       Box(Modifier.weight(1f).fillMaxWidth()) {
         SessionList(state, controller, grouping, query.trim(), onOpen, onNewSession, onEditServer,
-          onRename = { renaming = it }, onDelete = { deleting = it }, searchActive = searching)
+          onRename = { renaming = it }, onDelete = { deleting = it })
       }
     }
     if (!searching) FloatingActionButton(onClick = onNewSession, modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 24.dp, bottom = 24.dp)) {
@@ -200,7 +200,7 @@ private fun ServerChips(state: LagoonState, onSelect: (ServerProfile) -> Unit, o
 private fun SessionList(
   state: LagoonState, controller: LagoonController, grouping: HomeGrouping, query: String,
   onOpen: (String) -> Unit, onNewSession: () -> Unit, onEditServer: (ServerProfile?) -> Unit,
-  onRename: (Session) -> Unit, onDelete: (Session) -> Unit, searchActive: Boolean
+  onRename: (Session) -> Unit, onDelete: (Session) -> Unit
 ) {
   var refreshing by remember { mutableStateOf(false) }
   val refreshScope = rememberCoroutineScope()
@@ -223,9 +223,6 @@ private fun SessionList(
         Text(when { state.cached -> "离线缓存 · 下拉重试"; state.degraded -> "部分数据待同步 · 下拉重试"; else -> "尚未连接 · 点按重试" },
           style = MiuixTheme.textStyles.footnote1, color = MiuixColorTokens.Warning,
           modifier = Modifier.fillMaxWidth().clickable(role = Role.Button) { controller.reload() }.padding(horizontal = 24.dp, vertical = 8.dp))
-      }
-      if (!searchActive && !state.summary.isEmpty) item(key = "task-overview") {
-        TaskOverviewCard(state, onOpen)
       }
       sections.forEach { section ->
         // While searching every match stays visible, whatever was collapsed.
@@ -258,83 +255,6 @@ private fun SessionList(
         Text("缓存仅保留最近会话", modifier = Modifier.padding(horizontal = 24.dp), color = muted, style = MiuixTheme.textStyles.footnote2)
       }
     }
-  }
-}
-
-/** In-app fallback for systems without Live Updates: a glanceable server-wide task summary. */
-@Composable
-private fun TaskOverviewCard(state: LagoonState, onOpen: (String) -> Unit) {
-  val summary = state.summary
-  val syncHint = when {
-    !state.connected && state.cached -> "离线缓存 · 状态可能过期"
-    !state.connected -> "未连接 · 仅显示已知状态"
-    state.degraded -> "部分数据待同步 · 状态可能延迟"
-    !state.streamConnected -> "实时同步恢复中 · 状态可能延迟"
-    state.cached -> "部分内容来自本机缓存"
-    else -> null
-  }
-
-  Card(
-    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-    insideMargin = PaddingValues(14.dp),
-    colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-  ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      Column {
-        Text("任务概览", style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.SemiBold))
-        Text("当前服务器 · 全项目", style = MiuixTheme.textStyles.footnote2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-        syncHint?.let { Text(it, style = MiuixTheme.textStyles.footnote2, color = MiuixColorTokens.Warning) }
-      }
-
-      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        TaskSummaryMetric("运行中", summary.running, MiuixColorTokens.Primary, Modifier.weight(1f))
-        TaskSummaryMetric("未读完成", summary.completed, MiuixColorTokens.Success, Modifier.weight(1f))
-        TaskSummaryMetric("待回复", summary.waiting, MiuixColorTokens.Warning, Modifier.weight(1f))
-        TaskSummaryMetric("失败", summary.failed, MiuixColorTokens.Error, Modifier.weight(1f))
-      }
-
-      summary.items.forEach { item ->
-        val detail = item.detail.takeIf {
-          it.isNotBlank() && !(item.phase in TaskState.RUNNING_PHASES && it == TaskState.RUNNING_DETAIL)
-        }
-        Column(
-          Modifier.fillMaxWidth()
-            .clip(miuixSquircleShape(12.dp))
-            .background(MiuixTheme.colorScheme.surfaceContainer)
-            .clickable(role = Role.Button, onClick = { onOpen(item.sessionId) })
-            .padding(horizontal = 10.dp, vertical = 9.dp)
-        ) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            MiuixStatePill(item.phase)
-            Spacer(Modifier.width(8.dp))
-            Text(item.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-              style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
-            Icon(MiuixIcons.ChevronForward, "打开任务", Modifier.size(18.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          }
-          detail?.let {
-            Text(it, Modifier.padding(start = 4.dp, top = 5.dp), maxLines = 2, overflow = TextOverflow.Ellipsis,
-              style = MiuixTheme.textStyles.footnote2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          }
-        }
-      }
-
-      val total = summary.running + summary.completed + summary.waiting + summary.failed
-      if (total > summary.items.size) {
-        Text("另有 ${total - summary.items.size} 项任务", style = MiuixTheme.textStyles.footnote2,
-          color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-      }
-    }
-  }
-}
-
-@Composable
-private fun TaskSummaryMetric(label: String, count: Int, color: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
-  Column(
-    modifier.clip(miuixSquircleShape(10.dp)).background(color.copy(alpha = 0.12f)).padding(horizontal = 7.dp, vertical = 7.dp),
-    verticalArrangement = Arrangement.spacedBy(2.dp)
-  ) {
-    Text(count.toString(), style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.SemiBold, color = color), maxLines = 1)
-    Text(label, style = MiuixTheme.textStyles.footnote2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, maxLines = 1, overflow = TextOverflow.Ellipsis)
   }
 }
 
