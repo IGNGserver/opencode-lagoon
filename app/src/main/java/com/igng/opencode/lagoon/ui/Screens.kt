@@ -423,7 +423,7 @@ fun SettingsScreen(
       Card(Modifier.fillMaxWidth()) {
         SuperArrow(
           title = "通知权限",
-          summary = if (notificationsEnabled) "已开启；待处理与任务结果会通知，点按打开系统通知设置" else "未开启，点按授予通知权限",
+          summary = if (notificationsEnabled) "已开启；待处理与任务结果会通知，点按打开系统通知设置" else "已关闭，后台不会显示系统通知；打开首页仍可查看任务概览，点按开启",
           onClick = onNotifications
         )
         val item = liveUpdate
