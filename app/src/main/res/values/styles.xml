@@ -1,6 +1,6 @@
 <resources>
   <!-- 浅色启动主题：窗口底色与 MIUIX surface 画布一致（#F7F7F7），避免深色基主题在浅色模式下露出深灰。 -->
-  <style name="Theme.OpenCodeLagoon" parent="android:style/Theme.Material.Light.NoActionBar">
+  <style name="Theme.Lagoon" parent="android:style/Theme.Material.Light.NoActionBar">
     <item name="android:navigationBarColor">@android:color/transparent</item>
     <item name="android:statusBarColor">@android:color/transparent</item>
     <item name="android:windowActionModeOverlay">true</item>

@@ -1,10 +1,10 @@
-# OpenCode Lagoon
+# Lagoon
 
-原生 Android OpenCode 控制端。Kotlin + Jetpack Compose 界面采用小米 HyperOS / MIUIX 设计规范，引入连续曲率 Squircle、科技蓝语义调色板。App 直接访问用户自己的 OpenCode Server，无需第三方中转服务。
+面向多种 coding agent harness 的原生 Android 移动控制端。Kotlin + Jetpack Compose 界面采用小米 HyperOS / MIUIX 设计规范，引入连续曲率 Squircle、科技蓝语义调色板。App 首发支持用户自己的 OpenCode 2.x Server，直连端点，无需第三方中转服务；未来将持续扩展适配更多 harness。
 
 ## 功能
 
-- 仅支持 OpenCode 2.x 服务端（`/api/*` 接口，以 `/api/info` 识别版本；1.x 已不再支持）；多服务器连接、Basic Auth/官方 pair 链接、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
+- 首发支持 OpenCode 2.x 服务端（`/api/*` 接口，以 `/api/info` 识别版本；1.x 已不再支持）；多服务器连接、Basic Auth/官方 pair 链接、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
 - 项目与会话、异步任务（运行中可继续发送以引导当前轮次）、Agent/Model、斜杠命令（走服务端 `/command`）、文本/Reasoning/Tool 消息、停止与权限/表单处理；时间线按官方客户端规则投影，系统指令、合成输入、技能等给模型看的记录只显示一行通知
 - 子会话、改动、文件浏览与搜索、重命名、删除；随版本变化的接口（重命名、恢复撤销、改动、已读同步）按实例 `/openapi.json` 选择
 - 全服务器任务总览：实时显示运行中、未读完成、待回复与失败计数，并可从首页直接打开最需关注的任务；Android 16+ 使用系统实时更新（Live Updates），Android 15 及以下使用普通任务通知与应用内首页概览，详见 `docs/LIVE_UPDATES.md`
@@ -18,7 +18,7 @@
 ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUnitTest
 ```
 
-本仓库把 Gradle build 输出放在 `/tmp/opencode-lagoon-gradle/`，每个 checkout 使用独立路径 `/tmp/opencode-lagoon-gradle/<checkout-hash>/app/outputs/apk/debug/app-debug.apk`。
+本仓库把 Gradle build 输出放在 `/tmp/lagoon-gradle/`，每个 checkout 使用独立路径 `/tmp/lagoon-gradle/<checkout-hash>/app/outputs/apk/debug/app-debug.apk`。
 
 在 App 中添加可访问的 OpenCode Server URL。服务端需启用 Basic Auth；也可以直接粘贴 `opencode pair` 输出的官方链接，App 会访问一次链接、保存返回的会话 Cookie，再用该 Cookie 连接 API。建议通过 HTTPS 或可信 VPN 访问。使用局域网 HTTP 时，必须在该服务器资料中明确开启明文连接，授权会随资料保存。
 
@@ -30,14 +30,14 @@ ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUni
 
 ## 更名与迁移
 
-项目由 “OpenCode Mobile” 更名为 “OpenCode Lagoon”（与 GitHub 仓库名 `IGNGserver/opencode-lagoon` 对齐）。以下标识随之改变，跨版本部署需要按此迁移：
-
-- 显示名与工程名：应用显示名、`rootProject.name`、发布工作流名与安装包文件名（`OpenCode-Lagoon-<version>.apk`）、Gradle 输出目录 `/tmp/opencode-lagoon-gradle/`。
-- 应用标识：`applicationId` 与 Kotlin 包改为 `com.igng.opencode.lagoon`，与旧的 `com.igng.opencode.mobile` 在 Android 上是两个不同应用。存量安装不会覆盖升级，需要卸载旧包再装新包；`KeystoreCipher` 别名改为 `opencode-lagoon-*`，旧包保存的密码、Cookie 与离线缓存本来就不跨 UID，新包一律重新录入。
-- 深链接：scheme 改为 `opencode-lagoon://`。旧版通知与旧 scheme 链接不会被新包接住，升级后由新包重新发出通知。
-- CI：仓库 Secrets 由 `OPENCODE_MOBILE_*` 改名为 `OPENCODE_LAGOON_*`，keystore 别名与主文件名改名但证书不变（见 [`docs/ANDROID_SIGNING.md`](docs/ANDROID_SIGNING.md)）。旧的 `OPENCODE_MOBILE_*` Secrets 已随更名进入 `main` 删除；若需要回到更名前的发布工作流，只能按 `docs/ANDROID_SIGNING.md` 从本机 keystore 与口令文件重新写入。
+项目统一更名为 **“Lagoon”**（应用显示名为 Lagoon，定位从 OpenCode 专用客户端升级为面向多 Harness 的通用移动控制端）。
+- 显示名与工程名：应用显示名为 `Lagoon`，`rootProject.name = "Lagoon"`，发布工作流名为 `发布 Lagoon Release`，安装包产物名为 `Lagoon-<version>.apk`，Gradle 临时输出目录调整为 `/tmp/lagoon-gradle/`。
+- 应用标识与升级：`applicationId` 保持为 `com.igng.opencode.lagoon` 并使用固定生产签名，与既有安装版本签名完全一致，支持直接平滑覆盖安装升级。
+- 深链接：支持 `lagoon://` 路由（同时兼容接听 `opencode-lagoon://` 历史深链接）。
+- 安全存储：`KeystoreCipher` 别名升级为 `lagoon-*`，并自动兼容读取旧有的 `opencode-lagoon-*` 凭据。
+- CI / CD：发布工作流优先读取 `LAGOON_*` Secrets，并向下兼容读取 `OPENCODE_LAGOON_*` Secrets。
 - `docs/releases/` 下的历史发布说明保持原样，它们记录的是当时实际发布的名称。
 
 ## 验收边界
 
-Android 构建与单元测试只能证明代码可编译和有限的 API/状态逻辑。真实 OpenCode 版本、SSE 断线恢复、Android 16 Live Updates 提升都需要在目标服务器和设备上验收。Android 15+ 的 dataSync 前台服务有运行时长限制。
+Android 构建与单元测试只能证明代码可编译和有限的 API/状态逻辑。真实服务端版本、SSE 断线恢复、Android 16 Live Updates 提升都需要在目标服务器和设备上验收。Android 15+ 的 dataSync 前台服务有运行时长限制。

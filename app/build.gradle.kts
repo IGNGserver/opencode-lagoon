@@ -6,13 +6,15 @@ plugins {
 
 // Local release builds may use the debug key for verification. Every publishing build sets
 // REQUIRE_RELEASE_SIGNING and must use the protected keystore and fixed certificate.
-val releaseKeystorePath: String? = System.getenv("OPENCODE_LAGOON_KEYSTORE_FILE")
-val releaseKeystorePassword: String? = System.getenv("OPENCODE_LAGOON_KEYSTORE_PASSWORD")
-val releaseKeyAlias: String? = System.getenv("OPENCODE_LAGOON_KEY_ALIAS")
-val releaseKeyPassword: String? = System.getenv("OPENCODE_LAGOON_KEY_PASSWORD")
+val releaseKeystorePath: String? = System.getenv("LAGOON_KEYSTORE_FILE") ?: System.getenv("OPENCODE_LAGOON_KEYSTORE_FILE")
+val releaseKeystorePassword: String? = System.getenv("LAGOON_KEYSTORE_PASSWORD") ?: System.getenv("OPENCODE_LAGOON_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = System.getenv("LAGOON_KEY_ALIAS") ?: System.getenv("OPENCODE_LAGOON_KEY_ALIAS")
+val releaseKeyPassword: String? = System.getenv("LAGOON_KEY_PASSWORD") ?: System.getenv("OPENCODE_LAGOON_KEY_PASSWORD")
 val hasReleaseSigning = listOf(releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }
 
-if (System.getenv("OPENCODE_LAGOON_REQUIRE_RELEASE_SIGNING") == "true") {
+val requireReleaseSigning = System.getenv("LAGOON_REQUIRE_RELEASE_SIGNING") == "true" ||
+  System.getenv("OPENCODE_LAGOON_REQUIRE_RELEASE_SIGNING") == "true"
+if (requireReleaseSigning) {
   require(hasReleaseSigning && file(releaseKeystorePath!!).isFile) { "发布构建必须提供完整的稳定签名输入" }
 }
 android {
@@ -22,8 +24,8 @@ android {
     applicationId = "com.igng.opencode.lagoon"
     minSdk = 26
     targetSdk = 36
-    versionCode = System.getenv("OPENCODE_LAGOON_VERSION_CODE")?.toInt() ?: 3
-    versionName = System.getenv("OPENCODE_LAGOON_VERSION_NAME") ?: "0.1.0"
+    versionCode = (System.getenv("LAGOON_VERSION_CODE") ?: System.getenv("OPENCODE_LAGOON_VERSION_CODE"))?.toInt() ?: 3
+    versionName = System.getenv("LAGOON_VERSION_NAME") ?: System.getenv("OPENCODE_LAGOON_VERSION_NAME") ?: "0.1.0"
   }
   if (hasReleaseSigning) {
     signingConfigs {

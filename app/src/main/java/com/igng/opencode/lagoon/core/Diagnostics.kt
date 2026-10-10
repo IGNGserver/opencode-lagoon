@@ -11,7 +11,7 @@ import android.util.Log
  * field failures diagnosable via `adb logcat`.
  */
 internal object Diagnostics {
-  private const val TAG = "OpenCodeLagoon"
+  private const val TAG = "Lagoon"
 
   fun warn(area: String, message: String, error: Throwable? = null) = Log.w(TAG, "[$area] $message", error)
 }

@@ -10,7 +10,8 @@ class ServerStore internal constructor(private val preferences: SharedPreference
   private val encryptValue: (String) -> String, private val decryptValue: (String) -> String) {
   constructor(context: Context) : this(context.getSharedPreferences("servers", Context.MODE_PRIVATE),
     context.getSharedPreferences("secrets", Context.MODE_PRIVATE),
-    KeystoreCipher("opencode-lagoon-server-passwords")::encrypt, KeystoreCipher("opencode-lagoon-server-passwords")::decrypt)
+    KeystoreCipher("lagoon-server-passwords", legacyAlias = "opencode-lagoon-server-passwords")::encrypt,
+    KeystoreCipher("lagoon-server-passwords", legacyAlias = "opencode-lagoon-server-passwords")::decrypt)
 
   fun profiles(): List<ServerProfile> = try {
     JSONArray(preferences.getString("profiles", "[]")).objects().map {

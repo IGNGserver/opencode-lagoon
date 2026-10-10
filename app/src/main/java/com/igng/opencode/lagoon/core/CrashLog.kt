@@ -45,7 +45,7 @@ object CrashLog {
     val trace = StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
     return buildString {
       append("时间：").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.ROOT).format(Date(now))).append('\n')
-      append("版本：OpenCode Lagoon ").append(version).append('\n')
+      append("版本：Lagoon ").append(version).append('\n')
       append("设备：").append(device).append('\n')
       append("线程：").append(thread).append("\n\n")
       append(trace.take(MAX_CHARS))

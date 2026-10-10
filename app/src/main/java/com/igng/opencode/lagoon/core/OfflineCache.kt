@@ -17,7 +17,8 @@ class OfflineCache internal constructor(
   private val writes: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
   constructor(context: Context) : this(context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE),
-    KeystoreCipher("opencode-lagoon-offline-cache")::encrypt, KeystoreCipher("opencode-lagoon-offline-cache")::decrypt)
+    KeystoreCipher("lagoon-offline-cache", legacyAlias = "opencode-lagoon-offline-cache")::encrypt,
+    KeystoreCipher("lagoon-offline-cache", legacyAlias = "opencode-lagoon-offline-cache")::decrypt)
   private val pendingLock = Any()
   private val pending = LinkedHashMap<String, () -> String>()
   // Monotonic sequence per key. A write is committed only while it is still the newest intent for

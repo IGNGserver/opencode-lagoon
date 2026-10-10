@@ -8,5 +8,5 @@ plugins {
 // machine cannot overwrite each other's APK and test results.
 val checkoutKey = Integer.toHexString(rootDir.absolutePath.hashCode())
 allprojects {
-  layout.buildDirectory.set(file("/tmp/opencode-lagoon-gradle/$checkoutKey/${project.name}"))
+  layout.buildDirectory.set(file("/tmp/lagoon-gradle/$checkoutKey/${project.name}"))
 }
