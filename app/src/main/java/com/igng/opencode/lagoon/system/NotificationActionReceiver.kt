@@ -3,6 +3,7 @@ package com.igng.opencode.lagoon.system
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.igng.opencode.lagoon.core.ApiException
 import com.igng.opencode.lagoon.core.Diagnostics
 import com.igng.opencode.lagoon.core.LagoonController
 import com.igng.opencode.lagoon.core.LiveUpdateStage
@@ -75,8 +76,14 @@ class NotificationActionReceiver : BroadcastReceiver() {
         "reject", "once" -> {
           val requestId = permissionId ?: error("缺少权限 ID")
           // Re-read the request from its session so a stale notification can never answer a different one.
-          val pendingRequest = client.sessionPermissions(Session(sessionId, permissionDirectory, "", 0)).firstOrNull { it.id == requestId } ?: return false
-          client.replyPermission(pendingRequest, action)
+          val pendingRequest = client.sessionPermissions(Session(sessionId, permissionDirectory, "", 0)).firstOrNull { it.id == requestId }
+          if (pendingRequest != null) {
+            try {
+              client.replyPermission(pendingRequest, action)
+            } catch (e: ApiException) {
+              if (e.status != 404) throw e
+            }
+          }
         }
         else -> return false
       }
